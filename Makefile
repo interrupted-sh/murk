@@ -5,7 +5,7 @@ SHELL := /bin/bash
 MURK := $(CURDIR)/target/release/murk
 MUSL_TARGET := x86_64-unknown-linux-musl
 
-.PHONY: build test test-demos test-hero test-team test-offboard test-eve test-recovery test-github test-direnv test-mallory test-ssh test-vhs docs check-guides hooks
+.PHONY: build test release-check test-demos test-hero test-team test-offboard test-eve test-recovery test-github test-direnv test-mallory test-ssh test-vhs docs check-guides hooks
 
 build:
 	cargo build --release
@@ -24,6 +24,16 @@ check-guides:
 
 test:
 	cargo nextest run
+
+# Build the workspace (the CLI and the Node binding) with all targets and
+# features, and every fuzz target in fuzz/, then run every test before opening
+# a release PR. The fuzz crate is excluded from the workspace, so build it on
+# its own. rust-toolchain.toml outranks +nightly, so RUSTUP_TOOLCHAIN selects
+# nightly (as in fuzz.yaml).
+release-check:
+	cargo build --workspace --all-targets --all-features
+	cd fuzz && RUSTUP_TOOLCHAIN=nightly cargo fuzz build
+	cargo nextest run --all-features --no-fail-fast
 
 test-demos: build test-hero test-team test-offboard test-eve test-recovery test-github test-direnv test-mallory test-ssh
 	@echo "\nall demo tests passed"

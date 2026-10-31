@@ -188,7 +188,10 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # One OS failing must not cancel the others: a release needs the full
+    # failure list from every OS, Windows especially.
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
