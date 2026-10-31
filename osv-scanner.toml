@@ -17,3 +17,13 @@ reason = """
 basic-toml is unmaintained, with no replacement release. Not shipped: it runs
 only at compile time inside age's i18n-embed proc macros, which parse age's own
 bundled i18n.toml and never murk input. Drop once age moves off i18n-config."""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+reason = """
+crypto-bigint 0.5.5 timing variability; the fix (>= 0.7.6) needs
+elliptic-curve/p256 0.14 and age 0.12.1 (latest) pins 0.13. Not reached: age
+uses P-256 only for native age1tag/age1tagpq recipients, which murk never
+parses (age1tag keys go to an external plugin). Drop once an age release moves
+to p256/elliptic-curve 0.14 and the lockfiles resolve crypto-bigint to 0.7.6
+or later."""

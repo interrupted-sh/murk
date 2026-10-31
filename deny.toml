@@ -15,6 +15,17 @@ ignore = [
     # i18n-embed-impl proc macros, which read age's own bundled i18n.toml, so
     # it never parses murk input. Drop this once age moves off i18n-config.
     "RUSTSEC-2026-0374",
+    # crypto-bigint 0.5.5 timing variability in operations meant to be
+    # constant-time; the fix (>= 0.7.6) needs elliptic-curve/p256 0.14, and
+    # age 0.12.1 (latest) pins 0.13. Not reached: age uses P-256 only for its
+    # native age1tag/age1tagpq recipients (encrypt side; age has no native tag
+    # identity). murk parses recipients only as x25519, ssh or plugin, so an
+    # age1tag key goes to an external age-plugin-tag process, and identities
+    # only as x25519, ssh or plugin. Drop once an age release moves to
+    # p256/elliptic-curve 0.14 and the lockfiles resolve crypto-bigint to 0.7.6
+    # or later (0.7.5 is still affected). Upstream fix: rage main already uses
+    # p256/hpke 0.14 (https://github.com/str4d/rage/pull/649).
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]
