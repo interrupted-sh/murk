@@ -17,5 +17,6 @@ Same dependency and reasoning as the root workspace (../deny.toml)."""
 id = "RUSTSEC-2026-0387"
 reason = """
 crypto-bigint 0.5.5 timing variability; only age's native P-256 tag recipients
-use it, which murk never parses. Same dependency and reasoning as the root
-workspace (../deny.toml)."""
+use it, which murk never parses. Drop once an age release moves to
+p256/elliptic-curve 0.14 and the lockfiles resolve crypto-bigint to 0.7.6 or
+later. Same dependency and reasoning as the root workspace (../deny.toml)."""

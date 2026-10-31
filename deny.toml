@@ -21,9 +21,10 @@ ignore = [
     # native age1tag/age1tagpq recipients (encrypt side; age has no native tag
     # identity). murk parses recipients only as x25519, ssh or plugin, so an
     # age1tag key goes to an external age-plugin-tag process, and identities
-    # only as x25519, ssh or plugin. Drop once age moves to p256/elliptic-curve
-    # 0.14, which brings crypto-bigint >= 0.7.6. Upstream fix: rage main already
-    # uses p256/hpke 0.14 (https://github.com/str4d/rage/pull/649).
+    # only as x25519, ssh or plugin. Drop once an age release moves to
+    # p256/elliptic-curve 0.14 and the lockfiles resolve crypto-bigint to 0.7.6
+    # or later (0.7.5 is still affected). Upstream fix: rage main already uses
+    # p256/hpke 0.14 (https://github.com/str4d/rage/pull/649).
     "RUSTSEC-2026-0387",
 ]
 
