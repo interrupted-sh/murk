@@ -1,28 +1,58 @@
 version: 2
 updates:
+  # The root workspace and the fuzz targets, which are their own workspace with
+  # their own lockfile. The fuzz crate builds murk-cli by path, so a crate bump
+  # that touches only one lockfile leaves the other stale. group-by makes each
+  # crate one PR that updates it in both directories. The group sets no
+  # update-types on purpose: in a group-by group, Dependabot drops an update the
+  # group's update-types reject instead of opening its own PR, so a major bump
+  # would never arrive. Majors are still one PR per crate, and auto-merge holds
+  # them because they are not patch updates.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
     ignore:
       # constant_time_eq raised its own rust-version to 1.95 in 0.4.3 (yanked)
-      # and kept it there in 0.5, while murk still builds on 1.89 — cargo refuses
-      # that pairing outright. Neither release changes behaviour over 0.4.2;
-      # upstream bumped only to gate powerpc inline asm. Drop this once our own
-      # rust-version reaches 1.95.
+      # and kept it there in 0.5, while murk still builds on 1.89, and cargo
+      # refuses that pairing outright. Neither release changes behaviour over
+      # 0.4.2; upstream bumped only to gate powerpc inline asm. Drop this once
+      # our own rust-version reaches 1.95.
       - dependency-name: constant_time_eq
         versions: [">= 0.4.3"]
+    groups:
+      cargo:
+        group-by: dependency-name
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    # codeql-action ships init/analyze as separate "dependencies"; bumping only
-    # one leaves a version skew that breaks the CodeQL run. Group them so every
-    # codeql-action step moves together in a single PR.
     groups:
+      # codeql-action ships init/analyze as separate "dependencies"; bumping only
+      # one leaves a version skew that breaks the CodeQL run. Group them so every
+      # codeql-action step moves together in a single PR, majors included.
       codeql-action:
         patterns:
           - "github/codeql-action*"
+      # Every other action's bumps go in two weekly PRs: one for patches and
+      # one for minors. Auto-merge merges a PR only if every update in it is a
+      # patch, so a single group would let one minor bump hold the week's
+      # patches; split, the patch PR merges on its own and only the minor PR
+      # waits for review. Majors stay one PR each. A group without patterns
+      # skips Dependabot's most-specific-group check, so the exclusion is what
+      # keeps codeql-action out of these groups, not the order.
+      actions-patch:
+        exclude-patterns:
+          - "github/codeql-action*"
+        update-types:
+          - patch
+      actions-minor:
+        exclude-patterns:
+          - "github/codeql-action*"
+        update-types:
+          - minor
   # The Rust toolchain CI uses (rust-toolchain.toml). Each bump arrives as its
   # own PR, so new compiler warnings and clippy lints fail that PR only. The
   # channel is a full version: a patch release (1.99.0 -> 1.99.1) is a
@@ -32,18 +62,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  # The fuzz targets are their own workspace with their own lockfile, so the
-  # root cargo entry never sees them.
-  - package-ecosystem: cargo
-    directory: /fuzz
-    schedule:
-      interval: weekly
-    ignore:
-      # The fuzz crate builds murk-cli by path, so a bump here also rewrites the
-      # root manifest — and leaves the root lockfile untouched, which only the
-      # MSRV job notices. Same reasoning as the root cargo entry above.
-      - dependency-name: constant_time_eq
-        versions: [">= 0.4.3"]
   # Hash-pinned zig toolchain used by the node musl cross-compile job.
   - package-ecosystem: pip
     directory: /.github/requirements
