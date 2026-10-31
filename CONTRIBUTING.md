@@ -59,7 +59,7 @@ murk has one maintainer, [@iicky](https://github.com/iicky). The maintainer make
 
 - Decides the project's scope and direction, including the [roadmap](ROADMAP.md).
 - Triages issues.
-- Reviews and merges pull requests. [`.github/CODEOWNERS`](.github/CODEOWNERS) assigns every file to the maintainer. Two kinds of automated dependency PR merge without a manual review once CI passes: Dependabot patch updates, and the lockfile-only advisory fixes described in [Security advisories](#security-advisories). The maintainer sets those rules.
+- Reviews and merges pull requests. [`.github/CODEOWNERS`](.github/CODEOWNERS) assigns every file to the maintainer. Two kinds of automated dependency PR merge without a manual review once CI passes: Dependabot updates in which every dependency gets a patch release, and the lockfile-only advisory fixes described in [Security advisories](#security-advisories). The maintainer sets those rules.
 - Cuts releases (see [Releases](#releases)).
 - Handles private vulnerability reports as described in [SECURITY.md](SECURITY.md), and ships the fixes.
 - Enforces the [Code of Conduct](CODE_OF_CONDUCT.md).

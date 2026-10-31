@@ -9,9 +9,12 @@
 //
 //   .github/workflows/dependabot-automerge.yaml (Dependabot PRs)
 //     node scripts/automerge-policy.cjs
-//     Reads UPDATE_TYPE and DEPENDENCY_NAMES (from dependabot/fetch-metadata)
-//     and appends automerge=true|false to $GITHUB_OUTPUT. Only semver-patch
-//     updates qualify.
+//     Reads UPDATED_DEPENDENCIES (dependabot/fetch-metadata's
+//     updated-dependencies-json) and appends automerge=true|false to
+//     $GITHUB_OUTPUT. Only an update in which every dependency is a
+//     semver-patch bump qualifies. fetch-metadata's own update-type output is
+//     not enough for a grouped PR: it reports the highest known type and skips
+//     a dependency whose type it could not tell.
 //
 //   .github/workflows/advisories.yaml (lockfile-only RustSec fixes)
 //     node scripts/automerge-policy.cjs --lockfiles OLD NEW [OLD NEW]...
@@ -54,23 +57,36 @@ function needsReview(name) {
 // held(names) -> the names that need a human review.
 const held = (names) => names.filter(needsReview);
 
-// decide(updateType, dependencyNames) -> { automerge, reason } for Dependabot.
-function decide(updateType, dependencyNames) {
-  if (updateType !== "version-update:semver-patch") {
-    return { automerge: false, reason: `${updateType || "unknown update type"} needs review` };
+// decide(dependencies) -> { automerge, reason } for Dependabot, where
+// dependencies is fetch-metadata's list of { dependencyName, updateType }.
+// A dependency updated in several directories appears once per directory.
+function decide(dependencies) {
+  if (!Array.isArray(dependencies) || dependencies.length === 0) {
+    return { automerge: false, reason: "no dependencies reported; needs review" };
   }
-  const names = dependencyNames
-    .split(",")
-    .map((n) => n.trim())
-    .filter(Boolean);
-  if (names.length === 0) {
-    return { automerge: false, reason: "no dependency names reported; needs review" };
+  const notPatch = dependencies.filter((d) => d.updateType !== "version-update:semver-patch");
+  if (notPatch.length) {
+    const list = notPatch.map((d) => `${d.dependencyName || "unnamed"} (${d.updateType || "unknown update type"})`);
+    return { automerge: false, reason: `not a patch update, needs review: ${list.join(", ")}` };
+  }
+  const names = [...new Set(dependencies.map((d) => (d.dependencyName || "").trim()))];
+  if (names.includes("")) {
+    return { automerge: false, reason: "unnamed dependency; needs review" };
   }
   const h = held(names);
   if (h.length) {
     return { automerge: false, reason: `security-relevant dependency needs review: ${h.join(", ")}` };
   }
   return { automerge: true, reason: `patch update of ${names.join(", ")}` };
+}
+
+// parseDependencies(json) -> the list decide() takes, or null if unreadable.
+function parseDependencies(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
 }
 
 // lockPackages(text) -> Map of package name to its sorted "version source" list.
@@ -106,44 +122,46 @@ function selfTest() {
   };
 
   const patch = "version-update:semver-patch";
+  const minor = "version-update:semver-minor";
+  // deps(type, "a, b") -> one dependency per name, all of the given type.
+  const deps = (type, names) =>
+    names
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean)
+      .map((dependencyName) => ({ dependencyName, updateType: type }));
   const dependabot = [
-    // [updateType, names, expected automerge]
-    [patch, "clap", true],
-    [patch, "clap, colored", true],
-    [patch, "actions/checkout", true],
-    [patch, "tempfile,walkdir", true],
-    [patch, "sharded-slab", true],
-    [patch, "age", false],
-    [patch, "age-core", false],
-    [patch, "blake3", false],
-    [patch, "ed25519-dalek", false],
-    [patch, "x25519-dalek", false],
-    [patch, "curve25519-dalek", false],
-    [patch, "ml-kem", false],
-    [patch, "kem", false],
-    [patch, "ghash", false],
-    [patch, "polyval", false],
-    [patch, "keccak", false],
-    [patch, "hpke", false],
-    [patch, "fiat-crypto", false],
-    [patch, "rpassword", false],
-    [patch, "ssh-key", false],
-    [patch, "chacha20poly1305", false],
-    [patch, "sha2", false],
-    [patch, "rand_core", false],
-    [patch, "zeroize", false],
-    [patch, "serde_json", false],
-    [patch, "rmcp", false],
-    [patch, "rustls-webpki", false],
-    [patch, "clap, age", false],
-    [patch, "", false],
-    ["version-update:semver-minor", "clap", false],
-    ["version-update:semver-major", "clap", false],
-    ["", "clap", false],
+    // [label, dependencies, expected automerge]
+    ["clap", deps(patch, "clap"), true],
+    ["clap, colored", deps(patch, "clap, colored"), true],
+    ["actions/checkout", deps(patch, "actions/checkout"), true],
+    ["tempfile,walkdir", deps(patch, "tempfile,walkdir"), true],
+    ["sharded-slab", deps(patch, "sharded-slab"), true],
+    ...[
+      "age", "age-core", "blake3", "ed25519-dalek", "x25519-dalek", "curve25519-dalek", "ml-kem", "kem",
+      "ghash", "polyval", "keccak", "hpke", "fiat-crypto", "rpassword", "ssh-key", "chacha20poly1305",
+      "sha2", "rand_core", "zeroize", "serde_json", "rmcp", "rustls-webpki",
+    ].map((n) => [n, deps(patch, n), false]),
+    ["clap, age", deps(patch, "clap, age"), false],
+    ["nothing", [], false],
+    ["minor clap", deps(minor, "clap"), false],
+    ["major clap", deps("version-update:semver-major", "clap"), false],
+    ["untyped clap", deps("", "clap"), false],
+    ["unnamed", deps(patch, "clap").concat([{ dependencyName: "", updateType: patch }]), false],
+    ["not a list", null, false],
+    // One crate bumped in / and /fuzz: fetch-metadata lists it per directory.
+    ["libc in two directories", deps(patch, "libc, libc"), true],
+    ["rmcp in two directories", deps(patch, "rmcp, rmcp"), false],
+    // Grouped Actions PRs: every dependency must qualify, not just the highest.
+    ["actions group, all patch", deps(patch, "actions/setup-python, astral-sh/setup-uv"), true],
+    ["actions group, one minor", deps(patch, "astral-sh/setup-uv").concat(deps(minor, "actions/setup-python")), false],
+    ["actions group, one untyped", deps(patch, "astral-sh/setup-uv").concat(deps("", "dtolnay/rust-toolchain")), false],
   ];
-  for (const [type, names, want] of dependabot) {
-    check(`${type} [${names}]`, decide(type, names).automerge, want);
+  for (const [label, list, want] of dependabot) {
+    check(`dependabot ${label}`, decide(list).automerge, want);
   }
+  check("parse fetch-metadata output", decide(parseDependencies(JSON.stringify(deps(patch, "clap")))).automerge, true);
+  check("parse empty output", decide(parseDependencies("")).automerge, false);
 
   const lock = (...pkgs) =>
     "version = 4\n\n" +
@@ -200,7 +218,7 @@ function main() {
     lockfileMode(args.slice(1));
     return;
   }
-  const { automerge, reason } = decide(process.env.UPDATE_TYPE || "", process.env.DEPENDENCY_NAMES || "");
+  const { automerge, reason } = decide(parseDependencies(process.env.UPDATED_DEPENDENCIES || ""));
   console.log(`${automerge ? "auto-merge" : "no auto-merge"}: ${reason}`);
   if (process.env.GITHUB_OUTPUT) {
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `automerge=${automerge}\n`);

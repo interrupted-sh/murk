@@ -28,13 +28,13 @@ jobs:
 
       # Patch updates merge unread, except for dependencies murk's security
       # rests on (crypto, keys, randomness, vault parsing, MCP): those wait for
-      # a human approval.
+      # a human approval. A grouped or multi-directory PR merges only if every
+      # dependency in it qualifies, so the policy reads the full list.
       - name: Decide whether the update may merge without review
         id: policy
         run: node scripts/automerge-policy.cjs
         env:
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
-          DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          UPDATED_DEPENDENCIES: ${{ steps.meta.outputs.updated-dependencies-json }}
 
       - name: Approve and auto-merge
         if: steps.policy.outputs.automerge == 'true'
