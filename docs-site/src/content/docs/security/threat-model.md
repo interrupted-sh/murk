@@ -405,7 +405,7 @@ Each block has a comment that explains why it is sound. All other `unsafe` in `s
 
 *Gaps:*
 
-- RUSTSEC-2023-0071 and RUSTSEC-2026-0374 (unmaintained `basic-toml`, used only at compile time by age) are ignored, with the reasons in `deny.toml`.
+- RUSTSEC-2023-0071, RUSTSEC-2026-0374 (unmaintained `basic-toml`, used only at compile time by age) and RUSTSEC-2026-0387 (`crypto-bigint` timing, used only by age's native P-256 tag recipients, which murk never parses) are ignored, with the reasons in `deny.toml`.
 - The reproducibility job builds on Linux x86-64 and Windows x86-64 only. The release also ships macOS and ARM Linux binaries, and a build on another OS image or linker can differ ([Verifying releases](/security/verifying/)).
 - The npm native builds run in container images pinned by tag, not digest.
 - crates.io has no attestation support of its own. From 0.13.0, the release workflow attests the exact `.crate` published to crates.io, checks it against the crates.io index checksum, and attaches it to the GitHub release. Crates for 0.12.0 and earlier have no attestation and can only be checked by rebuilding from the signed tag ([Verifying releases](/security/verifying/)).
