@@ -1,2 +1,7 @@
+# Run every test even after one fails, so a CI run reports the full list of
+# failures instead of stopping at the first.
+[profile.ci]
+fail-fast = false
+
 [profile.ci.junit]
 path = "junit.xml"

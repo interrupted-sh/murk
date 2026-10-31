@@ -23,6 +23,8 @@ The tests need [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest`)
 
 Run `make hooks` once per clone to install the pre-commit hook, which runs the same fmt and clippy checks as CI.
 
+Run `make release-check` before a release. It builds the workspace (the CLI and the Node binding) with all targets and features, builds every fuzz target in `fuzz/` with nightly [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`), and runs the whole test suite without stopping at the first failure. It fails if any step fails.
+
 ### Rust toolchain
 
 `rust-toolchain.toml` pins the exact Rust version CI builds, lints and releases with. If you installed Rust with [rustup](https://rustup.rs), `cargo` in this repository uses the pinned toolchain automatically and rustup installs it, with rustfmt and clippy, on first use (or run `rustup toolchain install`).
@@ -88,11 +90,13 @@ A pull request does not merge while:
 
 ### Releases
 
-The maintainer cuts a release in three steps:
+The maintainer cuts a release in these steps:
 
 1. Bump the version everywhere it appears with `scripts/bump-version.sh <x.y.z>`.
-2. Merge that change to `main` through a pull request.
-3. Push a signed `vX.Y.Z` tag.
+2. Run `make release-check` (see [Development](#development)).
+3. Push the release branch and run `gh workflow run ci.yaml --ref <branch>`. When the run finishes, confirm that the `Test (windows-latest)` job ran the whole suite. CI does not stop at the first failing test, so its summary lists every failure.
+4. Open a pull request for the release branch and merge it to `main`.
+5. Push a signed `vX.Y.Z` tag.
 
 The tag starts [`.github/workflows/release.yaml`](.github/workflows/release.yaml). Its `preflight` job refuses to release unless the tagged commit is on `main`, reached `main` through a merged pull request, and `main`'s branch protection matches the release baseline. The workflow then builds, attests and publishes the release. The tag also starts the Node and Python workflows (`node.yaml`, `python.yaml`), which publish the npm and PyPI packages. The `preflight` job gates only `release.yaml`, not those two workflows. `node.yaml` can also publish from `main` when it is run by hand. [VERIFYING.md](VERIFYING.md) shows how to verify each release channel.
 
