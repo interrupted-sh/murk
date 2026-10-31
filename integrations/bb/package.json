@@ -27,13 +27,13 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.6.43",
+    "@get-bb/plugin-sdk": "0.6.90",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.5",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.2",
-    "hono": "^4.13.13",
+    "hono": "^4.13.14",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.4"
+    "vitest": "^5.0.5"
   }
 }
