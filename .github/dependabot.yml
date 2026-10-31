@@ -75,6 +75,11 @@ updates:
     directory: /integrations/bb
     schedule:
       interval: weekly
+    ignore:
+      # The release owns this "^0.11.0 || ... || ^0.14.0" range and dependabot
+      # collapses it to one caret range that misses node/package.json's version.
+      # bump-version.sh does not widen it; check-versions.cjs flags a stale range.
+      - dependency-name: "@interrupted/murk-secrets"
     groups:
       bb-plugin-minor-patch:
         update-types:
