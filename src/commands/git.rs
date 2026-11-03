@@ -38,7 +38,7 @@ pub(crate) fn cmd_merge_driver(
     if let Some(reason) = output.needs_key
         && output.result.conflicts.is_empty()
     {
-        // Without a key the merged vault keeps ours' meta, MAC and signature.
+        // Without a key the merged vault keeps ours' meta and MAC, unsigned.
         // That is only sound when the merge changed nothing they cover and
         // theirs changed no encrypted meta (which would otherwise be dropped).
         // Write nothing and exit non-zero, so git records a conflict instead of
@@ -53,6 +53,22 @@ pub(crate) fn cmd_merge_driver(
             "  {}",
             "set MURK_KEY or MURK_KEY_FILE, then abort and redo the merge to regenerate integrity metadata"
                 .dimmed()
+        );
+        process::exit(1);
+    }
+
+    // A merge numbered past the save counter's limit is refused outright:
+    // write nothing, so git keeps ours as the working file.
+    if let Some(limit) = output
+        .result
+        .conflicts
+        .iter()
+        .find(|c| c.field == "generation")
+    {
+        eprintln!("{} {} — {}", "✕".red(), limit.field.bold(), limit.reason);
+        eprintln!(
+            "  {}",
+            "nothing was written; the working file is still ours".dimmed()
         );
         process::exit(1);
     }

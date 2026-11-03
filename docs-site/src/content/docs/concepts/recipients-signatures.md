@@ -108,7 +108,7 @@ Loading such a vault never adds trust. Only `murk trust`, your own saves, and a 
 
 To revert a branch on purpose, restore the older file, run `murk trust` (it shows the counter going back), then make any write. The write is numbered above everything this machine accepted, so teammates accept it as newer. A `git revert` of a commit that changed the vault restores an older file too, so murk refuses it as rolled back until you run `murk trust`. Commit the write that follows with it, or your teammates' machines refuse the revert the same way.
 
-One case doesn't recover this way. A vault at the largest counter murk accepts (2^53 − 1) can still be accepted with `murk trust`, and the next save on that machine goes past the limit, so every machine refuses it. That machine numbers every later save from its pin, so a revert doesn't help. Delete its pin file (in `~/.config/murk/signer-pins/`) and run `murk trust` again.
+One case doesn't recover this way. A vault at the largest counter murk accepts (2^53 − 1) can still be accepted with `murk trust`. After that, murk refuses every save on that machine: the save would go past the limit, and every machine would refuse the vault it wrote. Outside git, restoring an earlier vault and running `murk trust` is enough. In a git checkout, `murk trust` lowers only the branch's counter and the machine numbers every save from its pin, so a revert doesn't help. Delete this vault's pin file (the refusal names it; it is in `~/.config/murk/signer-pins/`) and run `murk trust` again.
 
 ### Vault ids and upgrading from 0.13
 

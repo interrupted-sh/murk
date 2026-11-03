@@ -74,6 +74,36 @@ pub const MAX_GENERATION: u64 = (1 << 53) - 1;
 /// further is refused until `murk trust`.
 pub const MAX_GENERATION_STEP: u64 = 1_000_000;
 
+/// The generation of a new vault written over `highest` (the higher of the
+/// vault's counter and this machine's mark): one past it, or `None` when that
+/// is above [`MAX_GENERATION`]. Every machine would refuse such a vault, so
+/// the save or merge must refuse to write it instead.
+pub(crate) fn next_generation(highest: u64) -> Option<u64> {
+    highest.checked_add(1).filter(|&g| g <= MAX_GENERATION)
+}
+
+/// How to recover when [`next_generation`] refuses a write to `vault_path`,
+/// given this machine's pin for it. Restoring an earlier vault and trusting
+/// it lowers the mark a save is numbered from outside git, and on a branch
+/// whose mark is below the cap. Inside a git checkout, `murk trust` lowers only
+/// the branch's mark, so a machine whose overall mark is at the cap must
+/// delete its pin first.
+pub(crate) fn counter_limit_recovery(vault_path: &str, pin: Option<&TrustPin>) -> String {
+    let in_git = head_of(vault_path) != HeadState::NotARepo;
+    if !in_git {
+        return format!("restore an earlier copy of {vault_path} and run `murk trust`");
+    }
+    let restore = format!("restore an earlier {vault_path} from git and run `murk trust`");
+    let at_cap = pin.is_some_and(|p| p.generation >= MAX_GENERATION);
+    match pins::existing_pin_path(vault_path) {
+        Some(file) if at_cap => format!(
+            "this machine accepted a vault at generation {MAX_GENERATION}, which `murk trust` does not undo in a git checkout: delete this vault's trust pin ({}), then {restore}",
+            file.display()
+        ),
+        _ => restore,
+    }
+}
+
 /// Trusted signers supplied from outside the vault and the pin: canonical
 /// recipient → the verifying key its signatures must verify under (`None` for
 /// ssh-ed25519, whose recipient string is its verifying key).
