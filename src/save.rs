@@ -245,8 +245,26 @@ fn saving_identity(
 /// Set the vault's identity and rollback counter for this save, both covered
 /// by the signature. The counter moves past the highest this machine
 /// accepted, so a deliberate revert (an older file restored, then saved)
-/// reads as newer to everyone.
-fn advance_identity(vault: &mut types::Vault, prior_pin: Option<&crate::pins::TrustPin>) {
+/// reads as newer to everyone. Refuses, changing nothing, when the counter
+/// would go past [`crate::trust::MAX_GENERATION`]: every machine would refuse
+/// the vault written.
+fn advance_identity(
+    vault_path: &str,
+    vault: &mut types::Vault,
+    prior_pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    let generation = crate::trust::next_generation(
+        vault
+            .generation
+            .max(prior_pin.map_or(0, |p| p.generation)),
+    )
+    .ok_or_else(|| {
+        MurkError::Secret(format!(
+            "refusing to save: the save counter of vault {vault_path} is at its limit — the next save would be numbered above {}, the largest murk accepts, so every machine would refuse it\nnothing was written\n{}",
+            crate::trust::MAX_GENERATION,
+            crate::trust::counter_limit_recovery(vault_path, prior_pin)
+        ))
+    })?;
     if vault.vault_id.is_empty() {
         // A vault written by murk 0.13 gets its id on the first 0.14 save. Use
         // the one this machine already pinned, else derive it from the
@@ -257,10 +275,8 @@ fn advance_identity(vault: &mut types::Vault, prior_pin: Option<&crate::pins::Tr
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| derived_vault_id(vault));
     }
-    vault.generation = vault
-        .generation
-        .max(prior_pin.map_or(0, |p| p.generation))
-        .saturating_add(1);
+    vault.generation = generation;
+    Ok(())
 }
 
 /// Drop or narrow grants before a save, so a grant only ever receives values
@@ -477,7 +493,7 @@ pub fn save_vault(
     refuse_unsafe_recipients(vault)?;
 
     let prior_pin = refuse_carried_removed_keys(vault_path, vault, on_disk.as_ref(), current)?;
-    advance_identity(vault, prior_pin.as_ref());
+    advance_identity(vault_path, vault, prior_pin.as_ref())?;
 
     announce_new_group_members(original, current);
 
@@ -1154,6 +1170,70 @@ mod tests {
         save_vault(ps, &mut reverted, &state, &state).unwrap();
         assert_eq!(reverted.generation, 3);
         assert!(load_vault(ps).is_ok());
+
+        unsafe { std::env::remove_var("MURK_KEY") };
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn a_save_past_the_generation_limit_is_refused_and_writes_nothing() {
+        use crate::trust::MAX_GENERATION;
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+        unsafe { std::env::remove_var("MURK_NO_SIGNER_PIN") };
+
+        let (secret, pubkey) = generate_keypair();
+        let recipient = make_recipient(&pubkey);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.murk");
+        let ps = path.to_str().unwrap();
+        let pin_file = crate::pins::pin_path(ps).unwrap();
+
+        let mut vault = signed_test_vault(&pubkey, &recipient);
+        let state = types::Murk {
+            values: HashMap::from([("API_KEY".into(), crate::testutil::secret("REAL"))]),
+            recipients: HashMap::from([(pubkey.clone(), "alice".to_string())]),
+            ..Default::default()
+        };
+        unsafe { std::env::set_var("MURK_KEY", &secret) };
+        unsafe { std::env::remove_var("MURK_KEY_FILE") };
+
+        // One below the limit still saves, and writes exactly the limit.
+        vault.generation = MAX_GENERATION - 1;
+        save_vault(ps, &mut vault, &state, &state).unwrap();
+        assert_eq!(vault::read(&path).unwrap().generation, MAX_GENERATION);
+        assert_eq!(
+            crate::pins::read(ps).unwrap().unwrap().generation,
+            MAX_GENERATION
+        );
+
+        let refused = |vault: &mut types::Vault| {
+            let (file, pin) = (fs::read(&path).unwrap(), fs::read(&pin_file).unwrap());
+            let err = save_vault(ps, vault, &state, &state)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("save counter"), "{err}");
+            assert!(err.contains("nothing was written"), "{err}");
+            assert_eq!(fs::read(&path).unwrap(), file, "the vault is unchanged");
+            assert_eq!(fs::read(&pin_file).unwrap(), pin, "the pin is unchanged");
+        };
+        // The vault at the limit: the next save is refused.
+        refused(&mut vault.clone());
+        // A vault below it, on a machine whose mark is at the limit: refused too.
+        let mut lower = vault.clone();
+        lower.generation = 5;
+        refused(&mut lower);
+        // A vault above it (written by an older murk): refused, never wrapped.
+        let mut above = vault.clone();
+        above.generation = u64::MAX;
+        refused(&mut above);
 
         unsafe { std::env::remove_var("MURK_KEY") };
         match prev_home {

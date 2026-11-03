@@ -915,8 +915,10 @@ impl<'f> World<'f> {
         (!self.branches.is_empty()).then(|| self.branches[i % self.branches.len()].clone())
     }
 
-    /// Run the library forgery in a child process with its own environment.
-    fn forge(&self, base: &[u8], vars: &[(&str, String)]) -> Option<Vec<u8>> {
+    /// Run the library forgery in a child process with its own environment:
+    /// `None` when it does not apply, `Some(Err(why))` when murk refused the
+    /// save.
+    fn forge(&self, base: &[u8], vars: &[(&str, String)]) -> Option<Result<Vec<u8>, String>> {
         let input = self.root.join("forge-in.murk");
         let output = self.root.join("forge-out.murk");
         let home = self.root.join("forge-home");
@@ -936,10 +938,13 @@ impl<'f> World<'f> {
         }
         let out = cmd.output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
+        if let Some((_, why)) = text.split_once("FORGE-REFUSED ") {
+            return Some(Err(why.lines().next().unwrap_or_default().to_string()));
+        }
         if text.contains("FORGE-SKIP") || !text.contains("FORGE-OK") {
             return None;
         }
-        Some(fs::read(&output).unwrap())
+        Some(Ok(fs::read(&output).unwrap()))
     }
 
     /// Commit `bytes` as the vault on top of `origin/main` and push it.
@@ -1058,6 +1063,12 @@ impl<'f> World<'f> {
                         ),
                     ],
                 )?;
+                // murk refused the save (a counter at its limit, say): nothing
+                // was written.
+                let forged = match forged {
+                    Ok(forged) => forged,
+                    Err(why) => return Some(Ok(Ran::Refused(why))),
+                };
                 let newly = !self.listed(&mach.vault()).contains(&who.0);
                 fs::write(mach.dir.join(".murk"), &forged).unwrap();
                 mach.commit(&format!("s{step} vouch"));
@@ -1258,10 +1269,9 @@ impl<'f> World<'f> {
                         .as_u64()
                         .unwrap_or(0);
                 let claimed = match generation {
-                    Gen::Next => base_gen,
-                    Gen::Jump => base_gen.saturating_add(999),
-                    // The save moves the counter one past the claim.
-                    Gen::Max => GENERATION_CAP - 1,
+                    Gen::Next => base_gen.saturating_add(1),
+                    Gen::Jump => base_gen.saturating_add(1000),
+                    Gen::Max => GENERATION_CAP,
                     Gen::AboveCap => u64::MAX,
                 };
                 let mut vars = vec![
@@ -1294,7 +1304,9 @@ impl<'f> World<'f> {
                         },
                     ));
                 }
-                let forged = self.forge(&base, &vars)?;
+                // A save murk refused is the attacker's to work around; this
+                // forgery does not apply.
+                let forged = self.forge(&base, &vars)?.ok()?;
                 self.record(&forged, Some(by), step, true);
                 self.push_as_attacker(&forged, *to, step);
                 Some(Ok(Ran::Accepted))
@@ -1761,8 +1773,8 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
         ),
         (
             // The jump to the cap is refused. A reviewer who overrides that
-            // with `murk trust` leaves the counter at the cap, where every
-            // new vault has the same generation: another vault there, or an
+            // with `murk trust` leaves this machine's mark at the cap, where
+            // murk refuses to save: another vault forged at the cap, or an
             // older revision, is still refused.
             "a saturated generation lets a replayed revision through",
             vec![
@@ -1784,6 +1796,32 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                 }),
                 accepts(Op::Sync { m: alice }),
                 refuses(load_main.clone()).decisive(),
+            ],
+        ),
+        (
+            // A save over a vault at the cap would be numbered above it, and
+            // every machine would refuse the vault written. murk refuses the
+            // save instead.
+            "a save over a vault at the cap writes a vault nobody accepts",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                runs(Op::Forge {
+                    by: Attacker::Person(P(0)),
+                    base: Base::Nth(0),
+                    generation: Gen::Max,
+                    sign: Sign::Plants(Planted::Sock),
+                    to: Dest::Main,
+                }),
+                accepts(Op::Sync { m: bob_m }),
+                refuses(Op::Vouch {
+                    m: bob_m,
+                    who: P(0),
+                    key: Planted::Sock,
+                })
+                .decisive(),
             ],
         ),
         (
@@ -2045,16 +2083,27 @@ fn forge_child() {
         }
         current.recipients.insert(pk.to_string(), name.to_string());
     }
-    if let Ok(generation) = var("FORGE_GEN") {
-        // The save moves the counter one past this (saturating).
-        vault.generation = generation.parse::<u64>().unwrap();
+    // The generation the forged vault carries. murk numbers a save one past
+    // the vault's and refuses to write past its limit, so a claim above the
+    // limit is written by hand after the save, as the attacker's own code
+    // would.
+    let generation = var("FORGE_GEN").ok().map(|g| g.parse::<u64>().unwrap());
+    if let Some(generation) = generation {
+        vault.generation = generation.min(GENERATION_CAP).saturating_sub(1);
     }
     unsafe {
         std::env::set_var("MURK_KEY", &key);
         std::env::set_var("MURK_NO_SIGNER_PIN", "1");
     }
     if let Err(e) = murk_cli::save_vault(&output, &mut vault, &original, &current) {
-        skip(&format!("save refused: {e}"));
+        println!("FORGE-REFUSED {e}");
+        std::process::exit(0);
+    }
+    if let Some(generation) = generation.filter(|&g| g > GENERATION_CAP) {
+        let mut vault = murk_cli::read_vault(&output).unwrap();
+        vault.generation = generation;
+        common::forgery::reseal(&mut vault, &identity);
+        murk_cli::vault::write(Path::new(&output), &vault).unwrap();
     }
     // A registry entry is planted in the meta directly, as the attacker's own
     // code would: murk's save refuses to write some keys (weak ones), and the

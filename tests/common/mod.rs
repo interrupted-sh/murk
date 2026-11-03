@@ -131,4 +131,6 @@ pub fn init_vault(dir: impl AsRef<Path>) -> (String, String) {
 
 pub mod cast;
 
+pub mod forgery;
+
 pub mod machines;

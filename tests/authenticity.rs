@@ -2341,7 +2341,9 @@ fn a_generation_jump_past_the_bound_waits_for_murk_trust() {
 
 /// Rule: no vault near the top of the counter is ever accepted, so the
 /// counter can't be pushed to where it stops increasing — not on a machine
-/// with a mark, not by `murk trust`, not on a fresh machine.
+/// with a mark, not by `murk trust`, not on a fresh machine. murk never writes
+/// one: a machine whose mark is there refuses to save, so the vault here is
+/// written by a key holder's own code.
 #[test]
 fn a_generation_near_the_u64_limit_is_refused_outright() {
     let base = TempDir::new().unwrap();
@@ -2354,16 +2356,21 @@ fn a_generation_near_the_u64_limit_is_refused_outright() {
         .assert()
         .success();
     set_pin_generation(&laptop, &repo, u64::MAX - 1);
+    let before = fs::read(repo.join(".murk")).unwrap();
     laptop
         .with_key(&repo, &key)
         .args(["add", "TOP"])
         .write_stdin("top\n")
         .assert()
-        .success();
-    assert_eq!(
-        generation_of(&fs::read(repo.join(".murk")).unwrap()),
-        u64::MAX
-    );
+        .failure()
+        .stderr(predicate::str::contains("save counter"));
+    assert_eq!(fs::read(repo.join(".murk")).unwrap(), before);
+
+    let mut vault: murk_cli::types::Vault = serde_json::from_slice(&before).unwrap();
+    vault.generation = u64::MAX;
+    let id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+    common::forgery::reseal(&mut vault, &id);
+    murk_cli::vault::write(&repo.join(".murk"), &vault).unwrap();
     alice
         .murk(&repo)
         .args(["get", "TOP"])
@@ -2383,6 +2390,46 @@ fn a_generation_near_the_u64_limit_is_refused_outright() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("above the largest murk accepts"));
+}
+
+/// Rule: a keyed merge that would number the vault above the limit stops as
+/// a conflict and writes nothing: git keeps ours as the working file, byte
+/// for byte, and the trust pin is unchanged.
+#[test]
+fn a_merge_past_the_generation_limit_leaves_ours_and_the_pin() {
+    let base = TempDir::new().unwrap();
+    let (alice, repo) = alice_repo(base.path());
+    use_merge_driver(&repo);
+    git_ok(&repo, &["checkout", "-q", "-b", "side"]);
+    alice.add(&repo, "FROM_SIDE", "side");
+    commit(&repo, "side saves");
+    git_ok(&repo, &["checkout", "-q", "main"]);
+    alice.add(&repo, "FROM_MAIN", "main");
+    commit(&repo, "main saves");
+    set_pin_generation(&alice, &repo, murk_cli::trust::MAX_GENERATION);
+
+    let ours = fs::read(repo.join(".murk")).unwrap();
+    let pins: Vec<(PathBuf, Vec<u8>)> = pin_files(&alice)
+        .into_iter()
+        .map(|p| {
+            let bytes = fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    let (merged, stderr) = git_merge(&alice, &repo, "side");
+    assert!(!merged, "{stderr}");
+    assert!(stderr.contains("save counter"), "{stderr}");
+    // This machine's mark is at the cap in a git checkout: the hint names the
+    // one pin file to delete.
+    assert!(
+        pins.iter()
+            .any(|(p, _)| stderr.contains(&p.display().to_string())),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(repo.join(".murk")).unwrap(), ours, "ours is kept");
+    for (path, bytes) in pins {
+        assert_eq!(fs::read(&path).unwrap(), bytes, "the pin is unchanged");
+    }
 }
 
 /// Rule: two different vaults with the same generation are a fork. Bob and

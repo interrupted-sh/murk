@@ -147,6 +147,12 @@ pub fn pin_path(vault_path: &str) -> Option<PathBuf> {
     pin_paths(vault_path).into_iter().next()
 }
 
+/// The pin file murk reads for `vault_path`: the first of the candidate
+/// paths (see [`pin_path`]) that exists, if any.
+pub fn existing_pin_path(vault_path: &str) -> Option<PathBuf> {
+    pin_paths(vault_path).into_iter().find(|p| p.exists())
+}
+
 /// Where a pin for `vault_path` may live, preferred first: the repository
 /// identity (see [`pin_path`]), then the resolved absolute path, then the
 /// lexical absolute path murk ≤ 0.13 used. Reads take the first that exists,

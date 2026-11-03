@@ -46,7 +46,9 @@ pub fn merge_vaults(base: &Vault, ours: &Vault, theirs: &Vault) -> MergeResult {
     let vault_name = ours.vault_name.clone();
     let repo = ours.repo.clone();
     let vault_id = ours.vault_id.clone();
-    let generation = ours.generation.max(theirs.generation);
+    // Ours' counter: the MAC kept from ours covers it. A keyed merge
+    // renumbers the result (see `regenerate_meta`).
+    let generation = ours.generation;
 
     // -- Recipients: set union/removal --
     let recipients = merge_recipients(base, ours, theirs, &mut conflicts);
@@ -86,8 +88,8 @@ pub fn merge_vaults(base: &Vault, ours: &Vault, theirs: &Vault) -> MergeResult {
         created,
         vault_name,
         repo,
-        // A keyed merge re-signs and moves the counter past both sides and this
-        // machine's mark (see `regenerate_meta`).
+        // Ours' identity and counter. A keyed merge re-signs and moves the
+        // counter past both sides and this machine's mark (see `regenerate_meta`).
         vault_id,
         generation,
         recipients,
@@ -872,6 +874,19 @@ pub fn run_merge_driver(
         None
     } else if !same_covered_content(&result.vault, &ours_vault) {
         Some("the merged secrets, recipients, schema or policy differ from ours")
+    } else if result.vault.generation > crate::trust::MAX_GENERATION {
+        // Every machine refuses a vault above the limit; never write one.
+        Some("the merged save counter is above the largest murk accepts")
+    } else if [&base_vault, &ours_vault]
+        .iter()
+        .all(|v| (v.generation, &v.vault_id) != (theirs_vault.generation, &theirs_vault.vault_id))
+    {
+        // The merged vault keeps ours' counter and id, which ours' MAC covers;
+        // taking theirs needs a key to re-MAC. A real save also changes the
+        // meta, so this is a file edited by hand.
+        Some(
+            "theirs' save counter or vault id differs from both base and ours, which only a key can merge",
+        )
     } else if theirs_vault.meta != base_vault.meta && theirs_vault.meta != ours_vault.meta {
         // Any write re-encrypts the meta, so this can't tell a real group,
         // grant, pin or signer change from a rewrite. Refuse rather than drop
@@ -1017,6 +1032,13 @@ pub fn regenerate_meta(
     // The merged vault is a new version of both sides: identity from ours
     // (equal to theirs, or theirs predates vault ids), and a counter past both
     // sides and past anything this machine accepted.
+    let generation = match merged_generation(ours, theirs, pin.as_ref(), vault_path) {
+        Ok(generation) => generation,
+        Err(conflict) => {
+            conflicts.push(conflict);
+            return Ok(None);
+        }
+    };
     if merged.vault_id.is_empty() {
         merged.vault_id = if theirs.vault_id.is_empty() {
             crate::save::derived_vault_id(merged)
@@ -1024,11 +1046,7 @@ pub fn regenerate_meta(
             theirs.vault_id.clone()
         };
     }
-    merged.generation = ours
-        .generation
-        .max(theirs.generation)
-        .max(pin.as_ref().map_or(0, |p| p.generation))
-        .saturating_add(1);
+    merged.generation = generation;
     meta.signers = crate::save::vouched_registry(merged, &meta.signers, pin.as_ref(), &identity);
 
     // Each grant gets its own record again; one unchanged on a side keeps
@@ -1074,6 +1092,29 @@ pub fn regenerate_meta(
     // and `murk trust`. The signature covers the finished file, so it comes last.
     merged.sig = crate::sign_vault(merged, &identity);
     Ok(Some("meta regenerated".into()))
+}
+
+/// The merged vault's generation: one past both sides and this machine's
+/// mark. Past [`crate::trust::MAX_GENERATION`] every machine would refuse the
+/// result, so that is a conflict.
+fn merged_generation(
+    ours: &Vault,
+    theirs: &Vault,
+    pin: Option<&crate::pins::TrustPin>,
+    vault_path: &str,
+) -> Result<u64, MergeConflict> {
+    let highest = ours
+        .generation
+        .max(theirs.generation)
+        .max(pin.map_or(0, |p| p.generation));
+    crate::trust::next_generation(highest).ok_or_else(|| MergeConflict {
+        field: "generation".into(),
+        reason: format!(
+            "the save counter is at its limit — the merged vault would be numbered above {}, the largest murk accepts, so every machine would refuse it. Abort the merge; {}",
+            crate::trust::MAX_GENERATION,
+            crate::trust::counter_limit_recovery(vault_path, pin)
+        ),
+    })
 }
 
 /// Why the merged result must not be signed by the merging key, if it must
@@ -2251,6 +2292,63 @@ mod tests {
         assert!(output.result.conflicts.is_empty());
     }
 
+    #[test]
+    fn a_keyless_merge_never_writes_a_vault_above_the_generation_limit() {
+        // Every side above the limit, nothing else changed: without a key the
+        // merge would write ours' counter back, a vault every machine refuses.
+        let _env = crate::testutil::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut v: Vault = serde_json::from_str(&base_vault_json()).unwrap();
+        v.generation = u64::MAX;
+        v.vault_id = "00112233445566778899aabbccddeeff".into();
+        let json = serde_json::to_string(&v).unwrap();
+        let output = run_merge_driver(&json, &json, &json, ".murk").unwrap();
+        assert!(output.result.conflicts.is_empty());
+        assert!(output.needs_key.is_some(), "merged clean above the limit");
+    }
+
+    #[test]
+    fn a_keyless_merge_never_takes_a_header_change_from_theirs() {
+        // The MAC and signature cover `generation` and `vault_id`. Without a
+        // key nothing is re-MACed, so a theirs that changed either (and
+        // nothing else) must not merge clean, and the written vault keeps
+        // ours' counter, never one above the limit.
+        let _env = crate::testutil::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut base: Vault = serde_json::from_str(&base_vault_json()).unwrap();
+        base.generation = 3;
+        base.vault_id = "00112233445566778899aabbccddeeff".into();
+        let json = |v: &Vault| serde_json::to_string(v).unwrap();
+        let other_id = "ffeeddccbbaa99887766554433221100";
+        for (what, generation, vault_id) in [
+            ("one past base", base.generation + 1, base.vault_id.as_str()),
+            ("u64::MAX", u64::MAX, base.vault_id.as_str()),
+            ("vault id", base.generation, other_id),
+        ] {
+            let mut theirs = base.clone();
+            theirs.generation = generation;
+            theirs.vault_id = vault_id.into();
+            let output =
+                run_merge_driver(&json(&base), &json(&base), &json(&theirs), ".murk").unwrap();
+            assert!(!output.meta_regenerated);
+            assert!(output.needs_key.is_some(), "{what}: merged clean");
+            assert_eq!(output.result.vault.generation, base.generation, "{what}");
+            assert_eq!(output.result.vault.vault_id, base.vault_id, "{what}");
+        }
+        // A conflicted keyless merge writes the merged file too (for the user
+        // to resolve): still with ours' counter.
+        let mut ours = base.clone();
+        ours.secrets.get_mut("DB_URL").unwrap().shared = "b3Vycw==".into();
+        let mut theirs = base.clone();
+        theirs.secrets.get_mut("DB_URL").unwrap().shared = "dGhlaXJz".into();
+        theirs.generation = u64::MAX;
+        let output = run_merge_driver(&json(&base), &json(&ours), &json(&theirs), ".murk").unwrap();
+        assert!(!output.result.conflicts.is_empty());
+        assert_eq!(output.result.vault.generation, ours.generation);
+    }
+
     // -- Static field preservation --
 
     #[test]
@@ -3383,6 +3481,118 @@ mod tests {
             "{:?}",
             result.conflicts
         );
+    }
+
+    /// Merge sides numbered `[base, ours, theirs]`, all sealed by `secret`'s
+    /// key, on a machine whose pin trusts that key and has mark `mark`.
+    /// Returns whether the meta was regenerated, the result's generation, the
+    /// conflicts, and whether the result kept ours' meta. Asserts the pin file
+    /// is untouched. Caller holds ENV_LOCK and restores HOME.
+    fn merge_numbered(
+        secret: &str,
+        [base_gen, ours_gen, theirs_gen]: [u64; 3],
+        mark: u64,
+    ) -> (bool, u64, Vec<MergeConflict>, bool) {
+        let identity = crate::testutil::make_identity(secret);
+        let alice = identity.pubkey_string().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join(".murk");
+        let vault_path = vault_path.to_str().unwrap();
+        let mut base = base_vault();
+        base.recipients = vec![alice.clone()];
+        base.vault_id = "00112233445566778899aabbccddeeff".into();
+        let (mut ours, mut theirs) = (base.clone(), base.clone());
+        base.generation = base_gen;
+        ours.generation = ours_gen;
+        theirs.generation = theirs_gen;
+        for side in [&mut base, &mut ours, &mut theirs] {
+            seal(side, &crate::types::Meta::default(), &identity);
+        }
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var("MURK_NO_SIGNER_PIN");
+            std::env::remove_var("MURK_TRUSTED_SIGNERS");
+            std::env::set_var("MURK_KEY", secret);
+        }
+        let vk = identity.signing_key().unwrap().verifying_key();
+        let pin = crate::pins::TrustPin {
+            v: crate::pins::PIN_VERSION,
+            vault_id: base.vault_id.clone(),
+            generation: mark,
+            trusted: [alice.clone()].into(),
+            ever_trusted: [alice.clone()].into(),
+            signers: [(alice, vk)].into(),
+            was_signed: true,
+            ..Default::default()
+        };
+        crate::pins::write(vault_path, &pin).unwrap();
+        let pin_file = crate::pins::pin_path(vault_path).unwrap();
+        let pin_before = std::fs::read(&pin_file).unwrap();
+        let mut result = merge_vaults(&base, &ours, &theirs);
+        let regenerated = regenerate_meta(
+            &mut result.vault,
+            &base,
+            &ours,
+            &theirs,
+            vault_path,
+            &mut result.conflicts,
+            &mut result.rekeyed,
+        )
+        .unwrap();
+        unsafe { std::env::remove_var("MURK_KEY") };
+        assert_eq!(
+            std::fs::read(&pin_file).unwrap(),
+            pin_before,
+            "a merge never writes the pin"
+        );
+        (
+            regenerated.is_some(),
+            result.vault.generation,
+            result.conflicts,
+            result.vault.meta == ours.meta,
+        )
+    }
+
+    #[test]
+    fn a_merge_past_the_generation_limit_is_a_conflict() {
+        // The merged vault is numbered one past both sides and this machine's
+        // mark. One past the limit would be refused by every machine, so the
+        // merge stops as a conflict and nothing is re-MACed or signed.
+        use crate::testutil::{ENV_LOCK, generate_keypair};
+        use crate::trust::MAX_GENERATION as MAX;
+
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (secret, _) = generate_keypair();
+        let prev_home = std::env::var_os("HOME");
+        let refused = |gens: [u64; 3], mark: u64| {
+            let (regenerated, _, conflicts, kept_ours_meta) = merge_numbered(&secret, gens, mark);
+            assert!(!regenerated, "{conflicts:?}");
+            assert!(kept_ours_meta, "nothing re-MACed or signed");
+            assert!(
+                conflicts
+                    .iter()
+                    .any(|c| c.field == "generation" && c.reason.contains("save counter")),
+                "{conflicts:?}"
+            );
+        };
+
+        // One below the limit still merges, numbered exactly the limit.
+        let (regenerated, generation, conflicts, _) =
+            merge_numbered(&secret, [MAX - 3, MAX - 1, MAX - 2], 1);
+        assert!(regenerated, "{conflicts:?}");
+        assert_eq!(generation, MAX);
+        // Ours at the limit, theirs at the limit, or this machine's mark there.
+        refused([MAX - 3, MAX, MAX - 1], 1);
+        refused([MAX - 3, MAX - 1, MAX], 1);
+        refused([1, 2, 2], MAX);
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     /// Give `vault` a murk 0.13 meta: fresh MAC, the signer registry naming
