@@ -69,11 +69,11 @@ Or download a pre-built binary (Linux and macOS):
 curl -fsSL https://raw.githubusercontent.com/interrupted-sh/murk/main/install.sh | sh
 ```
 
-The script checks the archive against the release's `SHA256SUMS`, which catches a corrupt download but not a tampered release. It then checks the release's build provenance with the [GitHub CLI](https://cli.github.com) (`gh`, logged in with `gh auth login` or `GH_TOKEN`). A check that fails stops the install. If `gh` is missing or not logged in, it asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.14.0` to install a specific release.
+The script checks the archive against the release's `SHA256SUMS`, which catches a corrupt download but not a tampered release. It then checks the release's build provenance with the [GitHub CLI](https://cli.github.com) (`gh`, logged in with `gh auth login` or `GH_TOKEN`). A check that fails stops the install. If `gh` is missing or not logged in, it asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.14.1` to install a specific release.
 
 It installs to `/usr/local/bin` by default. Set `PREFIX` (binary goes to `$PREFIX/bin`), `DESTDIR` (staging root prepended to the path), or `MURK_INSTALL_DIR` (exact bin directory, overrides `PREFIX`) on the `sh` side of the pipe, e.g. `... | PREFIX="$HOME/.local" sh`.
 
-Pre-built binaries are available for Linux (x86_64, aarch64, armhf), macOS (x86_64, Apple Silicon), and Windows on the [releases page](https://github.com/interrupted-sh/murk/releases). On Windows, download the `.zip` from that page. Binary releases are [attested](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). Verify one downloaded file at a time with `gh attestation verify murk-v0.14.0-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml` (needs `gh auth login`; 0.12.0 and later; releases 0.10.2 to 0.11.0 were signed as `interrupted-inc/murk`, and 0.3.1 to 0.10.1 as `iicky/murk`). See [VERIFYING.md](VERIFYING.md) for verifying older releases and the npm, PyPI, and crates.io releases too.
+Pre-built binaries are available for Linux (x86_64, aarch64, armhf), macOS (x86_64, Apple Silicon), and Windows on the [releases page](https://github.com/interrupted-sh/murk/releases). On Windows, download the `.zip` from that page. Binary releases are [attested](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). Verify one downloaded file at a time with `gh attestation verify murk-v0.14.1-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml` (needs `gh auth login`; 0.12.0 and later; releases 0.10.2 to 0.11.0 were signed as `interrupted-inc/murk`, and 0.3.1 to 0.10.1 as `iicky/murk`). See [VERIFYING.md](VERIFYING.md) for verifying older releases and the npm, PyPI, and crates.io releases too.
 
 ## Quick start
 
@@ -354,7 +354,7 @@ murk provides a [pre-commit](https://pre-commit.com/) hook to scan staged files 
 ```yaml
 repos:
   - repo: https://github.com/interrupted-sh/murk
-    rev: v0.14.0  # run 'pre-commit autoupdate' to move to a newer tag
+    rev: v0.14.1  # run 'pre-commit autoupdate' to move to a newer tag
     hooks:
       - id: murk-scan
 ```
