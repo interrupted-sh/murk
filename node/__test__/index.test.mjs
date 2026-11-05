@@ -237,7 +237,9 @@ test('get one-liner returns null for missing', () => {
 
 test('an unsupported vault version names the node binding and its version', () => {
   // So a stale binding left behind after an upgrade is not mistaken for the CLI.
-  const { version } = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'))
+  const { version } = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
+  )
   const future = join(testDir, 'future.murk')
   writeFileSync(
     future,
