@@ -236,14 +236,50 @@ vault, and CI, before the first 0.14 write lands on the shared branch.
    say) derives the same id as the original, so murk can't tell those two
    apart by id: a copy whose save counter is higher would be accepted in
    place of the other.
-3. Once a machine has seen a vault saved by 0.14, a vault signed by 0.13 is
-   refused as rolled back. That is the order to follow: trust once, then
-   make the first 0.14 save. A write from a teammate who is still on 0.13
-   won't be accepted. Until then, the merge driver can't tell an older 0.13
-   revision on a branch from a newer one, so make the first 0.14 save before
-   you merge branches that still carry 0.13 vaults.
-4. Give CI `MURK_TRUSTED_SIGNERS`. See [CI/CD](/guides/cicd/#upgrading-to-014).
-5. Re-run `murk setup-merge-driver` in each clone, so the driver gets the
+3. murk refuses a vault signed by 0.13 only on a branch where this machine
+   has already accepted or saved a 0.14 vault. The refusal says the vault is
+   "in the pre-0.14 format". Everywhere else, including a branch that never
+   saw 0.14 and a detached HEAD, the vault loads as history. History can
+   narrow what the machine trusts, but never widen it. Once this machine has
+   seen a 0.14 vault, that history is also read-only: murk refuses every
+   write over it until you accept that copy (step 5). So the order to follow
+   is: trust once, then make the first 0.14 save. A write from a teammate who
+   is still on 0.13 won't be accepted on a branch that has seen 0.14.
+4. Make the first 0.14 save on the default branch and commit it. Then merge
+   it into your other branches. Every worktree of a repository shares one
+   pin, but the 0.13 rules are per branch: a save on one branch doesn't
+   make another branch refuse its committed 0.13 vault. A branch gets its
+   0.14 mark only when this machine saves there. Merging the upgrade into it
+   does not give it one. Until this machine saves on that branch (a merge
+   alone does not count), an older 0.13 revision checked out there still
+   loads, read-only.
+5. A branch with a 0.13 vault that this machine has not accepted refuses
+   every write. The message says the vault "is in the pre-0.14 format on a
+   branch that hasn't taken the upgrade, and this machine hasn't accepted
+   this copy, so it is read-only here", and that nothing was written. To go
+   on, merge the upgrade from the default branch, then save. Or review the
+   file (`git log -p -- .murk`, `murk diff`) and run
+   `murk trust --vault .murk` on that branch to accept this copy. The next
+   write upgrades the vault and gives the branch its 0.14 mark, so commit
+   the result. Any change to the accepted file makes it a different copy,
+   read-only again. On a detached HEAD, check out a branch first. A
+   machine that ran murk 0.14.0 has no accepted copies, so it needs
+   `murk trust` for its first write over a 0.13 file too.
+6. A branch that already has a 0.14 mark refuses a 0.13 vault outright
+   ("has already been upgraded on this branch"). The file is older than what
+   this machine accepted there. If it is an older revision, switch back to
+   the newer one. Otherwise commit the 0.14 upgrade on the default branch
+   and merge it, or run `murk trust --vault .murk` to accept this copy, then
+   commit the result.
+7. The merge driver can't tell an older 0.13 revision from a newer one while
+   this machine has not seen a 0.14 vault, so make the first 0.14 save
+   before you merge branches that still carry 0.13 vaults. After that, the
+   driver refuses a 0.13 side that you have not accepted with `murk trust`,
+   and it writes nothing: git keeps ours. A 0.13 common ancestor with two
+   0.14 sides still merges. Once one side is 0.14, a 0.13 side that changed
+   the vault is refused.
+8. Give CI `MURK_TRUSTED_SIGNERS`. See [CI/CD](/guides/cicd/#upgrading-to-014).
+9. Re-run `murk setup-merge-driver` in each clone, so the driver gets the
    vault path. See [the merge driver](/guides/git-merge-ssh/#upgrading-an-older-driver-config).
-6. If part of your team is on hardware or `ssh-rsa` keys, read the section
-   above: their writes are unsigned until a signing teammate runs `murk trust`.
+10. If part of your team is on hardware or `ssh-rsa` keys, read the section
+    above: their writes are unsigned until a signing teammate runs `murk trust`.

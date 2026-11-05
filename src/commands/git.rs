@@ -57,15 +57,16 @@ pub(crate) fn cmd_merge_driver(
         process::exit(1);
     }
 
-    // A merge numbered past the save counter's limit is refused outright:
-    // write nothing, so git keeps ours as the working file.
-    if let Some(limit) = output
-        .result
-        .conflicts
-        .iter()
-        .find(|c| c.field == "generation")
-    {
-        eprintln!("{} {} — {}", "✕".red(), limit.field.bold(), limit.reason);
+    // A merge numbered past the save counter's limit, or one with a murk 0.13
+    // side this machine hasn't accepted, is refused outright: write nothing,
+    // so git keeps ours as the working file.
+    if let Some(refused) = output.result.conflicts.iter().find(|c| c.writes_nothing()) {
+        eprintln!(
+            "{} {} — {}",
+            "✕".red(),
+            refused.field.bold(),
+            refused.reason
+        );
         eprintln!(
             "  {}",
             "nothing was written; the working file is still ours".dimmed()

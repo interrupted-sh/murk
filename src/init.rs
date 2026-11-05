@@ -252,9 +252,15 @@ pub fn pin_created_vault(
     let creator = vault.recipients.first().cloned().unwrap_or_default();
     let mut registry = BTreeMap::new();
     crate::register_signer(vault, &mut registry, identity);
-    let signature = types::SignatureState::Signed {
-        signer: creator.clone(),
-        v: crate::signature::SIGNED_VIEW_VERSION,
+    // Record the vault as written: a key that cannot sign (ssh-rsa, plugin)
+    // creates it unsigned, and its creator's machine then loads it with a
+    // warning rather than refusing it as stripped.
+    let signature = match &vault.sig {
+        Some(sig) => types::SignatureState::Signed {
+            signer: sig.signer.clone(),
+            v: sig.v,
+        },
+        None => types::SignatureState::Unsigned,
     };
     let loaded = crate::trust::Loaded {
         vault,
@@ -264,12 +270,13 @@ pub fn pin_created_vault(
         names: &HashMap::new(),
         groups: &BTreeMap::new(),
         grants: &BTreeMap::new(),
+        // Read only by the trust verdict, which this record never runs.
         loader_can_sign: true,
         operator_key: None,
     };
     let head = crate::trust::head_of(vault_path);
     crate::pins::update(vault_path, |fresh| {
-        Ok(Some(crate::trust::accepted_pin(
+        let mut pin = crate::trust::accepted_pin(
             &loaded,
             fresh,
             crate::trust::Acceptance::Trust {
@@ -278,7 +285,11 @@ pub fn pin_created_vault(
             },
             &head,
             crate::trust::commit_of(vault_path).as_deref(),
-        )))
+        );
+        // A signed version seen of a vault this one replaces says nothing
+        // about this vault.
+        pin.was_signed = vault.sig.is_some();
+        Ok(Some(pin))
     })
 }
 

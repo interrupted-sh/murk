@@ -133,8 +133,14 @@ Before CI loads a vault written by murk 0.14 or later, do two things:
    above, or a grant's whole key file. A runner with a 0.13-era setup has no
    pin, so without them the first 0.14 vault is refused.
 
-Upgrade the people who write the vault too. Once a runner or machine has seen
-a vault saved by 0.14, a vault signed by 0.13 is refused as rolled back.
+Upgrade the people who write the vault too. A runner with no pin keeps no
+0.14 mark, so it can't refuse a vault signed by 0.13. On a machine with a
+pin the refusal is per branch: murk refuses a 0.13 vault only on a branch
+where that machine has accepted or saved a 0.14 vault. A merge of the
+upgrade into a branch does not give it that mark. The machine has to save
+there. Until then a 0.13 vault on that branch loads as history, and once the
+machine has seen a 0.14 vault it is read-only until `murk trust` accepts that
+copy.
 
 ## Other CI systems
 

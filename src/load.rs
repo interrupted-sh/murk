@@ -631,6 +631,29 @@ impl InspectedVault {
         })
     }
 
+    /// Record this vault, a murk 0.13 file that is read-only here, as the
+    /// copy `murk trust` accepted on this branch, so the next write may
+    /// upgrade it. Only that is recorded (see
+    /// [`trust::accept_pre_upgrade_copy`]): accepting an older copy never
+    /// changes the trusted set or records removals. The pin is re-read under
+    /// its lock.
+    pub fn record_pre_upgrade_copy(&self, vault_path: &str) -> Result<(), String> {
+        if self.grant {
+            return Err(
+                "an agent grant can't record trust: its key file names the signers it trusts"
+                    .into(),
+            );
+        }
+        let head = trust::head_of(vault_path);
+        crate::pins::update(vault_path, |fresh| {
+            trust::accept_pre_upgrade_copy(fresh, &head, &self.vault)
+                .map(Some)
+                .ok_or_else(|| {
+                    "HEAD is detached, so there is no branch to accept this copy on".to_string()
+                })
+        })
+    }
+
     /// Judge this vault again as if the removed keys in `readmit` (canonical)
     /// had never been removed: `murk trust --re-add`.
     pub fn readmit(
@@ -871,6 +894,7 @@ mod tests {
         let recipient = make_recipient(&pubkey);
         let identity = make_identity(&secret);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_forged_sig_load");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1255,6 +1279,7 @@ mod tests {
         let recipient = make_recipient(&pubkey);
         let _identity = make_identity(&secret);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_load_mac");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1330,6 +1355,7 @@ mod tests {
         let (secret, pubkey) = generate_keypair();
         let recipient = make_recipient(&pubkey);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_load_valid_mac");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1483,6 +1509,7 @@ mod tests {
         let (other_secret, other_pubkey) = generate_keypair();
         let other_recipient = make_recipient(&other_pubkey);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_load_not_recipient");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1603,6 +1630,7 @@ mod tests {
 
         let (secret, pubkey) = generate_keypair();
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_load_zero_secrets");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1660,6 +1688,7 @@ mod tests {
         let (secret, pubkey) = generate_keypair();
         let recipient = make_recipient(&pubkey);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_load_stripped_meta");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

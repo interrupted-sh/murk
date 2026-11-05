@@ -18,6 +18,7 @@ pub static CWD_LOCK: Mutex<()> = Mutex::new(());
 /// clearing it on drop. For tests that save, since `save_vault` resolves the
 /// saving identity from the environment.
 pub struct MurkKeyEnv {
+    _home: TempHome,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -27,12 +28,39 @@ pub fn murk_key_env(secret: &str) -> MurkKeyEnv {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     unsafe { std::env::set_var("MURK_KEY", secret) };
     unsafe { std::env::remove_var("MURK_KEY_FILE") };
-    MurkKeyEnv { _lock: lock }
+    MurkKeyEnv {
+        _home: temp_home(),
+        _lock: lock,
+    }
 }
 
 impl Drop for MurkKeyEnv {
     fn drop(&mut self) {
         unsafe { std::env::remove_var("MURK_KEY") };
+    }
+}
+
+/// `HOME` pointed at a fresh directory until dropped, so a test's trust pin
+/// (and stored keys) never land in, or depend on, the real home. The caller
+/// holds [`ENV_LOCK`].
+pub struct TempHome {
+    _dir: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+pub fn temp_home() -> TempHome {
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::var_os("HOME");
+    unsafe { std::env::set_var("HOME", dir.path()) };
+    TempHome { _dir: dir, prev }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }
 

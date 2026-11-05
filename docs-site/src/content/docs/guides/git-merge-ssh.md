@@ -55,9 +55,19 @@ it as history. A forged one, in a commit that you cherry-pick or rebase, can
 set values back to an older revision without a conflict. Check what you
 merged with `murk diff` (below) before you push.
 
-Until this machine has accepted or saved the vault in 0.14 form, it can't
-tell an older 0.13 revision on a branch from a newer one either. Make the
-first 0.14 save before you merge branches that still carry 0.13 vaults.
+The driver judges a side written by 0.13 like a load of it on the branch you
+merge into. Where this machine has accepted or saved a 0.14 vault on that
+branch, it refuses the side. Once this machine has seen a 0.14 vault, it also
+refuses a 0.13 side that you have not accepted on that branch with
+`murk trust`, because a 0.13 file there is read-only. That refusal is a
+conflict that writes nothing to the working file, so git keeps ours. A 0.13
+common ancestor with two 0.14 sides still merges. Before this machine has
+seen a 0.14 vault, the driver can't tell an older 0.13 revision from a newer
+one, so it refuses a 0.13 side only when that side changed the vault and the
+other side is 0.14. Make the first 0.14 save on the default branch before you
+merge branches that still carry 0.13 vaults. Merging the upgrade into a
+branch does not give it a 0.14 mark. The mark comes when this machine saves
+there.
 
 If the ancestor or a side fails, the merge is a conflict that names it, and
 the driver writes no fresh MAC or signature. Otherwise the driver writes the

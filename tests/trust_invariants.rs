@@ -151,6 +151,14 @@ enum Sign {
     /// entry to the planted key in the forgery itself. A weak key can only
     /// arrive this way: no vault murk opens carries one.
     Plants(Planted),
+    /// With the attacker's own key, as themselves, in the murk 0.13 format
+    /// (header 2.0, no vault id or counter, a view-1 signature in the meta),
+    /// as a member's murk 0.13 wrote it: the generation is not carried. Only
+    /// stored sequences set it.
+    Legacy,
+    /// As [`Sign::Legacy`], with another creation stamp: another vault's 0.13
+    /// file, whose upgrade would take another id.
+    LegacyOther,
 }
 
 /// The identity point, compressed: a weak verifying key.
@@ -509,6 +517,16 @@ fn build_fixture() -> Fixture {
 
     let a1 = machine(&root, 0);
     a1.murk().arg("setup-merge-driver").assert().success();
+    // The vault starts as murk 0.13 wrote it, as a team that upgraded did:
+    // alice trusts the 0.13 file, and her first 0.14 save below gives it the
+    // id derived from its creation stamp and name.
+    let path = first.dir.join(".murk");
+    let mut legacy = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+    let alice_id = murk_cli::crypto::parse_identity(&people[0].secret).unwrap();
+    common::forgery::reseal_v1(&mut legacy, &alice_id);
+    murk_cli::vault::write(&path, &legacy).unwrap();
+    fs::remove_dir_all(a1_home.join(".config/murk/signer-pins")).unwrap();
+    a1.murk().args(["trust", "--yes"]).assert().success();
     for who in [&people[1], &people[2], &ci] {
         a1.murk()
             .args(["circle", "authorize", &who.pubkey, "--name", &who.label])
@@ -1280,10 +1298,15 @@ impl<'f> World<'f> {
                     ("FORGE_GEN", claimed.to_string()),
                 ];
                 let (planted, plants) = match *sign {
-                    Sign::Own => (None, false),
+                    Sign::Own | Sign::Legacy | Sign::LegacyOther => (None, false),
                     Sign::AsPlanted(key) => (Some(key), false),
                     Sign::Plants(key) => (Some(key), true),
                 };
+                match sign {
+                    Sign::Legacy => vars.push(("FORGE_LEGACY", "same".into())),
+                    Sign::LegacyOther => vars.push(("FORGE_LEGACY", "other".into())),
+                    _ => {}
+                }
                 if let Some(key) = planted {
                     if plants {
                         let as_whom = self.listed(&base).into_iter().find(|&p| p != by)?;
@@ -1685,7 +1708,7 @@ fn run_scripted(script: &[Scripted]) -> Result<(), TestCaseError> {
 /// again. Each is scripted: every step must run, and the decisive one must
 /// end as expected.
 fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
-    let (alice, bob_m, carol_m) = (M(0), M(2), M(3));
+    let (alice, bob_m, carol_m, dave_m) = (M(0), M(2), M(3), M(4));
     let (bob, dave) = (P(1), P(3));
     let forge = |sign| Op::Forge {
         by: Attacker::Revoked,
@@ -1713,6 +1736,14 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
         generation: Gen::Max,
         sign: Sign::Own,
         to: Dest::Main,
+    };
+    // bob, a trusted member, writes the vault with murk 0.13.
+    let legacy_by_bob = |to| Op::Forge {
+        by: Attacker::Person(bob),
+        base: Base::NewestOpenable,
+        generation: Gen::Next,
+        sign: Sign::Legacy,
+        to,
     };
     let vouched = |key| {
         vec![
@@ -2002,6 +2033,144 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                 accepts(load_main.clone()).decisive(),
             ],
         ),
+        (
+            // Worktrees share one pin, so one branch's 0.14 save must not
+            // make every branch refuse its 0.13 vault. A 0.13 file of this
+            // vault a member wrote loads as history on a branch this machine
+            // has no 0.14 mark for, and is refused on main, which has one.
+            "a replayed 0.13 vault is history on a new branch and refused on an upgraded one",
+            vec![
+                accepts(load_main.clone()),
+                runs(legacy_by_bob(Dest::Branch)),
+                accepts(Op::Load {
+                    m: alice,
+                    at: At::PushedBranch(0),
+                })
+                .decisive(),
+                accepts(load_main.clone()),
+                runs(legacy_by_bob(Dest::Main)),
+                runs(Op::Sync { m: alice }),
+                refuses(load_main.clone()).decisive(),
+            ],
+        ),
+        (
+            // Accepting an older 0.13 copy on a branch with no 0.14 mark
+            // only makes that copy writable there: dave, authorized in 0.14
+            // after the copy was written, stays a member, and his signed
+            // vault on main still loads once his key is confirmed.
+            "accepting an older 0.13 copy keeps a member it predates",
+            vec![
+                accepts(load_main.clone()),
+                accepts(Op::Authorize {
+                    m: alice,
+                    who: dave,
+                }),
+                accepts(Op::Sync { m: alice }),
+                runs(Op::Forge {
+                    by: Attacker::Person(P(0)),
+                    base: Base::Nth(1),
+                    generation: Gen::Next,
+                    sign: Sign::Legacy,
+                    to: Dest::Branch,
+                }),
+                accepts(Op::Load {
+                    m: alice,
+                    at: At::PushedBranch(0),
+                }),
+                accepts(Op::Trust {
+                    m: alice,
+                    forgery: true,
+                }),
+                accepts(Op::Sync { m: dave_m }),
+                accepts(Op::Trust {
+                    m: dave_m,
+                    forgery: false,
+                }),
+                accepts(Op::Save {
+                    m: dave_m,
+                    key: K(2),
+                }),
+                accepts(Op::Sync { m: dave_m }),
+                accepts(Op::Sync { m: alice }),
+                accepts(Op::Trust {
+                    m: alice,
+                    forgery: false,
+                })
+                .decisive(),
+                accepts(load_main.clone()).decisive(),
+            ],
+        ),
+        (
+            // A 0.13 file that loaded as history is read-only until this
+            // machine accepts it: a save there is refused, and after `murk
+            // trust` it goes through and upgrades the file.
+            "a write over an unaccepted 0.13 history load",
+            vec![
+                accepts(load_main.clone()),
+                runs(legacy_by_bob(Dest::Branch)),
+                accepts(Op::Load {
+                    m: alice,
+                    at: At::PushedBranch(0),
+                }),
+                refuses(Op::Save {
+                    m: alice,
+                    key: K(1),
+                })
+                .decisive(),
+                accepts(Op::Trust {
+                    m: alice,
+                    forgery: true,
+                }),
+                accepts(Op::Save {
+                    m: alice,
+                    key: K(1),
+                })
+                .decisive(),
+            ],
+        ),
+        (
+            // Read as history, a 0.13 vault still meets every other rule: one
+            // signed by a member this machine removed is refused on a branch
+            // it has never seen.
+            "a removed member's 0.13 vault on a new branch",
+            vec![
+                accepts(revoke_bob.clone()),
+                accepts(load_main.clone()),
+                runs(Op::Forge {
+                    by: Attacker::Revoked,
+                    base: Base::NewestOpenable,
+                    generation: Gen::Next,
+                    sign: Sign::Legacy,
+                    to: Dest::Branch,
+                }),
+                refuses(Op::Load {
+                    m: alice,
+                    at: At::PushedBranch(0),
+                })
+                .decisive(),
+            ],
+        ),
+        (
+            // Another vault's 0.13 file, signed by a trusted member: its first
+            // save would take another id, so it is another vault even on a
+            // branch with no 0.14 mark.
+            "another vault's 0.13 file on a new branch",
+            vec![
+                accepts(load_main.clone()),
+                runs(Op::Forge {
+                    by: Attacker::Person(bob),
+                    base: Base::NewestOpenable,
+                    generation: Gen::Next,
+                    sign: Sign::LegacyOther,
+                    to: Dest::Branch,
+                }),
+                refuses(Op::Load {
+                    m: alice,
+                    at: At::PushedBranch(0),
+                })
+                .decisive(),
+            ],
+        ),
     ]
 }
 
@@ -2175,6 +2344,17 @@ fn forge_child() {
             v: 2,
             sig: sign(&message),
         });
+        murk_cli::vault::write(Path::new(&output), &vault).unwrap();
+    }
+    if let Ok(which) = var("FORGE_LEGACY") {
+        let mut vault = murk_cli::read_vault(&output).unwrap();
+        if !vault.agents.is_empty() {
+            skip("a 0.13 vault carries no grant records");
+        }
+        if which == "other" {
+            vault.created = "2020-01-01T00:00:00Z".into();
+        }
+        common::forgery::reseal_v1(&mut vault, &identity);
         murk_cli::vault::write(Path::new(&output), &vault).unwrap();
     }
     println!("FORGE-OK");
