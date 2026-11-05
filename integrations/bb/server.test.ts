@@ -559,7 +559,7 @@ describe("vault-truth fail-closed", () => {
   it("murk_get fails closed when the vault no longer holds a key the grant still claims", async () => {
     murk(["add", "DOOMED_KEY", "--desc", "Short-lived key", "--tag", "agents"], "doomed-value-31337");
     const mint = await host.harness.behavior.runCli(
-      ["grant", "mint", "--keys", "DOOMED_KEY", "--ttl", "1h"],
+      ["grant", "mint", "--keys", "DOOMED_KEY,TEST_API_KEY", "--ttl", "1h"],
       { cwd: worktree, projectId: PROJECT_ID },
     );
     expect(mint.exitCode, mint.stderr).toBe(0);
@@ -567,8 +567,8 @@ describe("vault-truth fail-closed", () => {
 
     // Delete the key from the vault directly — the plugin's grant record
     // still lists DOOMED_KEY as covered, so assignGrants lets it through and
-    // only the vault read itself can refuse (a 3.x vault drops the emptied
-    // grant, so load refuses it before get() is reached).
+    // only the vault read itself can refuse. TEST_API_KEY keeps the grant a
+    // recipient, so the refusal comes from the per-key get(), not load().
     murk(["rm", "DOOMED_KEY"]);
 
     const result = toolText(
@@ -579,6 +579,7 @@ describe("vault-truth fail-closed", () => {
       ),
     );
     expect(result.isError).toBe(true);
+    expect(result.text).toContain("not found or outside grant");
     expect(result.text).not.toContain("doomed-value-31337");
     // Nothing was delivered to a file either.
     expect(existsSync(path.join(worktree, `.murk-${THREAD_ID}.env`))).toBe(false);
