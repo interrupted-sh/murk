@@ -19,6 +19,7 @@ import { withGrantIdentity } from "./lib/binding";
 import { KEY_NAME_PATTERN, renderDotenv } from "./lib/dotenv";
 import { GRANT_MIGRATIONS, GrantStore, isExpired, type GrantRecord } from "./lib/grants";
 import { agentPlan, mintGrant, revokeGrant, runMurk } from "./lib/murk-cli";
+import { legacyUpgradeRefusal, readVaultFormat, vaultCheckout } from "./lib/vault-format";
 
 /**
  * Per-thread delivery filename. Namespacing by thread id means the plugin
@@ -450,7 +451,8 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "grant-mint",
         summary: "Mint a scoped grant (ephemeral murk identity for exactly the named keys)",
-        usage: "bb murk grant mint --keys KEY[,KEY…] [--ttl 2h] [--thread <threadId>] [--project <projectId>] [--reveal]",
+        usage:
+          "bb murk grant mint --keys KEY[,KEY…] [--ttl 2h] [--thread <threadId>] [--project <projectId>] [--reveal] [--upgrade]",
       },
       {
         name: "grant-list",
@@ -486,10 +488,12 @@ export default async function plugin(bb: BbPluginApi) {
     thread: string | null;
     project: string | null;
     reveal: boolean;
+    /** Allow this mint to make a pre-0.14 vault's first 0.14 save. */
+    upgrade: boolean;
   }
 
   function parseMintFlags(argv: string[]): MintFlags {
-    const flags: MintFlags = { keys: [], ttl: "2h", thread: null, project: null, reveal: false };
+    const flags: MintFlags = { keys: [], ttl: "2h", thread: null, project: null, reveal: false, upgrade: false };
     for (let i = 0; i < argv.length; i++) {
       const arg = argv[i];
       const takeValue = (): string => {
@@ -502,6 +506,7 @@ export default async function plugin(bb: BbPluginApi) {
       else if (arg === "--thread") flags.thread = takeValue();
       else if (arg === "--project") flags.project = takeValue();
       else if (arg === "--reveal") flags.reveal = true;
+      else if (arg === "--upgrade") flags.upgrade = true;
       else throw new Error(`unknown flag ${arg}`);
     }
     if (flags.keys.length === 0) throw new Error("--keys is required (fails closed): name every key this grant may read");
@@ -564,6 +569,15 @@ export default async function plugin(bb: BbPluginApi) {
     // symlinked segments (macOS /var/folders → /private/var) must be resolved.
     vaultPath = canonicalVault(vaultPath);
 
+    // Minting saves the vault. On a pre-0.14 vault that save is its format
+    // upgrade, which belongs on the default branch, committed — not left
+    // uncommitted on whichever branch this thread is on.
+    const format = readVaultFormat(vaultPath);
+    if (format.legacy && !flags.upgrade) {
+      const checkout = await vaultCheckout(vaultPath);
+      return { exitCode: 1, stderr: `murk: ${legacyUpgradeRefusal(vaultPath, format, checkout, "minting a grant")}` };
+    }
+
     const threadId = flags.thread ?? (defaultScope === "thread" && ctxThreadId ? ctxThreadId : null);
 
     const id = store.newGrantId();
@@ -622,7 +636,11 @@ export default async function plugin(bb: BbPluginApi) {
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
-    await revokeGrant(grant.vaultPath, grant.murkName);
+    // A pre-0.14 vault cannot hold agent grants, so there is nothing in it to
+    // revoke, and calling murk would risk its first 0.14 save. Revoke locally.
+    if (!existsSync(grant.vaultPath) || !readVaultFormat(grant.vaultPath).legacy) {
+      await revokeGrant(grant.vaultPath, grant.murkName);
+    }
     rmSync(grant.keyPath, { force: true });
     store.markRevoked(id);
     return {

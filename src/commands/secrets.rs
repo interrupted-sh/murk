@@ -392,6 +392,8 @@ pub(crate) fn cmd_rotate(
         ValueSource::Prompt
     };
 
+    // A prompted value can take minutes; see `VaultSnapshot`.
+    let on_disk = VaultSnapshot::take(vault_path);
     let (mut vault, murk, identity, _lock) = load_vault_locked(vault_path);
     let pubkey = try_or_die(identity.pubkey_string());
     let original = murk.clone();
@@ -452,6 +454,10 @@ pub(crate) fn cmd_rotate(
     if outcome.rotated == 0 {
         return;
     }
+    on_disk.refuse_if_changed(
+        "while murk waited for the new values",
+        "re-run murk rotate to rotate the current vault",
+    );
     save_vault(vault_path, &mut vault, &original, &current);
     outcome.report();
 
@@ -811,21 +817,14 @@ pub(crate) fn cmd_edit(key: Option<&str>, scoped: bool, group: Option<&str>, vau
     let explicit = resolve_secret_tier(group, scoped);
     let tier = explicit.clone().unwrap_or(SecretTier::Everyone);
 
-    // The vault's bytes as loaded. The editor can stay open for minutes, and a
-    // `git pull` or checkout meanwhile does not take murk's lock; saving then
-    // would silently undo it (even re-adding a revoked recipient). Read before
-    // loading, so any change after this point is caught.
-    let on_disk = fs::read(vault_path).ok();
+    // The editor can stay open for minutes; see `VaultSnapshot`.
+    let on_disk = VaultSnapshot::take(vault_path);
     let (mut vault, murk, identity, _lock) = load_vault_locked(vault_path);
     let refuse_if_changed = || {
-        if fs::read(vault_path).ok() != on_disk {
-            die(
-                &format_args!(
-                    "{vault_path} changed on disk while the editor was open — nothing saved\nre-run murk edit to edit the current vault"
-                ),
-                1,
-            );
-        }
+        on_disk.refuse_if_changed(
+            "while the editor was open",
+            "re-run murk edit to edit the current vault",
+        );
     };
     let original = murk.clone();
     let mut current = murk;

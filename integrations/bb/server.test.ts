@@ -55,6 +55,7 @@ function toolText(result: PluginAgentToolResult): { text: string; isError: boole
 
 function configureContext(hostId: string): PluginAgentConfigurationContext {
   return {
+    pluginMetadata: {},
     thread: { id: THREAD_ID, title: null, parentThreadId: null, sourceThreadId: null },
     project: { id: PROJECT_ID, kind: "standard" as const, name: "murk", gitRemoteUrl: null },
     environment: {
@@ -549,6 +550,82 @@ describe("grant lifecycle", () => {
     );
     expect(result.isError).toBe(true);
     expect(result.text).toContain("TEST_API_KEY is not covered");
+  });
+});
+
+describe("pre-0.14 vaults", () => {
+  // A vault written by the murk 0.13.0 release (format 2.0, no vault id) and
+  // its test-only key. Any write is its first 0.14 save, which rewrites it.
+  const fixtures = path.join(import.meta.dirname, "..", "..", "tests", "fixtures");
+  let legacyDir: string;
+  let savedKeyFile: string | undefined;
+
+  function git(args: string[]): void {
+    const result = spawnSync("git", args, { cwd: legacyDir, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+
+  beforeAll(() => {
+    legacyDir = path.join(tmpRoot, "legacy-repo");
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(path.join(legacyDir, ".murk"), readFileSync(path.join(fixtures, "v0_13_signed.murk")), { mode: 0o644 });
+    const keyFile = path.join(tmpRoot, "legacy.key");
+    writeFileSync(keyFile, readFileSync(path.join(fixtures, "v0_13_signed.test-only.key")), { mode: 0o600 });
+    git(["init", "-q", "-b", "feature/legacy-test"]);
+    savedKeyFile = process.env.MURK_KEY_FILE;
+    process.env.MURK_KEY_FILE = keyFile;
+    // First use on this machine: trust it once, which pins but does not rewrite.
+    const trust = spawnSync("murk", ["trust", "--yes"], { cwd: legacyDir, encoding: "utf8", env: process.env });
+    if (trust.status !== 0) throw new Error(`murk trust failed: ${trust.stderr}`);
+  });
+
+  afterAll(() => {
+    if (savedKeyFile === undefined) delete process.env.MURK_KEY_FILE;
+    else process.env.MURK_KEY_FILE = savedKeyFile;
+  });
+
+  function mint(extra: string[] = [], cwd = legacyDir) {
+    return host.harness.behavior.runCli(["grant", "mint", "--keys", "API_KEY", "--ttl", "1h", ...extra], {
+      cwd,
+      projectId: PROJECT_ID,
+    });
+  }
+
+  it("refuses to mint into a pre-0.14 vault and leaves its bytes unchanged", async () => {
+    const vaultFile = path.join(legacyDir, ".murk");
+    const before = readFileSync(vaultFile);
+    const result = await mint();
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("pre-0.14 format");
+    expect(result.stderr).toContain("on branch feature/legacy-test");
+    expect(result.stderr).toContain("--upgrade");
+    expect(readFileSync(vaultFile).equals(before)).toBe(true);
+  });
+
+  it("mints with --upgrade, upgrading the vault in place", async () => {
+    const result = await mint(["--upgrade"]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/minted grant g[0-9a-f]{8}/);
+    const upgraded = JSON.parse(readFileSync(path.join(legacyDir, ".murk"), "utf8")) as { version: string; vault_id?: string };
+    expect(upgraded.version).toBe("3.0");
+    expect(upgraded.vault_id).toMatch(/^[0-9a-f]{32}$/);
+
+    // Now 0.14-format: a plain mint no longer needs --upgrade.
+    const again = await mint();
+    expect(again.exitCode, again.stderr).toBe(0);
+  });
+});
+
+describe("0.14-format vaults", () => {
+  it("mints without --upgrade", async () => {
+    const header = JSON.parse(readFileSync(path.join(worktree, ".murk"), "utf8")) as { version: string };
+    expect(header.version).toMatch(/^3\./);
+    const result = await host.harness.behavior.runCli(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], {
+      cwd: worktree,
+      projectId: PROJECT_ID,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stderr ?? "").not.toContain("pre-0.14");
   });
 });
 

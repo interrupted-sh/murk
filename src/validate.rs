@@ -230,9 +230,30 @@ fn version(v: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "unsupported vault version: {}. This build of murk supports versions 2.x and 3.x",
-        show(v)
+        "unsupported vault version: {}. {} supports vault versions 2.x and 3.x",
+        show(v),
+        component()
     ))
+}
+
+/// The program reading vaults, e.g. `murk CLI 0.14.1`, named in errors that
+/// depend on what this build supports. A vault-format error otherwise reads
+/// the same from the CLI and from each binding, which an older binding
+/// left behind after an upgrade makes easy to misattribute.
+static COMPONENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Name the component and its version for format errors. Called once by each
+/// entry point (the CLI's `main`, each binding's module init); later calls
+/// are ignored.
+pub fn set_component(name: &str, version: &str) {
+    let _ = COMPONENT.set(format!("{name} {version}"));
+}
+
+fn component() -> String {
+    COMPONENT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| format!("murk-cli library {}", env!("CARGO_PKG_VERSION")))
 }
 
 /// Whether a (validated) version string has major 3: a format whose MAC and

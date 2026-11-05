@@ -105,7 +105,7 @@ pub use secrets::{
     check_foreign_groups, describe_key, get_secret, key_tiers, list_keys, mark_revoked,
     remove_secret, require_group_access, rotate_secret, rotation_health, set_secret,
 };
-pub use validate::{is_deceptive, new_text, terminal_text, unsafe_text_fields};
+pub use validate::{is_deceptive, new_text, set_component, terminal_text, unsafe_text_fields};
 
 use std::path::Path;
 

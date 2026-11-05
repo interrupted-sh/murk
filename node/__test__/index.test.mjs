@@ -235,6 +235,24 @@ test('get one-liner returns null for missing', () => {
   assert.strictEqual(get('NONEXISTENT'), null)
 })
 
+test('an unsupported vault version names the node binding and its version', () => {
+  // So a stale binding left behind after an upgrade is not mistaken for the CLI.
+  const { version } = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'))
+  const future = join(testDir, 'future.murk')
+  writeFileSync(
+    future,
+    '{"version":"99.0","created":"2026-01-01T00:00:00Z","vault_name":".murk","recipients":[],"schema":{},"secrets":{},"meta":""}',
+  )
+  assert.throws(
+    () => load(future),
+    (e) =>
+      e.message.includes(
+        `unsupported vault version: 99.0. murk-secrets node binding ${version} supports vault versions 2.x and 3.x`,
+      ),
+  )
+  rmSync(future)
+})
+
 test('exportAll one-liner works', () => {
   const secrets = exportAll()
   assert.strictEqual(Object.keys(secrets).length, 3)

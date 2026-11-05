@@ -53,7 +53,12 @@ fn load_vault_wrong_version() {
         .args(["ls", "--vault", "test.murk"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported vault version"));
+        // The error names the component and its version, so a stale binding
+        // is not mistaken for the CLI.
+        .stderr(predicate::str::contains(format!(
+            "unsupported vault version: 99.0. murk CLI {} supports vault versions 2.x and 3.x",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]
