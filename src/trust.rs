@@ -27,8 +27,10 @@
 //! 5. An agent-grant key never counts as a signer, and a key seen as a grant
 //!    that now sits in the recipients without its grant is refused.
 //! 6. The vault id must match the pinned one, and the save counter must not be
-//!    below the highest accepted ("rolled back"). A murk ≤ 0.13 signature on a
-//!    vault this machine has seen in 0.14 form is a rollback.
+//!    below the highest accepted ("rolled back"). A murk ≤ 0.13 signature is
+//!    refused where this machine has seen the vault in 0.14 form: on the
+//!    branch checked out, or outside git (see [`upgraded_at`]). Elsewhere it
+//!    loads as history.
 //! 7. A group membership change must be signed by a member of that group as
 //!    pinned (removing a member who left the vault entirely is exempt).
 //! 8. A key an accepted vault removed stays removed: a vault signed by it is
@@ -151,6 +153,12 @@ pub enum Refusal {
     Downgraded,
     /// The save counter is below the highest accepted here.
     RolledBack { pinned: u64, found: u64 },
+    /// A vault with a murk 0.13 (view 1) signature where this machine has
+    /// already seen the vault written by murk 0.14 (see [`upgraded_at`]): on
+    /// the branch checked out (`on_branch`), or outside git. View 1 covers
+    /// neither the vault id nor the counter, so there it can only be an older
+    /// revision.
+    PreUpgrade { on_branch: bool },
     /// The vault id differs from the pinned one.
     OtherVault { pinned: String, found: String },
     /// A group's membership was changed by someone who was not a member.
@@ -863,6 +871,124 @@ fn grant_signer_refusal(
         .map(|key| Refusal::GrantWithoutRecord { key: key.clone() })
 }
 
+/// Whether this machine has seen the vault written by murk 0.14 where `head`
+/// is checked out, so that a murk 0.13 (view 1) signature there can only be
+/// an older revision. On a branch: a mark above 0 for it. Every 0.14 save is
+/// numbered from 1 and a view-1 vault is always at 0, so a mark of 0 is from
+/// an acceptance of the 0.13 vault (or a `murk trust` of one), not from 0.14.
+/// Outside git: an overall mark or a pinned vault id. A detached HEAD has no
+/// mark. Worktrees share the pin, so a branch counts only once it saw 0.14
+/// itself: one worktree's upgrade leaves the others' 0.13 vaults loading as
+/// history until the upgrade reaches their branch.
+pub(crate) fn upgraded_at(pin: &TrustPin, head: &HeadState) -> bool {
+    match head {
+        HeadState::Branch(b) => pin.branches.get(b).is_some_and(|&mark| mark > 0),
+        HeadState::NotARepo => pin.generation > 0 || !pin.vault_id.is_empty(),
+        HeadState::Detached => false,
+    }
+}
+
+/// Whether `loaded` carries a murk 0.13 (view 1) signature.
+fn signed_v1(loaded: &Loaded<'_>) -> bool {
+    matches!(
+        loaded.signature,
+        types::SignatureState::Signed { v, .. } if *v == crate::signature::LEGACY_SIGNED_VIEW_VERSION
+    )
+}
+
+/// Whether `vault` was written by murk 0.13: no vault id and no counter.
+pub fn written_by_0_13(vault: &types::Vault) -> bool {
+    vault.vault_id.is_empty() && vault.generation == 0
+}
+
+/// Whether a murk 0.13 `vault` stands for the vault `pin` holds: the pin has
+/// no id, or the id the file's first 0.14 save takes is the pinned one.
+pub fn pre_upgrade_is_this_vault(pin: Option<&TrustPin>, vault: &types::Vault) -> bool {
+    pin.is_none_or(|p| p.vault_id.is_empty() || crate::save::derived_vault_id(vault) == p.vault_id)
+}
+
+/// Where an accepted murk 0.13 copy is recorded for `head` (see
+/// [`TrustPin::accepted_pre_upgrade`]): the branch name, `""` outside git.
+/// A detached HEAD has no place to record one.
+fn acceptance_key(head: &HeadState) -> Option<String> {
+    match head {
+        HeadState::Branch(b) => Some(b.clone()),
+        HeadState::NotARepo => Some(String::new()),
+        HeadState::Detached => None,
+    }
+}
+
+/// The fingerprint of a murk 0.13 vault file as `murk trust` accepted it:
+/// SHA-256 over its serialization, so any change to the file is a different
+/// copy.
+pub fn pre_upgrade_fingerprint(vault: &types::Vault) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(vault).expect("a vault serializes");
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Whether a write over `vault` (a save, or a keyed merge with it as a side)
+/// at `head` must be refused: it is a murk 0.13 file, this machine has seen
+/// the vault in 0.14 form (so the file loaded, at most, as history), and it
+/// is not the copy `murk trust` accepted at `head`. The file's id rests on
+/// header fields nothing signs (see `verdict`), so until the user accepts
+/// it, writing it would give another vault's contents and recipients this
+/// vault's id and counter.
+pub fn pre_upgrade_read_only(
+    pin: Option<&TrustPin>,
+    head: &HeadState,
+    vault: &types::Vault,
+) -> bool {
+    let Some(pin) = pin.filter(|p| p.v >= pins::PIN_VERSION) else {
+        return false;
+    };
+    written_by_0_13(vault)
+        && (pin.generation > 0 || !pin.vault_id.is_empty())
+        && acceptance_key(head)
+            .and_then(|k| pin.accepted_pre_upgrade.get(&k))
+            .is_none_or(|fp| *fp != pre_upgrade_fingerprint(vault))
+}
+
+/// `prior` with `vault`, a murk 0.13 file, recorded as the copy the user
+/// accepted at `head` (see [`TrustPin::accepted_pre_upgrade`]), and nothing
+/// else changed. Accepting an older copy is reading history on purpose: it
+/// makes the copy writable here, but the trusted set, groups and removals are
+/// left alone, so a member who joined after the copy was written is never
+/// recorded as removed. `None` on a detached HEAD (no branch to record it on).
+pub fn accept_pre_upgrade_copy(
+    prior: Option<&TrustPin>,
+    head: &HeadState,
+    vault: &types::Vault,
+) -> Option<TrustPin> {
+    let key = acceptance_key(head)?;
+    let mut pin = prior.cloned().unwrap_or_default();
+    pin.accepted_pre_upgrade
+        .insert(key, pre_upgrade_fingerprint(vault));
+    Some(pin)
+}
+
+/// The refusal for a write [`pre_upgrade_read_only`] refuses.
+pub fn pre_upgrade_read_only_message(vault_path: &str, head: &HeadState) -> String {
+    let accept = if *head == HeadState::Detached {
+        format!(
+            "check out a branch, review it (`git log -p -- {vault_path}`, `murk diff`) and run `murk trust --vault {vault_path}` to accept it, then retry"
+        )
+    } else {
+        format!(
+            "review it (`git log -p -- {vault_path}`, `murk diff`) and run `murk trust --vault {vault_path}` to accept it, then retry"
+        )
+    };
+    format!(
+        "vault {vault_path} is in the pre-0.14 format on a branch that hasn't taken the upgrade, and this machine hasn't accepted this copy, so it is read-only here\nnothing was written\n{accept}; or merge the upgrade from the default branch"
+    )
+}
+
 fn verdict(
     loaded: &Loaded<'_>,
     pin: Option<&TrustPin>,
@@ -878,6 +1004,20 @@ fn verdict(
         return Verdict::Refused(refusal);
     }
     let types::SignatureState::Signed { signer, v } = loaded.signature else {
+        // An unsigned murk 0.13 file is still judged by the id its first 0.14
+        // save takes, so another vault's file never reads as unsigned or
+        // stripped (which `murk trust` would re-sign under this vault's id).
+        if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION && !p.vault_id.is_empty())
+            && written_by_0_13(loaded.vault)
+        {
+            let found = crate::save::derived_vault_id(loaded.vault);
+            if found != p.vault_id {
+                return Verdict::Refused(Refusal::OtherVault {
+                    pinned: p.vault_id.clone(),
+                    found,
+                });
+            }
+        }
         if pin.is_some_and(|p| p.was_signed) {
             return Verdict::Refused(Refusal::Downgraded);
         }
@@ -916,21 +1056,35 @@ fn verdict(
     }
 
     if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION) {
-        // Once this machine has seen the vault written by murk 0.14 (an id or
-        // a counter), a v1 signature can only be an older revision: v1 covers
-        // neither field.
-        if *v == crate::signature::LEGACY_SIGNED_VIEW_VERSION
-            && (p.generation > 0 || !p.vault_id.is_empty())
-        {
-            return refuse(Refusal::RolledBack {
-                pinned: p.generation,
-                found: loaded.vault.generation,
-            });
-        }
-        if !p.vault_id.is_empty() && loaded.vault.vault_id != p.vault_id {
+        // A v1 vault has no id of its own; it is judged by the id its first
+        // 0.14 save takes (`save::derived_vault_id`, from `created` and
+        // `vault_name`), which is how a vault upgraded from 0.13 got the id
+        // pinned here. Those two fields are not covered by the v1 signature
+        // or the MAC, so this check catches another vault's file, not one
+        // whose header was edited to match; such a file is read-only where
+        // it loads (see `pre_upgrade_read_only`). It comes first, so `murk
+        // trust` never re-signs another vault's file under this vault's id.
+        let legacy = *v == crate::signature::LEGACY_SIGNED_VIEW_VERSION;
+        let found = if legacy {
+            crate::save::derived_vault_id(loaded.vault)
+        } else {
+            loaded.vault.vault_id.clone()
+        };
+        if !p.vault_id.is_empty() && found != p.vault_id {
             return refuse(Refusal::OtherVault {
                 pinned: p.vault_id.clone(),
-                found: loaded.vault.vault_id.clone(),
+                found,
+            });
+        }
+        // A v1 signature covers neither the vault id nor the counter. Where
+        // this machine has seen the vault written by murk 0.14 (see
+        // `upgraded_at`), such a vault can only be an older revision. Anywhere
+        // else — a branch not upgraded here yet, a detached HEAD — it is
+        // pre-0.14 history: every other rule still applies, and its load only
+        // narrows the pin (see `accepted_pin`).
+        if legacy && upgraded_at(p, head) {
+            return refuse(Refusal::PreUpgrade {
+                on_branch: matches!(head, HeadState::Branch(_)),
             });
         }
         // Rollback is judged per branch: checking out an older branch is
@@ -972,11 +1126,14 @@ fn verdict(
 ///
 /// A side written by murk 0.13 carries no authenticated identity or order,
 /// so its content cannot be checked for rollback or for being another vault.
-/// Once this vault has 0.14 state — in the pin, or on the other side — such
-/// a side may only stand for history it shares with the ancestor: if it
-/// changed anything it is refused, rather than letting an old signed
-/// revision (or another 0.13 vault of the team) override newer content.
-/// Returns the reason a side is refused.
+/// Such a side is judged like a load of it on the branch being merged into:
+/// where this machine has seen the vault written by murk 0.14 there (see
+/// [`upgraded_at`]), it is refused. Elsewhere it is pre-0.14 history, as a
+/// load is, but once the other side is 0.14 it may only stand for history it
+/// shares with the ancestor: if it changed anything it is refused, rather
+/// than letting an old signed revision (or another 0.13 vault of the team)
+/// override newer content. A side with only one of the two fields is judged
+/// against any 0.14 state in the pin. Returns the reason a side is refused.
 pub fn check_merge_side(
     vault_path: &str,
     side: &Loaded<'_>,
@@ -985,25 +1142,28 @@ pub fn check_merge_side(
     upgraded: bool,
 ) -> Result<(), String> {
     let pin = pins::read(vault_path)?;
+    let pre_upgrade = side.vault.vault_id.is_empty() && side.vault.generation == 0;
     let legacy = side.vault.vault_id.is_empty() || side.vault.generation == 0;
-    let pinned_id = pin
-        .as_ref()
-        .filter(|p| p.v >= pins::PIN_VERSION && !p.vault_id.is_empty())
+    let pin_v2 = pin.as_ref().filter(|p| p.v >= pins::PIN_VERSION);
+    let pinned_id = pin_v2
+        .filter(|p| !p.vault_id.is_empty())
         .map(|p| p.vault_id.as_str());
-    let pin_upgraded = pinned_id.is_some()
-        || pin
-            .as_ref()
-            .is_some_and(|p| p.v >= pins::PIN_VERSION && p.generation > 0);
-    // With a pinned vault id, only the ancestor may be pre-0.14 history: a
-    // side without an id or counter is never merged. Without one, a 0.13 side
-    // that changed the vault is refused once the other side is 0.14.
+    let pin_upgraded = pin_v2.is_some_and(|p| {
+        if pre_upgrade {
+            upgraded_at(p, &head_of(vault_path))
+        } else {
+            p.generation > 0 || !p.vault_id.is_empty()
+        }
+    });
     if legacy && (pin_upgraded || (changed && upgraded)) {
         return Err(
             "rolled back: it is a murk 0.13 revision (no vault id or counter), and this vault has since been saved by murk 0.14, so it cannot be checked for rollback or for being another vault — apply its intended change with murk after merging"
                 .into(),
         );
     }
+    // A 0.13 side has no id to compare; it passed above only as history.
     if let Some(id) = pinned_id
+        && !pre_upgrade
         && side.vault.vault_id != id
     {
         return Err(format!(
@@ -1023,8 +1183,9 @@ pub fn check_merge_side(
                 p.groups = canonical_groups(groups);
             }
             // A side that forked before the vault got its id (murk 0.13) and
-            // changed nothing is the ancestor's state, not another vault.
-            if side.vault.vault_id.is_empty() && base.vault_id.is_empty() {
+            // changed nothing is the ancestor's state, not another vault. A
+            // view-1 side is judged by its derived id instead (see `verdict`).
+            if side.vault.vault_id.is_empty() && base.vault_id.is_empty() && !signed_v1(side) {
                 p.vault_id.clear();
             }
         }
@@ -1251,10 +1412,13 @@ pub fn accepted_pin(
     // the vault outside git) is current: a branch it has never accepted —
     // an unmerged pull request, say — is read as history and only narrows
     // the pin, like a detached HEAD. Generation 0 is murk ≤ 0.13: no order,
-    // so every such load is current.
+    // so every such load is current until this machine has seen the vault
+    // written by murk 0.14 (a counter or an id); after that a 0.13 vault that
+    // still loads (on a branch not upgraded here) is history.
     let current = match how {
         Acceptance::Load => prior_v2.filter(|p| p.has_trust()).is_none_or(|p| {
-            let newer = found > p.generation || (found == 0 && p.generation == 0);
+            let newer =
+                found > p.generation || (found == 0 && p.generation == 0 && p.vault_id.is_empty());
             newer
                 && match head {
                     HeadState::NotARepo => true,
@@ -1289,13 +1453,10 @@ pub fn accepted_pin(
         .collect();
     pin.grants.extend(new_grants);
     advance_marks(&mut pin, loaded.vault, current, reset_counter, head);
+    record_pre_upgrade_acceptance(&mut pin, loaded.vault, how, current, head);
 
     let prior_id = std::mem::take(&mut pin.vault_id);
-    pin.vault_id = if loaded.vault.vault_id.is_empty() {
-        prior_id.clone()
-    } else {
-        loaded.vault.vault_id.clone()
-    };
+    pin.vault_id = accepted_vault_id(loaded, &prior_id);
     // Removals belong to one vault: another vault's counters do not compare.
     let other_vault = !prior_id.is_empty() && prior_id != pin.vault_id;
     if other_vault {
@@ -1304,7 +1465,13 @@ pub fn accepted_pin(
         pin.removed_at_commit.clear();
     }
 
-    let dropped = replace_trusted(&mut pin, loaded.vault, how, had_trust, current);
+    let mut dropped = replace_trusted(&mut pin, loaded.vault, how, had_trust, current);
+    // `murk trust` of an older 0.13 copy only widens trust (see
+    // `older_pre_upgrade_copy`): nobody it predates is dropped or removed.
+    let older_copy = older_pre_upgrade_copy(prior_v2, loaded.vault, how, other_vault);
+    if older_copy {
+        pin.trusted.extend(std::mem::take(&mut dropped));
+    }
     let record_removals = !other_vault
         && match how {
             Acceptance::Load => current,
@@ -1342,7 +1509,7 @@ pub fn accepted_pin(
     pin.trusted.retain(|k| !removed.contains_key(k));
 
     pin_signing_keys(&mut pin, loaded, current);
-    if current {
+    if current && !older_copy {
         pin.groups = canonical_groups(loaded.groups);
     }
     let trusted = pin.trusted.clone();
@@ -1350,6 +1517,25 @@ pub fn accepted_pin(
     pin.was_signed = matches!(loaded.signature, types::SignatureState::Signed { .. })
         || prior.is_some_and(|p| p.was_signed);
     pin
+}
+
+/// Whether `how` is `murk trust` of an older murk 0.13 copy of this vault
+/// after this machine saw the vault in 0.14 form (the pin holds a counter or
+/// an id; not another vault). Such a copy can't show what changed since it
+/// was written, so accepting it adds what the user accepted (its signer and
+/// recipients) and narrows nothing: members who joined later stay trusted,
+/// none is recorded as removed, and the pinned groups stay. A real removal is
+/// learned only from a vault accepted as current.
+fn older_pre_upgrade_copy(
+    prior: Option<&TrustPin>,
+    vault: &types::Vault,
+    how: Acceptance<'_>,
+    other_vault: bool,
+) -> bool {
+    matches!(how, Acceptance::Trust { .. })
+        && written_by_0_13(vault)
+        && !other_vault
+        && prior.is_some_and(|p| p.generation > 0 || !p.vault_id.is_empty())
 }
 
 /// Keep `removed_on` and `removed_at_commit` in step with `removed`, and mark
@@ -1380,6 +1566,43 @@ fn record_removal_reach(pin: &mut TrustPin, vault: &types::Vault, head: &HeadSta
                 .or_default()
                 .insert(branch.clone());
         }
+    }
+}
+
+/// The vault id to pin for an accepted `loaded` over `prior` (the pinned
+/// one). A murk 0.13 vault has no id of its own; once this machine pinned one
+/// it stands for the id its first 0.14 save takes (see `verdict`), so
+/// accepting another vault's 0.13 file with `murk trust` pins that id.
+fn accepted_vault_id(loaded: &Loaded<'_>, prior: &str) -> String {
+    if !loaded.vault.vault_id.is_empty() {
+        loaded.vault.vault_id.clone()
+    } else if !prior.is_empty() && signed_v1(loaded) {
+        crate::save::derived_vault_id(loaded.vault)
+    } else {
+        prior.to_string()
+    }
+}
+
+/// Record, or drop, the murk 0.13 copy accepted for `head` (see
+/// [`TrustPin::accepted_pre_upgrade`]): the copy the user accepted with
+/// `murk trust` is the one that may be written there (see
+/// [`pre_upgrade_read_only`]); any other current acceptance there supersedes
+/// it.
+fn record_pre_upgrade_acceptance(
+    pin: &mut TrustPin,
+    vault: &types::Vault,
+    how: Acceptance<'_>,
+    current: bool,
+    head: &HeadState,
+) {
+    let Some(key) = acceptance_key(head) else {
+        return;
+    };
+    if written_by_0_13(vault) && matches!(how, Acceptance::Trust { .. }) {
+        pin.accepted_pre_upgrade
+            .insert(key, pre_upgrade_fingerprint(vault));
+    } else if !written_by_0_13(vault) && current {
+        pin.accepted_pre_upgrade.remove(&key);
     }
 }
 
@@ -1550,8 +1773,9 @@ fn pin_signing_keys(pin: &mut TrustPin, loaded: &Loaded<'_>, current: bool) {
 /// signer's key must still be the pinned one, and a grant key or a signer
 /// never trusted is refused. The vault id must match, except that a revision
 /// with none is pre-0.14 history: it predates the id (and the counter), so
-/// neither its missing id nor its 0.13 signature makes it another vault or a
-/// rollback.
+/// neither its missing id nor its 0.13 signature makes it a rollback. A
+/// view-1 revision is compared by the id its first 0.14 save takes (see
+/// `verdict`), so another vault's 0.13 file is still another vault.
 pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdict, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
@@ -1560,7 +1784,7 @@ pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdic
         p.generation = 0;
         p.branches.clear();
         p.groups.clear();
-        if revision.vault.vault_id.is_empty() {
+        if revision.vault.vault_id.is_empty() && !signed_v1(revision) {
             p.vault_id.clear();
         }
         // History predating the pin may be unsigned without that being a
@@ -1673,6 +1897,12 @@ pub fn refusal_message(
         ),
         Refusal::RolledBack { pinned, found } => format!(
             "vault {vault_path} rolled back: generation {found}, but this machine accepted generation {pinned} — an older revision may have been replayed\nif you switched to an older branch, switch back; for a deliberate revert, {review}"
+        ),
+        Refusal::PreUpgrade { on_branch: true } => format!(
+            "vault {vault_path} is in the pre-0.14 format, but this repository's vault has already been upgraded on this branch\nif this is an older revision, switch back to the newer one; to accept this copy, run `murk trust --vault {vault_path}` (it re-signs it)"
+        ),
+        Refusal::PreUpgrade { on_branch: false } => format!(
+            "vault {vault_path} is in the pre-0.14 format, but this vault has already been upgraded on this machine\nif this is an older copy, restore the newer one; otherwise run `murk trust --vault {vault_path}` to accept this copy"
         ),
         Refusal::OtherVault { pinned, found } => format!(
             "vault {vault_path} is a different vault (id {}, expected {pinned}) — another vault's file may have been copied over it\n{review}",
@@ -1803,11 +2033,363 @@ mod tests {
         );
     }
 
+    /// A vault written by murk 0.13: no id, no counter, a view-1 signature.
+    fn pre_upgrade(recipients: &[&str], by: &str) -> Case {
+        let mut c = Case::new(recipients, 0, by);
+        c.vault.vault_id.clear();
+        c.sig = types::SignatureState::Signed {
+            signer: by.into(),
+            v: crate::signature::LEGACY_SIGNED_VIEW_VERSION,
+        };
+        c
+    }
+
+    #[test]
+    fn a_pre_upgrade_vault_is_judged_per_branch() {
+        let main = HeadState::Branch("main".into());
+        let feature = HeadState::Branch("feature".into());
+        let fresh = HeadState::Branch("fresh".into());
+        let old = pre_upgrade(&[A], A);
+        // main accepted the 0.13 vault: a mark of 0, from before 0.14.
+        let pin = super::accepted_pin(&old.loaded(), None, Acceptance::Load, &main, None);
+        assert_eq!(pin.branches.get("main"), Some(&0));
+        // Then this machine made the first 0.14 save, on feature.
+        let pin = super::accepted_pin(
+            &Case::new(&[A], 1, A).loaded(),
+            Some(&pin),
+            Acceptance::OwnSave { before: None },
+            &feature,
+            None,
+        );
+        assert_eq!((pin.generation, pin.branches.get("feature")), (1, Some(&1)));
+
+        // Where this machine has a 0.14 mark the old format is an older
+        // revision: refused, with its own refusal.
+        assert_eq!(
+            super::verdict(&old.loaded(), Some(&pin), None, &feature),
+            Verdict::Refused(Refusal::PreUpgrade { on_branch: true })
+        );
+        // main's mark of 0 is from before 0.14, so main's committed 0.13
+        // vault still loads; so does it on a branch never accepted here and
+        // on a detached HEAD.
+        for head in [&main, &fresh, &HeadState::Detached] {
+            assert_eq!(
+                super::verdict(&old.loaded(), Some(&pin), None, head),
+                Verdict::Trusted,
+                "{head:?}"
+            );
+        }
+        // It loads as history: a recipient it lists that the pin does not
+        // trust stays untrusted, and no mark or id changes.
+        let wider = pre_upgrade(&[A, M], A);
+        for head in [&main, &fresh, &HeadState::Detached] {
+            assert_eq!(
+                super::verdict(&wider.loaded(), Some(&pin), None, head),
+                Verdict::Trusted
+            );
+            let after =
+                super::accepted_pin(&wider.loaded(), Some(&pin), Acceptance::Load, head, None);
+            assert!(!after.trusted.contains(M), "{head:?} widened trust");
+            assert_eq!(
+                (&after.vault_id, after.generation, &after.branches),
+                (&pin.vault_id, pin.generation, &pin.branches),
+                "{head:?}"
+            );
+        }
+        // Every other rule still applies: a signer the pin does not trust.
+        assert_eq!(
+            super::verdict(&pre_upgrade(&[A, M], M).loaded(), Some(&pin), None, &main),
+            Verdict::Refused(Refusal::UntrustedSigner { signer: M.into() })
+        );
+        // A save on main is numbered past the overall mark and gives main a
+        // 0.14 mark: from then on the old format is refused there too.
+        let pin = super::accepted_pin(
+            &Case::new(&[A], 2, A).loaded(),
+            Some(&pin),
+            Acceptance::OwnSave { before: None },
+            &main,
+            None,
+        );
+        assert_eq!(pin.branches.get("main"), Some(&2));
+        assert_eq!(
+            super::verdict(&old.loaded(), Some(&pin), None, &main),
+            Verdict::Refused(Refusal::PreUpgrade { on_branch: true })
+        );
+        // Outside git the overall mark applies, as before.
+        assert_eq!(
+            super::verdict(&old.loaded(), Some(&pin), None, &HeadState::NotARepo),
+            Verdict::Refused(Refusal::PreUpgrade { on_branch: false })
+        );
+    }
+
+    #[test]
+    fn trusting_an_older_0_13_copy_never_records_a_later_member_removed() {
+        // A and B trusted (B joined in 0.14). `side` carries an older 0.13
+        // copy that lists A and M, signed by M, whom the user now trusts.
+        let main = HeadState::Branch("main".into());
+        let side = HeadState::Branch("side".into());
+        let pin = super::accepted_pin(
+            &pre_upgrade(&[A], A).loaded(),
+            None,
+            Acceptance::Load,
+            &main,
+            None,
+        );
+        let mut upgrade = Case::new(&[A, B], 1, A);
+        upgrade
+            .groups
+            .insert("ops".into(), vec![A.into(), B.into()]);
+        let pin = super::accepted_pin(
+            &upgrade.loaded(),
+            Some(&pin),
+            Acceptance::OwnSave { before: None },
+            &main,
+            None,
+        );
+        assert!(pin.trusted.contains(B));
+        let mut copy = pre_upgrade(&[A, M], M);
+        copy.groups.insert("ops".into(), vec![A.into()]);
+        assert_eq!(
+            super::verdict(&copy.loaded(), Some(&pin), None, &side),
+            Verdict::Refused(Refusal::UntrustedSigner { signer: M.into() })
+        );
+        let none = BTreeSet::new();
+        let trusted = super::accepted_pin(
+            &copy.loaded(),
+            Some(&pin),
+            Acceptance::Trust {
+                reset_counter: false,
+                readmit: &none,
+            },
+            &side,
+            None,
+        );
+        assert!(trusted.trusted.contains(M), "the signer the user accepted");
+        assert!(trusted.trusted.contains(B), "a later member stays trusted");
+        assert!(trusted.removed.is_empty(), "{:?}", trusted.removed);
+        assert_eq!(trusted.groups, pin.groups, "the pinned groups stay");
+        assert_eq!(
+            super::verdict(
+                &Case::new(&[A, B], 2, B).loaded(),
+                Some(&trusted),
+                None,
+                &main
+            ),
+            Verdict::Trusted
+        );
+    }
+
+    #[test]
+    fn only_an_older_copy_of_this_vault_after_its_upgrade_only_adds() {
+        let main = HeadState::Branch("main".into());
+        let side = HeadState::Branch("side".into());
+        let none = BTreeSet::new();
+        let trust = |copy: &Case, prior: &TrustPin| {
+            super::accepted_pin(
+                &copy.loaded(),
+                Some(prior),
+                Acceptance::Trust {
+                    reset_counter: true,
+                    readmit: &none,
+                },
+                &side,
+                None,
+            )
+        };
+        // Before this machine saw the vault in 0.14 form, trusting a 0.13
+        // vault is the ordinary full decision: one that drops B removes B.
+        let old = super::accepted_pin(
+            &pre_upgrade(&[A, B], A).loaded(),
+            None,
+            Acceptance::Load,
+            &main,
+            None,
+        );
+        let trusted = trust(&pre_upgrade(&[A], A), &old);
+        assert!(!trusted.trusted.contains(B));
+        assert!(trusted.removed.contains_key(B));
+        // After the upgrade, accepting another vault's 0.13 file replaces the
+        // trust state for it: B, a member of this vault only, is not kept.
+        let upgraded = super::accepted_pin(
+            &Case::new(&[A, B], 1, A).loaded(),
+            Some(&old),
+            Acceptance::OwnSave { before: None },
+            &main,
+            None,
+        );
+        let mut other = pre_upgrade(&[A], A);
+        other.vault.created = "2019-01-01T00:00:00Z".into();
+        let trusted = trust(&other, &upgraded);
+        assert_eq!(
+            trusted.vault_id,
+            crate::save::derived_vault_id(&other.vault)
+        );
+        assert!(!trusted.trusted.contains(B));
+    }
+
+    #[test]
+    fn a_0_13_load_after_0_14_state_is_history_even_with_no_counter() {
+        // A pin with this vault's id and an overall mark of 0 (outside git,
+        // `murk trust` of another vault's 0.13 file resets the mark to 0 and
+        // pins that file's id). A 0.13 vault an unsigned load accepts there is
+        // history: it does not take over the trusted set.
+        let pin = TrustPin {
+            v: pins::PIN_VERSION,
+            vault_id: crate::save::derived_vault_id(&pre_upgrade(&[A], A).vault),
+            trusted: [A.to_string()].into(),
+            ..Default::default()
+        };
+        let mut wider = pre_upgrade(&[A, M], A);
+        wider.sig = types::SignatureState::Unsigned;
+        let after = super::accepted_pin(
+            &wider.loaded(),
+            Some(&pin),
+            Acceptance::Load,
+            &HeadState::NotARepo,
+            None,
+        );
+        assert!(!after.trusted.contains(M), "{:?}", after.trusted);
+    }
+
+    #[test]
+    fn an_accepted_0_13_copy_is_the_latest_one_until_the_branch_upgrades() {
+        let main = HeadState::Branch("main".into());
+        let side = HeadState::Branch("side".into());
+        let pin = super::accepted_pin(
+            &pre_upgrade(&[A], A).loaded(),
+            None,
+            Acceptance::Load,
+            &main,
+            None,
+        );
+        let pin = super::accepted_pin(
+            &Case::new(&[A], 1, A).loaded(),
+            Some(&pin),
+            Acceptance::OwnSave { before: None },
+            &main,
+            None,
+        );
+        let copy = pre_upgrade(&[A], A);
+        let mut edited = pre_upgrade(&[A], A);
+        edited
+            .vault
+            .schema
+            .insert("EDITED".into(), types::SchemaEntry::default());
+        // `murk trust` of a copy makes that copy, and only it, writable here;
+        // accepting another copy supersedes it.
+        let accepted = accept_pre_upgrade_copy(Some(&pin), &side, &copy.vault).unwrap();
+        assert!(!pre_upgrade_read_only(Some(&accepted), &side, &copy.vault));
+        assert!(pre_upgrade_read_only(Some(&accepted), &side, &edited.vault));
+        let accepted = accept_pre_upgrade_copy(Some(&accepted), &side, &edited.vault).unwrap();
+        assert!(pre_upgrade_read_only(Some(&accepted), &side, &copy.vault));
+        assert!(!pre_upgrade_read_only(
+            Some(&accepted),
+            &side,
+            &edited.vault
+        ));
+        // The same through `accepted_pin`, for a `murk trust` that goes
+        // through it (here one that resets the counter).
+        let none = BTreeSet::new();
+        let trusted = super::accepted_pin(
+            &copy.loaded(),
+            Some(&accepted),
+            Acceptance::Trust {
+                reset_counter: true,
+                readmit: &none,
+            },
+            &side,
+            None,
+        );
+        assert!(!pre_upgrade_read_only(Some(&trusted), &side, &copy.vault));
+        assert!(pre_upgrade_read_only(Some(&trusted), &side, &edited.vault));
+        // The branch's upgrade drops its entry: nothing 0.13 stays writable
+        // there on the strength of an old acceptance.
+        let upgraded = super::accepted_pin(
+            &Case::new(&[A], 2, A).loaded(),
+            Some(&trusted),
+            Acceptance::OwnSave { before: None },
+            &side,
+            None,
+        );
+        assert!(!upgraded.accepted_pre_upgrade.contains_key("side"));
+        // A detached HEAD has no branch to record a copy on.
+        assert!(accept_pre_upgrade_copy(Some(&pin), &HeadState::Detached, &copy.vault).is_none());
+        assert!(pre_upgrade_read_only(
+            Some(&pin),
+            &HeadState::Detached,
+            &copy.vault
+        ));
+    }
+
+    #[test]
+    fn a_pre_upgrade_vault_is_judged_by_the_id_its_upgrade_takes() {
+        let main = HeadState::Branch("main".into());
+        let feature = HeadState::Branch("feature".into());
+        let fresh = HeadState::Branch("fresh".into());
+        let old = pre_upgrade(&[A], A);
+        let pin = super::accepted_pin(&old.loaded(), None, Acceptance::Load, &main, None);
+        // The first 0.14 save, on feature, takes the id derived from the 0.13
+        // vault's creation stamp and name.
+        let upgraded = Case::new(&[A], 1, A);
+        assert_eq!(
+            upgraded.vault.vault_id,
+            crate::save::derived_vault_id(&old.vault)
+        );
+        let pin = super::accepted_pin(
+            &upgraded.loaded(),
+            Some(&pin),
+            Acceptance::OwnSave { before: None },
+            &feature,
+            None,
+        );
+        // Another vault's 0.13 file, signed by a trusted member: its upgrade
+        // would take another id, so it is another vault on every branch.
+        let mut other = pre_upgrade(&[A, M], A);
+        other.vault.created = "2020-01-01T00:00:00Z".into();
+        for head in [&main, &fresh, &HeadState::Detached] {
+            assert_eq!(
+                super::verdict(&other.loaded(), Some(&pin), None, head),
+                Verdict::Refused(Refusal::OtherVault {
+                    pinned: pin.vault_id.clone(),
+                    found: crate::save::derived_vault_id(&other.vault),
+                }),
+                "{head:?}"
+            );
+        }
+        // A different 0.13 revision of this vault (same stamp and name) is
+        // this vault, and loads as history.
+        let revision = pre_upgrade(&[A, B], A);
+        assert_eq!(
+            super::verdict(&revision.loaded(), Some(&pin), None, &main),
+            Verdict::Trusted
+        );
+        // So does a vault copied from it under 0.13 (`cp .murk staging.murk`):
+        // the copies share the stamp and name, so the id can't tell them apart.
+        let mut copy = pre_upgrade(&[A], A);
+        copy.vault
+            .schema
+            .insert("STAGING_ONLY".into(), types::SchemaEntry::default());
+        assert_eq!(
+            super::verdict(&copy.loaded(), Some(&pin), None, &fresh),
+            Verdict::Trusted
+        );
+        // A pin with no id yet (the vault never seen in 0.14 form) has nothing
+        // to compare with.
+        let mut no_id = pin.clone();
+        no_id.vault_id.clear();
+        assert_eq!(
+            super::verdict(&other.loaded(), Some(&no_id), None, &main),
+            Verdict::Trusted
+        );
+    }
+
     fn vault(recipients: &[&str], generation: u64) -> types::Vault {
         let mut v = crate::testutil::empty_vault();
         v.recipients = recipients.iter().map(|r| (*r).to_string()).collect();
         v.generation = generation;
-        v.vault_id = "00112233445566778899aabbccddeeff".into();
+        // The id a 0.14 save gives this vault when it comes from 0.13, so a
+        // `pre_upgrade` copy of it is the same vault.
+        v.vault_id = crate::save::derived_vault_id(&v);
         v
     }
 
@@ -2091,11 +2673,11 @@ mod tests {
         assert_eq!(verdict(&v1.loaded(), Some(&pin), None), Verdict::Trusted);
         // ...then the first 0.14 save lands (id + counter)...
         let pin = accepted_pin(&Case::new(&[A], 1, A).loaded(), Some(&pin), false);
-        // ...and the old v1 revision is now a rollback.
-        assert!(matches!(
+        // ...and outside git the old v1 revision is now refused.
+        assert_eq!(
             verdict(&v1.loaded(), Some(&pin), None),
-            Verdict::Refused(Refusal::RolledBack { .. })
-        ));
+            Verdict::Refused(Refusal::PreUpgrade { on_branch: false })
+        );
     }
 
     #[test]
@@ -2192,9 +2774,9 @@ mod tests {
 
     #[test]
     fn a_pinned_vault_refuses_an_id_less_merge_side_even_unchanged() {
-        // The pin has seen the vault in 0.14 form. A side without a vault id
-        // (a 0.13 revision) is refused even when it equals the ancestor:
-        // only the ancestor may be pre-0.14 history.
+        // The pin has seen the vault in 0.14 form, and outside git the
+        // overall mark applies. A side without a vault id (a 0.13 revision)
+        // is refused even when it equals the ancestor.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".murk");
         let path = path.to_str().unwrap();
@@ -2211,6 +2793,55 @@ mod tests {
                 .is_err_and(|e| e.contains("murk 0.13 revision")),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn a_0_13_merge_side_is_judged_by_the_branch_merged_into() {
+        // A checkout of branch `fresh`, which this machine has no 0.14 mark
+        // for; the pin's 0.14 state comes from `feature`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let head = dir.path().join(".git/HEAD");
+        let path = dir.path().join(".murk");
+        let path = path.to_str().unwrap();
+        let mut pin = pin_for(&Case::new(&[A], 3, A));
+        pin.branches = [("feature".to_string(), 3), ("fresh".to_string(), 0)].into();
+        let side = pre_upgrade(&[A], A);
+        let base = side.vault.clone();
+        let changed = pre_upgrade(&[A, B], A);
+        let check = |branch: &str, side: &Case, changed: bool, upgraded: bool| {
+            std::fs::write(&head, format!("ref: refs/heads/{branch}\n")).unwrap();
+            with_pin(path, &pin, || {
+                check_merge_side(path, &side.loaded(), Some((&base, None)), changed, upgraded)
+            })
+        };
+        // On `fresh` a 0.13 side is history, as a load there is: merged,
+        // changed or not, while the other side is 0.13 too.
+        assert_eq!(check("fresh", &side, false, false), Ok(()));
+        assert_eq!(check("fresh", &changed, true, false), Ok(()));
+        // One that changed the vault still never overrides a 0.14 side.
+        assert!(
+            check("fresh", &changed, true, true).is_err_and(|e| e.contains("murk 0.13 revision"))
+        );
+        // On `feature`, upgraded here, it is refused even unchanged.
+        assert!(
+            check("feature", &side, false, false).is_err_and(|e| e.contains("murk 0.13 revision"))
+        );
+        // Every other rule still applies: a signer this machine does not trust.
+        assert!(check("fresh", &pre_upgrade(&[A, M], M), true, false).is_err());
+        // So does the vault id: another vault's 0.13 file (its first save would
+        // derive another id) is refused on `fresh` too, as a side...
+        let mut other = pre_upgrade(&[A], A);
+        other.vault.created = "2020-01-01T00:00:00Z".into();
+        assert!(check("fresh", &other, true, false).is_err_and(|e| e.contains("different vault")),);
+        // ...and as the ancestor (`assess_revision`).
+        let revision = with_pin(path, &pin, || assess_revision(path, &other.loaded()));
+        assert!(
+            matches!(revision, Ok(Verdict::Refused(Refusal::OtherVault { .. }))),
+            "{revision:?}"
+        );
+        let own = with_pin(path, &pin, || assess_revision(path, &side.loaded()));
+        assert_eq!(own, Ok(Verdict::Trusted));
     }
 
     #[test]

@@ -923,13 +923,9 @@ fn diff_refuses_a_forged_revision() {
 
 // ── Legitimate flows ──
 
-/// An ssh-rsa key (like a hardware/plugin key) cannot sign. Its user still
-/// verifies signed vaults, and works with a vault it wrote unsigned, with a
-/// warning. A teammate whose machine saw the vault signed refuses that
-/// unsigned write until they review it and `murk trust` re-signs it.
-#[test]
-fn a_key_that_cannot_sign_gets_the_warning_path() {
-    const RSA_SK: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+/// A throwaway ssh-rsa key (test only): like a hardware or plugin key, it
+/// cannot sign.
+const RSA_SK: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn
 NhAAAAAwEAAQAAAQEA5jkmGpN5TpKvfi9DRPmuKqW0wW1gVy8ZS/ShQ1rhBeVsHf7v+1aM
 yH/c4nkmE5LyH3OVDURX5mkdbKPCwwa8DvIkzzP8XO+VBd0U3tz/Xug0pLToqDM8Bd7JAr
@@ -957,8 +953,73 @@ sI+cTp5/1HL1bGywPCCkdCcTm1CEFtfiO5ZJgS7LELv5mP+CUv8KDnuZJdNaUWanUwUiwD
 +kddyH0+YIgSBSkLAAAAB2h3QHRlc3QBAgM=
 -----END OPENSSH PRIVATE KEY-----
 ";
-    const RSA_PK: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDmOSYak3lOkq9+L0NE+a4qpbTBbWBXLxlL9KFDWuEF5Wwd/u/7VozIf9zieSYTkvIfc5UNRFfmaR1so8LDBrwO8iTPM/xc75UF3RTe3P9e6DSktOioMzwF3skCsFcYBf7vxGUOtGQIV/jExLSxk4xwg3uHIrk14ijJ7h1OGaBIKicP+WTr8d3lqG+8gxEAlUjHgBQydUATM4XuVVsxYj289pR4KeCA6NTEqvWfufnluO0LMMb8BxWKMTtZlnS0La7mVNL9h8u2xrnhl8XqShVRm6LO0d29rzoIWqimaooiTNwHu5RhrDPXx4vtp3a1wiM4KWcEA53gmo5ZytW6R4YR hw@test";
+const RSA_PK: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDmOSYak3lOkq9+L0NE+a4qpbTBbWBXLxlL9KFDWuEF5Wwd/u/7VozIf9zieSYTkvIfc5UNRFfmaR1so8LDBrwO8iTPM/xc75UF3RTe3P9e6DSktOioMzwF3skCsFcYBf7vxGUOtGQIV/jExLSxk4xwg3uHIrk14ijJ7h1OGaBIKicP+WTr8d3lqG+8gxEAlUjHgBQydUATM4XuVVsxYj289pR4KeCA6NTEqvWfufnluO0LMMb8BxWKMTtZlnS0La7mVNL9h8u2xrnhl8XqShVRm6LO0d29rzoIWqimaooiTNwHu5RhrDPXx4vtp3a1wiM4KWcEA53gmo5ZytW6R4YR hw@test";
 
+/// Write `RSA_SK` to an owner-only key file under `base`.
+fn rsa_key_file(base: &Path) -> PathBuf {
+    let key_file = base.join("hw_rsa");
+    fs::write(&key_file, RSA_SK).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    key_file
+}
+
+/// A vault created by a key that cannot sign is unsigned, and its creator's
+/// machine loads it with the usual warning: it was never seen signed.
+#[test]
+fn a_vault_created_by_a_key_that_cannot_sign_loads_with_a_warning() {
+    let base = TempDir::new().unwrap();
+    let hw = Machine::new(base.path(), "hw");
+    let key_file = rsa_key_file(base.path());
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let as_hw = || {
+        let mut cmd = hw.murk(&repo);
+        cmd.env("MURK_KEY_FILE", &key_file);
+        cmd
+    };
+    as_hw().arg("init").write_stdin("hw\n").assert().success();
+    let vault: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".murk")).unwrap()).unwrap();
+    assert!(vault.get("sig").is_none(), "an ssh-rsa key cannot sign");
+    for _ in 0..2 {
+        as_hw()
+            .args(["add", "DB"])
+            .write_stdin("db\n")
+            .assert()
+            .success();
+        as_hw()
+            .args(["get", "DB"])
+            .assert()
+            .success()
+            .stdout("db\n")
+            .stderr(predicate::str::contains(
+                "vault is unsigned and your key cannot sign",
+            ));
+    }
+
+    // A key that can sign is unchanged: its vault is signed and loads clean.
+    let age = Machine::new(base.path(), "age");
+    let signed = base.path().join("signed");
+    age.init(&signed, "age");
+    age.add(&signed, "DB", "db");
+    age.murk(&signed)
+        .args(["get", "DB"])
+        .assert()
+        .success()
+        .stdout("db\n")
+        .stderr(predicate::str::contains("unsigned").not());
+}
+
+/// An ssh-rsa key (like a hardware/plugin key) cannot sign. Its user still
+/// verifies signed vaults, and works with a vault it wrote unsigned, with a
+/// warning. A teammate whose machine saw the vault signed refuses that
+/// unsigned write until they review it and `murk trust` re-signs it.
+#[test]
+fn a_key_that_cannot_sign_gets_the_warning_path() {
     let base = TempDir::new().unwrap();
     let (alice, repo) = alice_repo(base.path());
     alice
@@ -974,13 +1035,7 @@ sI+cTp5/1HL1bGywPCCkdCcTm1CEFtfiO5ZJgS7LELv5mP+CUv8KDnuZJdNaUWanUwUiwD
         .assert()
         .success();
     let hw = Machine::new(base.path(), "hw");
-    let key_file = base.path().join("hw_rsa");
-    fs::write(&key_file, RSA_SK).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    let key_file = rsa_key_file(base.path());
     let as_hw = || {
         let mut cmd = hw.murk(&repo);
         cmd.env("MURK_KEY_FILE", &key_file);
@@ -1574,6 +1629,970 @@ fn branches_upgraded_separately_from_0_13_history_merge_cleanly() {
             .success()
             .stdout(v);
     }
+}
+
+/// Every worktree of a repository shares one trust pin. The first 0.14 save
+/// in one worktree must not lock the others out of their committed 0.13
+/// vault: there it loads as history until that branch is upgraded itself.
+#[test]
+fn one_worktrees_upgrade_leaves_the_other_branches_0_13_vault_loading() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join(".murk"), ROLLBACK_LEAKED).unwrap();
+    commit(&repo, "0.13: DB_URL set (later leaked)");
+    let leaked = head_commit(&repo);
+    fs::write(repo.join(".murk"), ROLLBACK_ROTATED).unwrap();
+    commit(&repo, "0.13: DB_URL rotated");
+    let (one, two) = (base.path().join("one"), base.path().join("two"));
+    for (dir, branch) in [(&one, "one"), (&two, "two")] {
+        git_ok(
+            &repo,
+            &["worktree", "add", "-q", "-b", branch, dir.to_str().unwrap()],
+        );
+    }
+    let pin = || -> serde_json::Value {
+        let files = pin_files(&alice);
+        assert_eq!(files.len(), 1, "one pin for every worktree: {files:?}");
+        serde_json::from_str(&fs::read_to_string(&files[0]).unwrap()).unwrap()
+    };
+    let version = |dir: &Path| -> String {
+        let vault: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".murk")).unwrap()).unwrap();
+        vault["version"].as_str().unwrap().to_string()
+    };
+
+    // This machine trusts the 0.13 vault on main, then upgrades it in the
+    // first worktree.
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&one, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+    assert!(version(&one).starts_with("3."), "{}", version(&one));
+    assert_eq!(pin()["branches"]["one"], 1);
+
+    // The second worktree, and main, still read their committed 0.13 vault.
+    for dir in [&two, &repo] {
+        alice
+            .with_key(dir, &key)
+            .args(["get", "DB_URL"])
+            .assert()
+            .success()
+            .stdout("ROTATED-db-value\n");
+    }
+    alice
+        .with_key(&two, &key)
+        .args(["agent", "ls"])
+        .assert()
+        .success();
+
+    // It is read-only there until this machine accepts that copy: a save
+    // would give this vault's id to a file whose identity nothing signs.
+    alice
+        .with_key(&two, &key)
+        .args(["add", "SECOND"])
+        .write_stdin("second\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is in the pre-0.14 format on a branch that hasn't taken the upgrade",
+        ));
+    assert!(version(&two).starts_with("2."), "nothing written");
+    alice
+        .with_key(&two, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("accepted .murk on this machine"));
+
+    // Accepted, a save there upgrades it, numbered past the first worktree's
+    // save, and gives its branch a 0.14 mark.
+    alice
+        .with_key(&two, &key)
+        .args(["add", "SECOND"])
+        .write_stdin("second\n")
+        .assert()
+        .success();
+    assert!(version(&two).starts_with("3."), "{}", version(&two));
+    assert_eq!(pin()["branches"]["two"], 2);
+    assert_eq!(pin()["generation"], 2);
+
+    // From then on an older 0.13 revision is refused on that branch.
+    git_ok(&two, &["checkout", &leaked, "--", ".murk"]);
+    alice
+        .with_key(&two, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is in the pre-0.14 format, but this repository's vault has already been upgraded on this branch",
+        ))
+        .stderr(predicate::str::contains(
+            "to accept this copy, run `murk trust --vault .murk` (it re-signs it)",
+        ))
+        .stdout(predicate::str::contains("LEAKED").not());
+
+    // Accepting it on purpose re-signs it: `murk trust` writes it in the 0.14
+    // format, signed, and it loads.
+    alice
+        .with_key(&two, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("signed .murk and trusted it"));
+    let resigned: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(two.join(".murk")).unwrap()).unwrap();
+    assert!(version(&two).starts_with("3."), "{}", version(&two));
+    assert!(resigned["sig"].is_object(), "signed in the 0.14 format");
+    assert_eq!(resigned["generation"], 3);
+    alice
+        .with_key(&two, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .success()
+        .stdout("LEAKED-db-value\n");
+}
+
+/// Once this machine has pinned the vault's id, another vault's 0.13 file is
+/// another vault on every branch, including one with no 0.14 mark where this
+/// vault's own 0.13 file loads as history. Without this, a save over it
+/// would stamp this vault's id and counter onto the other vault's contents.
+#[test]
+fn another_vaults_0_13_file_is_refused_on_a_branch_not_upgraded_yet() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join(".murk"), ROLLBACK_ROTATED).unwrap();
+    commit(&repo, "0.13: prod vault");
+    let feature = base.path().join("feature");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            feature.to_str().unwrap(),
+        ],
+    );
+    // Trusted on main, upgraded in the feature worktree: main keeps its 0.13
+    // file, which loads as history there.
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&feature, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+    alice
+        .with_key(&repo, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .success()
+        .stdout("ROTATED-db-value\n");
+
+    // A repo writer commits the team's staging vault (0.13, signed by bob, a
+    // trusted member) as main's `.murk`.
+    fs::write(repo.join(".murk"), ROLLBACK_STAGING).unwrap();
+    commit(&repo, "swap in the staging vault");
+    alice
+        .with_key(&repo, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("is a different vault"));
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "NEW"])
+        .write_stdin("new-secret\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a different vault"));
+    assert_eq!(
+        fs::read_to_string(repo.join(".murk")).unwrap(),
+        ROLLBACK_STAGING,
+        "nothing was written over the other vault"
+    );
+
+    // The documented limit: `created` and `vault_name` are covered by neither
+    // the 0.13 signature nor the MAC, so the staging file with its stamp set
+    // to prod's (a same-second `murk init`, or an edit) derives prod's id.
+    // Nothing re-signs it, and it loads as history.
+    let prod: serde_json::Value = serde_json::from_str(ROLLBACK_ROTATED).unwrap();
+    let mut aligned: serde_json::Value = serde_json::from_str(ROLLBACK_STAGING).unwrap();
+    aligned["created"] = prod["created"].clone();
+    let aligned = serde_json::to_string_pretty(&aligned).unwrap();
+    fs::write(repo.join(".murk"), &aligned).unwrap();
+    commit(&repo, "the staging vault with prod's creation stamp");
+    alice
+        .with_key(&repo, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .success()
+        .stdout("STAGING-db-value\n");
+    // But it is read-only: a save over it would give the staging vault prod's
+    // id and counter, and this machine never accepted the file.
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "NEW"])
+        .write_stdin("new-secret\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is in the pre-0.14 format on a branch that hasn't taken the upgrade",
+        ));
+    assert_eq!(fs::read_to_string(repo.join(".murk")).unwrap(), aligned);
+
+    // A genuine older revision of this vault, re-signed with a key this
+    // machine never trusted added as a recipient, also loads as history; a
+    // save over it would encrypt the new secret to that key, so it is refused.
+    let outsider = age::x25519::Identity::generate().to_public().to_string();
+    let alice_id = murk_cli::crypto::parse_identity(ROLLBACK_ALICE_KEY).unwrap();
+    let mut widened: murk_cli::types::Vault = serde_json::from_str(ROLLBACK_LEAKED).unwrap();
+    widened.recipients.push(outsider);
+    common::forgery::reseal_v1(&mut widened, &alice_id);
+    let widened = serde_json::to_string_pretty(&widened).unwrap();
+    fs::write(repo.join(".murk"), &widened).unwrap();
+    commit(&repo, "an older revision that lists an outsider");
+    alice
+        .with_key(&repo, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .success()
+        .stdout("LEAKED-db-value\n");
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "NEW"])
+        .write_stdin("new-secret\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("so it is read-only here"));
+    assert_eq!(fs::read_to_string(repo.join(".murk")).unwrap(), widened);
+}
+
+/// On a case-insensitive filesystem `git checkout Main` checks out branch
+/// `main` and HEAD says `Main`. The branch's marks still apply there.
+#[test]
+fn a_case_folded_branch_name_keeps_the_branchs_marks() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    let ignorecase = git(&repo, &["config", "--get", "core.ignorecase"]);
+    if String::from_utf8_lossy(&ignorecase.stdout).trim() != "true" {
+        eprintln!("skipped: the filesystem is case-sensitive");
+        return;
+    }
+    fs::write(repo.join(".murk"), ROLLBACK_LEAKED).unwrap();
+    commit(&repo, "0.13: leaked");
+    fs::write(repo.join(".murk"), ROLLBACK_ROTATED).unwrap();
+    commit(&repo, "0.13: rotated");
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+    commit(&repo, "0.14: upgrade");
+    git_ok(&repo, &["checkout", "-q", "Main"]);
+    assert_eq!(
+        fs::read_to_string(repo.join(".git/HEAD")).unwrap().trim(),
+        "ref: refs/heads/Main"
+    );
+    git_ok(&repo, &["checkout", "-q", "HEAD~2", "--", ".murk"]);
+    alice
+        .with_key(&repo, &key)
+        .args(["get", "DB_URL"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "already been upgraded on this branch",
+        ));
+}
+
+/// A vault that started in murk 0.13 (alice only, committed as the root
+/// commit), with a branch `side` forked there. Then, on `main`, the 0.14
+/// upgrade authorizes bob, and bob's machine trusts it. Returns (base,
+/// alice, bob, repo).
+fn upgraded_with_a_later_member() -> (TempDir, Machine, Machine, PathBuf) {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let bob = Machine::new(base.path(), "bob");
+    bob.init(&base.path().join("bob-scratch"), "bob");
+    let repo = base.path().join("repo");
+    alice.init(&repo, "alice");
+    alice.add(&repo, "DB", "db");
+    let path = repo.join(".murk");
+    let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+    let alice_id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+    common::forgery::reseal_v1(&mut vault, &alice_id);
+    murk_cli::vault::write(&path, &vault).unwrap();
+    fs::remove_dir_all(pin_dir(&alice)).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+    commit(&repo, "0.13 vault");
+    alice
+        .murk(&repo)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    git_ok(&repo, &["branch", "side"]);
+    authorize(&alice, &repo, &bob, "bob");
+    commit(&repo, "0.14: add bob");
+    bob.with_key(&repo, &bob.key_file())
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    (base, alice, bob, repo)
+}
+
+/// bob writes on `main`; alice confirms his first signing key and reads it.
+/// A member wrongly recorded as removed would be refused here, and `murk
+/// trust` would not accept him. With `forked`, alice's own re-signed copy
+/// took bob's counter on `main`, so his vault is also a fork she accepts.
+fn later_member_still_writes(alice: &Machine, bob: &Machine, repo: &Path, forked: bool) {
+    let pin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pin_files(alice)[0]).unwrap()).unwrap();
+    let bob_key = murk_cli::canonical_recipient(&bob.pubkey()).into_owned();
+    assert!(
+        pin["trusted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| *k == bob_key),
+        "bob is still trusted: {pin}"
+    );
+    assert!(pin.get("removed").is_none(), "nothing removed: {pin}");
+    bob.with_key(repo, &bob.key_file())
+        .args(["add", "BOBS"])
+        .write_stdin("b\n")
+        .assert()
+        .success();
+    alice
+        .murk(repo)
+        .args(["get", "BOBS"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has not confirmed yet"));
+    alice.murk(repo).args(["trust", "--yes"]).assert().success();
+    if forked {
+        alice
+            .murk(repo)
+            .args(["get", "BOBS"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("forked"));
+        alice.murk(repo).args(["trust", "--yes"]).assert().success();
+    }
+    alice
+        .murk(repo)
+        .args(["get", "BOBS"])
+        .assert()
+        .success()
+        .stdout("b\n");
+}
+
+/// Accepting `side`'s older 0.13 copy (it forked before bob joined) makes it
+/// writable there and changes nothing else: bob stays a trusted member.
+#[test]
+fn accepting_an_older_0_13_copy_never_removes_a_later_member() {
+    let (base, alice, bob, repo) = upgraded_with_a_later_member();
+    let side = base.path().join("side");
+    git_ok(
+        &repo,
+        &["worktree", "add", "-q", side.to_str().unwrap(), "side"],
+    );
+    alice
+        .murk(&side)
+        .args(["add", "S"])
+        .write_stdin("s\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("so it is read-only here"));
+    let pin_json = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&pin_files(&alice)[0]).unwrap()).unwrap()
+    };
+    let before = pin_json();
+    let out = alice
+        .murk(&side)
+        .args(["trust", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("accepted .murk on this machine"))
+        // The summary shows bob, whom this copy predates, as staying.
+        .stderr(predicate::str::contains(
+            "(not in this copy; stays trusted)",
+        ))
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        !String::from_utf8_lossy(&out).contains("  - "),
+        "nobody is listed as removed"
+    );
+    // The pin changed only by the accepted copy: no mark for `side`, no
+    // other trust state.
+    let mut after = pin_json();
+    let accepted = after
+        .as_object_mut()
+        .unwrap()
+        .remove("accepted_pre_upgrade")
+        .expect("the copy is recorded");
+    assert!(accepted.get("side").is_some(), "{accepted}");
+    assert_eq!(after, before, "nothing else changed");
+    alice
+        .murk(&side)
+        .args(["add", "S"])
+        .write_stdin("s\n")
+        .assert()
+        .success();
+    later_member_still_writes(&alice, &bob, &repo, false);
+}
+
+/// The same on `main`, which has a 0.14 mark: `murk trust` of the old 0.13
+/// file re-signs it, and bob stays a trusted member.
+#[test]
+fn re_signing_an_older_0_13_copy_never_removes_a_later_member() {
+    let (_base, alice, bob, repo) = upgraded_with_a_later_member();
+    git_ok(&repo, &["checkout", "-q", "HEAD~1", "--", ".murk"]);
+    alice
+        .murk(&repo)
+        .args(["trust", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("signed .murk and trusted it"));
+    git_ok(&repo, &["checkout", "-q", "HEAD", "--", ".murk"]);
+    later_member_still_writes(&alice, &bob, &repo, true);
+}
+
+/// On a detached HEAD there is no branch to record an accepted 0.13 copy on,
+/// so `murk trust` refuses to re-sign a stripped one there and writes
+/// nothing.
+#[test]
+fn murk_trust_never_accepts_a_0_13_copy_on_a_detached_head() {
+    let (base, alice, _bob, repo) = upgraded_with_a_later_member();
+    let detached = base.path().join("detached");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            detached.to_str().unwrap(),
+            "side",
+        ],
+    );
+    let path = detached.join(".murk");
+    let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+    let alice_id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+    common::forgery::strip_v1(&mut vault, &alice_id);
+    murk_cli::vault::write(&path, &vault).unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    alice
+        .murk(&detached)
+        .args(["trust", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("detached"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        before,
+        "nothing written"
+    );
+}
+
+/// Another vault's 0.13 file left unsigned (here: this vault's older copy
+/// with another creation stamp, stripped) is refused as another vault, and
+/// `murk trust` neither records nor re-signs it under this vault's id.
+#[test]
+fn murk_trust_never_re_signs_another_vaults_unsigned_0_13_file() {
+    let (base, alice, _bob, repo) = upgraded_with_a_later_member();
+    let side = base.path().join("side");
+    git_ok(
+        &repo,
+        &["worktree", "add", "-q", side.to_str().unwrap(), "side"],
+    );
+    let path = side.join(".murk");
+    let alice_id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+    let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+    vault.created = "2019-01-01T00:00:00Z".into();
+    common::forgery::reseal_v1(&mut vault, &alice_id);
+    common::forgery::strip_v1(&mut vault, &alice_id);
+    murk_cli::vault::write(&path, &vault).unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let pin_before = fs::read_to_string(&pin_files(&alice)[0]).unwrap();
+    alice
+        .murk(&side)
+        .args(["get", "DB"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a different vault"));
+    alice
+        .murk(&side)
+        .args(["trust", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "an unsigned pre-0.14 file of another vault can't be accepted",
+        ));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        before,
+        "nothing re-signed"
+    );
+    assert_eq!(
+        fs::read_to_string(&pin_files(&alice)[0]).unwrap(),
+        pin_before,
+        "nothing recorded"
+    );
+}
+
+/// The `murk trust` summary for another vault's signed 0.13 file lists the
+/// members it lacks as removed: accepting another vault replaces the trust
+/// state, so they would not stay trusted.
+#[test]
+fn the_trust_summary_never_promises_another_vault_keeps_this_vaults_members() {
+    let (base, alice, _bob, repo) = upgraded_with_a_later_member();
+    let side = base.path().join("side");
+    git_ok(
+        &repo,
+        &["worktree", "add", "-q", side.to_str().unwrap(), "side"],
+    );
+    let path = side.join(".murk");
+    let alice_id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+    let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+    vault.created = "2019-01-01T00:00:00Z".into();
+    common::forgery::reseal_v1(&mut vault, &alice_id);
+    murk_cli::vault::write(&path, &vault).unwrap();
+    // No terminal and no --yes: the summary is shown, nothing is recorded.
+    let out = alice
+        .murk(&side)
+        .args(["trust"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a different vault"))
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&out);
+    assert!(!stderr.contains("stays trusted"), "{stderr}");
+    assert!(stderr.contains("  - "), "bob listed as removed: {stderr}");
+}
+
+/// In a repository on git's reftable ref backend, HEAD on disk is a stub
+/// (`refs/heads/.invalid`). Each branch still gets its own mark.
+#[test]
+fn reftable_repositories_keep_a_mark_per_branch() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    if !git(
+        &repo,
+        &["init", "-q", "--ref-format=reftable", "-b", "main"],
+    )
+    .status
+    .success()
+    {
+        eprintln!("skipped: this git has no reftable backend");
+        return;
+    }
+    alice.init(&repo, "alice");
+    fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+    commit(&repo, "vault");
+    alice.add(&repo, "DB", "db");
+    commit(&repo, "db");
+    git_ok(&repo, &["checkout", "-q", "-b", "feature"]);
+    alice.add(&repo, "F", "f");
+    commit(&repo, "feature");
+    let pin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pin_files(&alice)[0]).unwrap()).unwrap();
+    let branches = pin["branches"].as_object().unwrap();
+    assert_eq!(
+        branches.keys().collect::<Vec<_>>(),
+        ["feature", "main"],
+        "{pin}"
+    );
+    // main's mark still applies: its older revision is refused there.
+    git_ok(&repo, &["checkout", "-q", "main"]);
+    git_ok(&repo, &["checkout", "-q", "HEAD~1", "--", ".murk"]);
+    alice
+        .murk(&repo)
+        .args(["get", "DB"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rolled back"));
+}
+
+/// `murk init` over a path whose pin saw a signed vault, with a key that
+/// cannot sign: the new vault is unsigned, and its creator loads it with the
+/// usual warning rather than refusing it as stripped.
+#[test]
+fn init_with_a_key_that_cannot_sign_resets_the_signed_bit() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let repo = base.path().join("repo");
+    alice.init(&repo, "alice");
+    fs::remove_file(repo.join(".murk")).unwrap();
+    fs::remove_file(repo.join(".env")).unwrap();
+    let key_file = rsa_key_file(base.path());
+    let as_hw = || {
+        let mut cmd = alice.murk(&repo);
+        cmd.env("MURK_KEY_FILE", &key_file);
+        cmd
+    };
+    as_hw().arg("init").write_stdin("hw\n").assert().success();
+    as_hw()
+        .args(["add", "DB"])
+        .write_stdin("db\n")
+        .assert()
+        .success();
+    as_hw()
+        .args(["get", "DB"])
+        .assert()
+        .success()
+        .stdout("db\n")
+        .stderr(predicate::str::contains(
+            "vault is unsigned and your key cannot sign",
+        ));
+}
+
+/// Accepting another vault's 0.13 file with `murk trust`, on purpose, pins
+/// the id that file's first 0.14 save takes, so it then loads as that vault.
+#[test]
+fn accepting_another_vaults_0_13_file_pins_its_derived_id() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join(".murk"), ROLLBACK_ROTATED).unwrap();
+    commit(&repo, "0.13: prod vault");
+    let feature = base.path().join("feature");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            feature.to_str().unwrap(),
+        ],
+    );
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&feature, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+    fs::write(repo.join(".murk"), ROLLBACK_STAGING).unwrap();
+    commit(&repo, "the staging vault, on purpose");
+    let get = || {
+        let mut cmd = alice.with_key(&repo, &key);
+        cmd.args(["get", "DB_URL"]);
+        cmd
+    };
+    get()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a different vault"));
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    get().assert().success().stdout("STAGING-db-value\n");
+    // Accepted, it is writable here and upgrades as the staging vault.
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "NEW"])
+        .write_stdin("new\n")
+        .assert()
+        .success();
+    get().assert().success().stdout("STAGING-db-value\n");
+}
+
+/// On `side`, which has no 0.14 mark, `murk trust` recovers a 0.13 file left
+/// unsigned: it re-signs it, the re-signing save is not refused as read-only,
+/// the next load is accepted, and bob, who joined later, stays a member.
+/// Once with the pin's signed bit cleared (an unsigned file: refused as
+/// unsigned), once as is (a stripped signature: refused as downgraded).
+#[test]
+fn murk_trust_re_signs_an_unsigned_0_13_file_on_an_unmarked_branch() {
+    for (case, signed_before) in [("unsigned", false), ("stripped", true)] {
+        let (base, alice, bob, repo) = upgraded_with_a_later_member();
+        let side = base.path().join("side");
+        git_ok(
+            &repo,
+            &["worktree", "add", "-q", side.to_str().unwrap(), "side"],
+        );
+        let path = side.join(".murk");
+        let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+        let alice_id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+        common::forgery::strip_v1(&mut vault, &alice_id);
+        murk_cli::vault::write(&path, &vault).unwrap();
+        if !signed_before {
+            let pin = &pin_files(&alice)[0];
+            let mut json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(pin).unwrap()).unwrap();
+            json["was_signed"] = false.into();
+            fs::write(pin, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+        }
+        let refusal = if signed_before {
+            "is now unsigned"
+        } else {
+            "is unsigned"
+        };
+        alice
+            .murk(&side)
+            .args(["get", "DB"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(refusal));
+        alice
+            .murk(&side)
+            .args(["trust", "--yes"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("signed .murk and trusted it"));
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written["sig"].is_object(), "{case}: re-signed");
+        alice
+            .murk(&side)
+            .args(["get", "DB"])
+            .assert()
+            .success()
+            .stdout("db\n");
+        let pin: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&pin_files(&alice)[0]).unwrap()).unwrap();
+        let bob_key = murk_cli::canonical_recipient(&bob.pubkey()).into_owned();
+        assert!(
+            pin["trusted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| *k == bob_key),
+            "{case}: bob is still trusted: {pin}"
+        );
+        assert!(
+            pin.get("removed").is_none(),
+            "{case}: nothing removed: {pin}"
+        );
+    }
+}
+
+/// Merging the upgrade into a branch gives it no mark on this machine (a load
+/// never gives a branch its first mark). Until this machine saves there, an
+/// older 0.13 revision on that branch still loads, read-only; after a save
+/// it is refused.
+#[test]
+fn merging_the_upgrade_marks_a_branch_only_once_this_machine_saves_there() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join(".murk"), ROLLBACK_LEAKED).unwrap();
+    commit(&repo, "0.13: leaked");
+    git_ok(&repo, &["branch", "side"]);
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+    commit(&repo, "0.14: upgrade");
+    git_ok(&repo, &["checkout", "-q", "side"]);
+    git_ok(&repo, &["merge", "-q", "main"]);
+    let get = || {
+        let mut cmd = alice.with_key(&repo, &key);
+        cmd.args(["get", "DB_URL"]);
+        cmd
+    };
+    get().assert().success().stdout("LEAKED-db-value\n");
+    let replay = |what: &str| {
+        git_ok(&repo, &["checkout", "-q", "HEAD~1", "--", ".murk"]);
+        let out = get().output().unwrap();
+        git_ok(&repo, &["checkout", "-q", "HEAD", "--", ".murk"]);
+        eprintln!("{what}: {}", String::from_utf8_lossy(&out.stderr));
+        out
+    };
+    // After the merge alone, the 0.13 revision still loads on `side`...
+    assert!(replay("merged").status.success());
+    // ...until this machine saves there.
+    alice
+        .with_key(&repo, &key)
+        .args(["add", "SIDE"])
+        .write_stdin("side\n")
+        .assert()
+        .success();
+    commit(&repo, "save on side");
+    git_ok(&repo, &["checkout", "-q", "HEAD~2", "--", ".murk"]);
+    get().assert().failure().stderr(predicate::str::contains(
+        "already been upgraded on this branch",
+    ));
+}
+
+/// A keyed merge with a 0.13 side this machine hasn't accepted on the branch
+/// is refused and writes nothing, so the merge never gives that file this
+/// vault's id: here another vault's 0.13 file, edited to derive this vault's
+/// id, merged into a main whose own 0.13 file this machine accepted.
+#[test]
+fn a_merge_never_upgrades_an_unaccepted_0_13_side() {
+    let base = TempDir::new().unwrap();
+    let alice = Machine::new(base.path(), "alice");
+    let key = base.path().join("alice.key");
+    fs::write(&key, ROLLBACK_ALICE_KEY).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    let driver = assert_cmd::cargo::cargo_bin("murk");
+    git_ok(
+        &repo,
+        &[
+            "config",
+            "merge.murk.driver",
+            &format!("'{}' merge-driver %O %A %B %P", driver.display()),
+        ],
+    );
+    fs::write(repo.join(".gitattributes"), ".murk merge=murk\n").unwrap();
+    fs::write(repo.join(".murk"), ROLLBACK_ROTATED).unwrap();
+    commit(&repo, "0.13: prod vault");
+    let feature = base.path().join("feature");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            feature.to_str().unwrap(),
+        ],
+    );
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success();
+    alice
+        .with_key(&feature, &key)
+        .args(["add", "EXTRA"])
+        .write_stdin("extra\n")
+        .assert()
+        .success();
+
+    // `side`: the staging vault with prod's creation stamp.
+    git_ok(&repo, &["checkout", "-q", "-b", "side"]);
+    let prod: serde_json::Value = serde_json::from_str(ROLLBACK_ROTATED).unwrap();
+    let mut aligned: serde_json::Value = serde_json::from_str(ROLLBACK_STAGING).unwrap();
+    aligned["created"] = prod["created"].clone();
+    fs::write(
+        repo.join(".murk"),
+        serde_json::to_string_pretty(&aligned).unwrap(),
+    )
+    .unwrap();
+    commit(&repo, "the staging vault with prod's creation stamp");
+    // `main`: another genuine 0.13 revision, accepted on this machine.
+    git_ok(&repo, &["checkout", "-q", "main"]);
+    fs::write(repo.join(".murk"), ROLLBACK_LEAKED).unwrap();
+    commit(&repo, "0.13: another revision");
+    // Accepting it makes ours writable here; the refusal below is for theirs.
+    alice
+        .with_key(&repo, &key)
+        .args(["trust", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("accepted .murk on this machine"));
+
+    let (merged, stderr) = merge_side(&alice, &repo, &key);
+    assert!(!merged, "the merge must not complete: {stderr}");
+    assert!(
+        stderr.contains("theirs is a pre-0.14 vault this machine hasn't accepted on this branch")
+            && stderr.contains("nothing was written; the working file is still ours"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(".murk")).unwrap(),
+        ROLLBACK_LEAKED
+    );
 }
 
 // ── Weak signing keys ──

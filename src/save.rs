@@ -493,6 +493,7 @@ pub fn save_vault(
     refuse_unsafe_recipients(vault)?;
 
     let prior_pin = refuse_carried_removed_keys(vault_path, vault, on_disk.as_ref(), current)?;
+    refuse_unaccepted_pre_upgrade(vault_path, vault, on_disk.as_ref(), prior_pin.as_ref())?;
     advance_identity(vault_path, vault, prior_pin.as_ref())?;
 
     announce_new_group_members(original, current);
@@ -603,6 +604,32 @@ pub fn save_vault(
 
     vault::write(Path::new(vault_path), vault)?;
     record_own_save(vault_path, vault, current, &meta.signers, on_disk.as_ref());
+    Ok(())
+}
+
+/// Refuse a save over a murk 0.13 file read as history that this machine has
+/// not accepted (`murk trust`): the save would give it this vault's id and
+/// counter (see [`crate::trust::pre_upgrade_read_only`]). The file replaced
+/// is judged; an in-memory 0.13 vault with no 0.13 file under it never
+/// matches an accepted copy, so it is refused too.
+fn refuse_unaccepted_pre_upgrade(
+    vault_path: &str,
+    vault: &types::Vault,
+    on_disk: Option<&types::Vault>,
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    if !crate::trust::written_by_0_13(vault) {
+        return Ok(());
+    }
+    let head = crate::trust::head_of(vault_path);
+    let replaced = on_disk
+        .filter(|v| crate::trust::written_by_0_13(v))
+        .unwrap_or(vault);
+    if crate::trust::pre_upgrade_read_only(pin, &head, replaced) {
+        return Err(MurkError::Trust(
+            crate::trust::pre_upgrade_read_only_message(vault_path, &head),
+        ));
+    }
     Ok(())
 }
 
@@ -860,6 +887,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recipient = make_recipient(SSH_ED25519_PK);
 
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_ssh_e2e_sign");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1749,6 +1777,7 @@ mod tests {
         let _lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let (path, alice_sk, bob_sk, carol_pk) =
             vault_with_foreign_group("murk_test_carry_over_unreadable");
         let ps = path.to_str().unwrap();
@@ -1789,6 +1818,7 @@ mod tests {
         let _lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let (path, alice_sk, _, _) =
             vault_with_foreign_group("murk_test_refuse_unreadable_reencrypt");
         let ps = path.to_str().unwrap();
