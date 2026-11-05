@@ -46,6 +46,25 @@ class TestLoad:
         except RuntimeError:
             pass
 
+    def test_unsupported_version_names_the_binding(self, vault_dir, tmp_path):
+        # The error names this binding and its version, so a stale binding
+        # left behind after an upgrade is not mistaken for the CLI.
+        from importlib.metadata import version
+
+        os.environ["MURK_KEY"] = vault_dir["key"]
+        path = tmp_path / "future.murk"
+        path.write_text(
+            '{"version":"99.0","created":"2026-01-01T00:00:00Z","vault_name":".murk",'
+            '"recipients":[],"schema":{},"secrets":{},"meta":""}'
+        )
+        with pytest.raises(RuntimeError) as err:
+            murk.load(str(path))
+        expected = (
+            "unsupported vault version: 99.0. murk-secrets python binding "
+            f"{version('murk-secrets')} supports vault versions 2.x and 3.x"
+        )
+        assert expected in str(err.value)
+
 
 class TestGet:
     def test_get_existing_key(self, vault_dir):

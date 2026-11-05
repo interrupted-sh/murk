@@ -2445,6 +2445,222 @@ fn diff_reads_group_secrets_at_the_ref() {
 }
 
 #[test]
+fn diff_withholds_values_the_agent_policy_forbids() {
+    // Under MURK_AGENT=1 the policy holds the operator's own reads: `get`
+    // refuses DB_PASSWORD, so `diff` must not print its values either, on
+    // either side, nor at a ref where the vault did not exist yet.
+    let dir = TempDir::new().unwrap();
+    let (key, _) = init_vault(&dir);
+    add_to_test_vault(&dir, &key, "DB_PASSWORD", "old-secret-AAA", &[]);
+    add_to_test_vault(&dir, &key, "API_KEY", "api-old-CCC", &["--tag", "agents"]);
+    murk(&dir, &key)
+        .args([
+            "policy",
+            "set",
+            "--allow-tag",
+            "agents",
+            "--vault",
+            "test.murk",
+        ])
+        .assert()
+        .success();
+    // A first commit without the vault: a ref at which it does not exist.
+    git_ok(dir.path(), &["init", "-q"]);
+    git_ok(
+        dir.path(),
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "empty",
+        ],
+    );
+    git_ok(
+        dir.path(),
+        &[
+            "-c",
+            "tag.gpgSign=false",
+            "tag",
+            "--no-sign",
+            "before-vault",
+        ],
+    );
+    git_ok(dir.path(), &["add", "test.murk"]);
+    git_ok(
+        dir.path(),
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "vault"],
+    );
+    add_to_test_vault(&dir, &key, "DB_PASSWORD", "new-secret-BBB", &[]);
+    add_to_test_vault(&dir, &key, "API_KEY", "api-new-DDD", &["--tag", "agents"]);
+
+    let key_file = dir.path().join("operator.key");
+    fs::write(&key_file, format!("{key}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let agent = || {
+        let mut cmd = murk_bin(dir.path());
+        cmd.current_dir(dir.path())
+            .env("MURK_KEY_FILE", &key_file)
+            .env("MURK_AGENT", "1");
+        cmd
+    };
+    agent()
+        .args(["get", "DB_PASSWORD", "--vault", "test.murk"])
+        .assert()
+        .failure();
+
+    for git_ref in ["HEAD", "before-vault"] {
+        for json in [false, true] {
+            let mut cmd = agent();
+            cmd.args(["diff", git_ref, "--show-values", "--vault", "test.murk"]);
+            if json {
+                cmd.arg("--json");
+            }
+            let out = cmd.assert().success().get_output().clone();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            for secret in ["old-secret-AAA", "new-secret-BBB"] {
+                assert!(!stdout.contains(secret), "{git_ref} json={json}: {stdout}");
+                assert!(!stderr.contains(secret), "{git_ref} json={json}: {stderr}");
+            }
+            // The allowed key keeps its values, and the forbidden key still
+            // shows as changed.
+            assert!(
+                stdout.contains("api-new-DDD"),
+                "{git_ref} json={json}: {stdout}"
+            );
+            assert!(
+                stdout.contains("DB_PASSWORD"),
+                "{git_ref} json={json}: {stdout}"
+            );
+            assert!(
+                stderr.contains("agent policy"),
+                "{git_ref} json={json}: {stderr}"
+            );
+        }
+    }
+
+    // Outside agent context the operator still sees every value.
+    murk(&dir, &key)
+        .args(["diff", "--show-values", "--vault", "test.murk"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("new-secret-BBB"));
+}
+
+/// Block until another process holds the vault's `.lock` file, i.e. a murk
+/// command has started loading the vault.
+#[cfg(unix)]
+fn wait_for_vault_lock(vault: &std::path::Path) {
+    use fs2::FileExt;
+    let mut lock = vault.as_os_str().to_owned();
+    lock.push(".lock");
+    for _ in 0..1000 {
+        if let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&lock) {
+            if file.try_lock_exclusive().is_err() {
+                return;
+            }
+            FileExt::unlock(&file).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("murk never took the vault lock");
+}
+
+#[cfg(unix)]
+#[test]
+fn prompted_writes_refuse_a_vault_changed_on_disk_while_waiting() {
+    // A `git pull` while a command waits for a value does not take murk's
+    // lock. Saving the vault loaded before the wait would undo the pull (on
+    // 0.14.0 it re-added a revoked recipient), so the command refuses.
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = TempDir::new().unwrap();
+    let (key, _) = init_vault(&dir);
+    add_to_test_vault(&dir, &key, "S", "s0", &[]);
+    murk(&dir, &key)
+        .args([
+            "agent", "grant", "--name", "g", "--only", "S", "--out", "g.key",
+        ])
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    murk(&dir, &key)
+        .args([
+            "circle",
+            "authorize",
+            FOREIGN_PK,
+            "--name",
+            "bob",
+            "--vault",
+            "test.murk",
+        ])
+        .assert()
+        .success();
+    let vault = dir.path().join("test.murk");
+
+    for (args, waiting) in [
+        (&["rotate", "S"][..], "while murk waited for the new values"),
+        (
+            &["agent", "revoke", "g", "--rotate"][..],
+            "while murk waited for the new values",
+        ),
+        (
+            &["circle", "revoke", "bob", "--rotate"][..],
+            "while murk waited for input",
+        ),
+    ] {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+        for var in MURK_CONTEXT_VARS {
+            cmd.env_remove(var);
+        }
+        let mut child = cmd
+            .args(args)
+            .args(["--vault", "test.murk"])
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .env("MURK_KEY", &key)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_vault_lock(&vault);
+        // What a pull brings in: here, any other bytes.
+        let mut pulled = fs::read(&vault).unwrap();
+        pulled.push(b'\n');
+        fs::write(&vault, &pulled).unwrap();
+        child.stdin.take().unwrap().write_all(b"s1\n").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains(&format!("changed on disk {waiting} — nothing saved")),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(
+            fs::read(&vault).unwrap(),
+            pulled,
+            "{args:?} overwrote the pulled vault"
+        );
+        // Back to the bytes murk last wrote, for the next command.
+        pulled.pop();
+        fs::write(&vault, &pulled).unwrap();
+    }
+    murk(&dir, &key)
+        .args(["get", "S", "--vault", "test.murk"])
+        .assert()
+        .success()
+        .stdout("s0\n");
+}
+
+#[test]
 fn diff_fails_on_an_unknown_ref() {
     let dir = TempDir::new().unwrap();
     let (key, _) = init_vault(&dir);

@@ -1244,6 +1244,63 @@ fn values_from_refuses_symlinks_and_warns_on_loose_files() {
     get_ok(&dir, &key, "S", "s1");
 }
 
+#[test]
+fn values_from_refuses_a_file_with_lines_it_cannot_read() {
+    // An unquoted multi-line PEM: only its first line is a KEY=value entry.
+    // Rotating the key to that line would destroy the good value, so the whole
+    // batch is refused, naming the line but never echoing it.
+    let dir = TempDir::new().unwrap();
+    let (key, _) = init_vault(&dir);
+    add(&dir, &key, "TLS_KEY", "old-good-value", &[]);
+    add(&dir, &key, "OTHER", "o0", &[]);
+    // On 0.14.0 the first file rotated TLS_KEY to its first line and exited 0;
+    // the second named its padded body line as a key in the refusal.
+    let bare = "# certs\n\nOTHER=o1\nTLS_KEY=-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAbodyline\n-----END RSA PRIVATE KEY-----\n";
+    let padded = "OTHER=o1\nTLS_KEY=-----BEGIN RSA PRIVATE KEY-----\nryD63SrkgVfLXhd==\nMIIEpAIBAAKCAQEAbodyline\n-----END RSA PRIVATE KEY-----\n";
+    for (file, contents, line) in [
+        ("bare.env", bare, "line 5"),
+        ("padded.env", padded, "line 4"),
+    ] {
+        fs::write(dir.path().join(file), contents).unwrap();
+        for args in [
+            &["rotate", "--all", "--values-from", file][..],
+            &["rotate", "TLS_KEY", "--values-from", file][..],
+        ] {
+            murk(&dir, &key)
+                .args(args)
+                .args(["--vault", "test.murk"])
+                .assert()
+                .code(1)
+                .stderr(
+                    predicate::str::contains(line)
+                        .and(predicate::str::contains("nothing rotated"))
+                        .and(predicate::str::contains("MIIEpAIBAAKCAQEAbodyline").not())
+                        .and(predicate::str::contains("ryD63SrkgVfLXhd").not()),
+                );
+        }
+    }
+    get_ok(&dir, &key, "TLS_KEY", "old-good-value");
+    get_ok(&dir, &key, "OTHER", "o0");
+
+    // The quoted form spans lines and rotates whole.
+    fs::write(
+        dir.path().join("quoted.env"),
+        "TLS_KEY=\"-----BEGIN-----\nbody\n-----END-----\"\n",
+    )
+    .unwrap();
+    murk(&dir, &key)
+        .args(["rotate", "TLS_KEY", "--values-from", "quoted.env"])
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    get_ok(
+        &dir,
+        &key,
+        "TLS_KEY",
+        "-----BEGIN-----\nbody\n-----END-----",
+    );
+}
+
 /// Grant `name` read access to `only` with a 1-second TTL and wait it out.
 fn expired_grant(dir: &TempDir, key: &str, name: &str, only: &str) {
     murk(dir, key)

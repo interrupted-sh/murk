@@ -176,6 +176,7 @@ fn has_identity() -> bool {
 /// Python module definition.
 #[pymodule]
 fn murk(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::set_component("murk-secrets python binding", env!("CARGO_PKG_VERSION"));
     m.add_class::<Vault>()?;
     m.add("TrustError", m.py().get_type::<TrustError>())?;
     m.add_function(wrap_pyfunction!(load, m)?)?;

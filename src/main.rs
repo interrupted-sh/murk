@@ -31,6 +31,7 @@ use commands::trust::*;
 use commands::verify::*;
 
 fn main() {
+    murk_cli::set_component("murk CLI", env!("CARGO_PKG_VERSION"));
     // clap's derive-generated parser uses large stack frames, and the command
     // tree here is big. On Windows the default 1 MiB main-thread stack can
     // overflow during argument parsing, so run everything on a thread with a

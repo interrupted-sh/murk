@@ -406,12 +406,47 @@ impl RotationOutcome {
     }
 }
 
+/// The vault's bytes before a command that waits for input loads it. A value
+/// prompt or an editor can stay open for minutes, and a `git pull` or checkout
+/// meanwhile does not take murk's lock; saving the vault loaded before it
+/// would silently undo that change (even re-adding a revoked recipient). Take
+/// the snapshot before loading, so any change after it is caught.
+pub(crate) struct VaultSnapshot<'a> {
+    path: &'a str,
+    bytes: Option<Vec<u8>>,
+}
+
+impl<'a> VaultSnapshot<'a> {
+    pub(crate) fn take(path: &'a str) -> Self {
+        Self {
+            path,
+            bytes: std::fs::read(path).ok(),
+        }
+    }
+
+    /// Exit with nothing saved if the file no longer has the snapshot's bytes.
+    /// `waiting` says what murk was doing ("while the editor was open"), and
+    /// `retry` how to start over.
+    pub(crate) fn refuse_if_changed(&self, waiting: &str, retry: &str) {
+        if std::fs::read(self.path).ok() != self.bytes {
+            die(
+                &format_args!(
+                    "{} changed on disk {waiting} — nothing saved\n{retry}",
+                    self.path
+                ),
+                1,
+            );
+        }
+    }
+}
+
 /// Read `--values-from` input (`-` for stdin) with the `murk import` parser.
-/// The raw contents are wiped as soon as they are parsed. A parse error or a
-/// key named twice aborts with nothing rotated; skipped entries and unquoted
-/// " #" values are reported by line number, never by value. A file is refused
-/// if it is a symlink, and a warning names it if others can read it: it holds
-/// new plaintext credentials, and `-` avoids writing them to disk at all.
+/// The raw contents are wiped as soon as they are parsed. A parse error, a
+/// key named twice, or a line that is not blank, a comment or an entry aborts
+/// with nothing rotated; those lines and unquoted " #" values are reported by
+/// line number, never by value. A file is refused if it is a symlink, and a
+/// warning names it if others can read it: it holds new plaintext
+/// credentials, and `-` avoids writing them to disk at all.
 pub(crate) fn read_values_from(path: &str) -> Vec<(String, zeroize::Zeroizing<String>)> {
     let mut contents = zeroize::Zeroizing::new(String::new());
     if path == "-" {
@@ -440,8 +475,18 @@ pub(crate) fn read_values_from(path: &str) -> Vec<(String, zeroize::Zeroizing<St
     let label = if path == "-" { "stdin" } else { path };
     let parsed = murk_cli::parse_env(&contents)
         .unwrap_or_else(|e| die(&format_args!("{label}, {e} — nothing rotated"), 1));
-    for s in &parsed.skipped {
-        eprintln!("{} skipping {s}", "⚠".yellow());
+    // A line that is not an entry is usually the body of an unquoted
+    // multi-line value: rotating the rest would cut that value to its first
+    // line. Refuse the batch, naming lines only (their text may be a secret).
+    if !parsed.skipped.is_empty() {
+        let lines: Vec<String> = parsed.skipped.iter().map(ToString::to_string).collect();
+        die(
+            &format_args!(
+                "{label} has lines that are not KEY=value entries, so nothing rotated\n{}\nquote a multi-line value (KEY=\"…\"), or remove the lines",
+                lines.join("\n")
+            ),
+            1,
+        );
     }
     for notice in &parsed.hash_notices {
         eprintln!("{} {notice}", "⚠".yellow());

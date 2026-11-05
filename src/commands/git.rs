@@ -191,6 +191,35 @@ pub(crate) fn cmd_diff(git_ref: &str, show_values: bool, json: bool, vault_path:
             .collect();
     let mut entries = murk_cli::diff_secrets(&old_values, &current_values);
     entries.sort_by(|a, b| a.key.cmp(&b.key));
+    // The agent policy holds this key's reads (a grant, or self-scope) as it
+    // does for `get` and `export`: a forbidden key still shows as changed, but
+    // never with its values, on either side. The current vault's policy and
+    // tags decide, so a key gone from it is withheld too.
+    let mut withheld = std::collections::HashSet::new();
+    if vault.policy.is_some() && murk_cli::agent_policy_applies(&murk, &pubkey) {
+        for entry in &mut entries {
+            if !murk_cli::is_agent_key_allowed(&vault, &entry.key) {
+                entry.old_value = None;
+                entry.new_value = None;
+                withheld.insert(entry.key.clone());
+            }
+        }
+    }
+    if show_values && !withheld.is_empty() {
+        // `entries` is sorted, so the names come out in key order.
+        let names: Vec<_> = entries
+            .iter()
+            .filter(|e| withheld.contains(&e.key))
+            .map(|e| murk_cli::terminal_text(&e.key, false))
+            .collect();
+        eprintln!(
+            "{} agent policy: withholding the values of {} key(s) not allowed by policy: {}",
+            "⚠".yellow(),
+            names.len(),
+            names.join(", ")
+        );
+    }
+    let values_for = |key: &str| show_values && !withheld.contains(key);
     let changes = old.as_ref().map_or_else(Vec::new, |(old_vault, old_murk)| {
         structural_changes((old_vault, old_murk), (&vault, &murk))
     });
@@ -213,7 +242,7 @@ pub(crate) fn cmd_diff(git_ref: &str, show_values: bool, json: bool, vault_path:
                     "key": e.key,
                     "kind": diff_kind(&e.kind),
                 });
-                if show_values {
+                if values_for(&e.key) {
                     obj["old_value"] = e.old_value.as_ref().map(|v| v.as_str()).into();
                     obj["new_value"] = e.new_value.as_ref().map(|v| v.as_str()).into();
                 }
@@ -249,24 +278,17 @@ pub(crate) fn cmd_diff(git_ref: &str, show_values: bool, json: bool, vault_path:
         let old = shown(entry.old_value.as_ref());
         let new = shown(entry.new_value.as_ref());
         let (old, new) = (old.as_str(), new.as_str());
+        let mark = match entry.kind {
+            DiffKind::Added => "+".magenta().bold(),
+            DiffKind::Removed => "-".red().bold(),
+            DiffKind::Changed => "~".yellow().bold(),
+        };
+        let key = key.bold();
         match entry.kind {
-            DiffKind::Added if show_values => {
-                println!("{} {} = {}", "+".magenta().bold(), key.bold(), new);
-            }
-            DiffKind::Added => println!("{} {}", "+".magenta().bold(), key.bold()),
-            DiffKind::Removed if show_values => {
-                println!("{} {} = {}", "-".red().bold(), key.bold(), old);
-            }
-            DiffKind::Removed => println!("{} {}", "-".red().bold(), key.bold()),
-            DiffKind::Changed if show_values => println!(
-                "{} {} {} {} {}",
-                "~".yellow().bold(),
-                key.bold(),
-                old,
-                "→".dimmed(),
-                new
-            ),
-            DiffKind::Changed => println!("{} {}", "~".yellow().bold(), key.bold()),
+            _ if !values_for(&entry.key) => println!("{mark} {key}"),
+            DiffKind::Added => println!("{mark} {key} = {new}"),
+            DiffKind::Removed => println!("{mark} {key} = {old}"),
+            DiffKind::Changed => println!("{mark} {key} {old} {} {new}", "→".dimmed()),
         }
     }
 }
