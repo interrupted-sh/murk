@@ -61,6 +61,12 @@ bb murk grant mint --keys TEST_TOKEN --reveal        # inline values, if allowed
 `bb murk grant list` shows scope, keys, expiry, and reveal status;
 `bb murk grant revoke <id>` closes access early.
 
+If a mint is refused because the vault is in the pre-0.14 format, tell the
+user and stop. Minting would make the vault's first 0.14 save, which rewrites
+`.murk` on the current branch. The user decides whether to upgrade it on the
+default branch first or mint with `--upgrade` here. Never pass `--upgrade`
+yourself, and never make a write to the vault to get around the refusal.
+
 ## Running commands that need secrets
 
 Prefer wiring the delivered file into the command's environment over exporting

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-murk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Scoped murk secrets for bb agent threads: value-free schema, grant-gated reads, dotenv delivery.",
   "license": "MIT OR Apache-2.0",
