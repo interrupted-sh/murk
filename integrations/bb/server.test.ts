@@ -338,6 +338,21 @@ describe("grant lifecycle", () => {
     expect(result.stdout).toContain("project " + PROJECT_ID);
   });
 
+  it("murk_get decrypts a format 3 vault through the binding", async () => {
+    // The vault was written by this repo's murk, which stamps format 3.x on
+    // every save; a pre-0.14 binding rejects it with "unsupported vault version".
+    const vault: unknown = JSON.parse(readFileSync(path.join(worktree, ".murk"), "utf8"));
+    expect(vault).toMatchObject({ version: expect.stringMatching(/^3\./) });
+    const threadId = "thread-v3";
+    const result = toolText(
+      await host.harness.behavior.callAgentTool("murk_get", {}, { threadId, projectId: PROJECT_ID }),
+    );
+    expect(result.isError, result.text).toBe(false);
+    const envFile = path.join(worktree, `.murk-${threadId}.env`);
+    expect(readFileSync(envFile, "utf8")).toContain(`TEST_API_KEY='${SECRET_VALUE}'`);
+    rmSync(envFile);
+  });
+
   it("murk_get delivers granted keys to a 0600 dotenv file and never returns the value", async () => {
     const result = toolText(
       await host.harness.behavior.callAgentTool("murk_get", {}, { threadId: THREAD_ID, projectId: PROJECT_ID }),
@@ -552,7 +567,8 @@ describe("vault-truth fail-closed", () => {
 
     // Delete the key from the vault directly — the plugin's grant record
     // still lists DOOMED_KEY as covered, so assignGrants lets it through and
-    // only the vault read itself can refuse.
+    // only the vault read itself can refuse (a 3.x vault drops the emptied
+    // grant, so load refuses it before get() is reached).
     murk(["rm", "DOOMED_KEY"]);
 
     const result = toolText(
@@ -563,7 +579,6 @@ describe("vault-truth fail-closed", () => {
       ),
     );
     expect(result.isError).toBe(true);
-    expect(result.text).toContain("not found or outside grant");
     expect(result.text).not.toContain("doomed-value-31337");
     // Nothing was delivered to a file either.
     expect(existsSync(path.join(worktree, `.murk-${THREAD_ID}.env`))).toBe(false);
