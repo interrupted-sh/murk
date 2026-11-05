@@ -36,6 +36,39 @@ function binding(): MurkBinding {
   return cached;
 }
 
+// First binding release that reads each vault format major. Every vault write
+// by a murk CLI stamps the newest format, so the binding must keep up.
+const BINDING_FOR_FORMAT: Record<string, string> = { "3": "0.14.0" };
+
+function installedBindingVersion(): string {
+  try {
+    const manifest: unknown = requireBinding("@interrupted/murk-secrets/package.json");
+    if (manifest && typeof manifest === "object" && "version" in manifest && typeof manifest.version === "string") {
+      return manifest.version;
+    }
+  } catch {
+    // Fall through: the version only decorates the error message.
+  }
+  return "unknown";
+}
+
+/** Load a vault, turning an "unsupported vault version" parse error into an upgrade instruction. */
+function loadVault(vaultPath: string): MurkVault {
+  try {
+    return binding().load(vaultPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const format = /unsupported vault version: (\d+)\./.exec(message)?.[1];
+    if (!format) throw error;
+    const needed = BINDING_FOR_FORMAT[format];
+    throw new Error(
+      `the installed @interrupted/murk-secrets ${installedBindingVersion()} cannot read vault format ${format}.x; ` +
+        `it needs @interrupted/murk-secrets ${needed ?? "newer than this"} or later — ` +
+        `update the plugin's dependencies and reload it (${message})`,
+    );
+  }
+}
+
 /**
  * Load a vault as a specific grant identity and run `fn` against it.
  *
@@ -65,7 +98,7 @@ export function withGrantIdentity<T>(
   process.env.MURK_KEY_FILE = keyFilePath;
   process.env.MURK_AGENT = "1";
   try {
-    return fn(binding().load(vaultPath));
+    return fn(loadVault(vaultPath));
   } finally {
     for (const [name, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[name];

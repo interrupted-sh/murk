@@ -338,6 +338,21 @@ describe("grant lifecycle", () => {
     expect(result.stdout).toContain("project " + PROJECT_ID);
   });
 
+  it("murk_get decrypts a format 3 vault through the binding", async () => {
+    // The vault was written by this repo's murk, which stamps format 3.x on
+    // every save; a pre-0.14 binding rejects it with "unsupported vault version".
+    const vault: unknown = JSON.parse(readFileSync(path.join(worktree, ".murk"), "utf8"));
+    expect(vault).toMatchObject({ version: expect.stringMatching(/^3\./) });
+    const threadId = "thread-v3";
+    const result = toolText(
+      await host.harness.behavior.callAgentTool("murk_get", {}, { threadId, projectId: PROJECT_ID }),
+    );
+    expect(result.isError, result.text).toBe(false);
+    const envFile = path.join(worktree, `.murk-${threadId}.env`);
+    expect(readFileSync(envFile, "utf8")).toContain(`TEST_API_KEY='${SECRET_VALUE}'`);
+    rmSync(envFile);
+  });
+
   it("murk_get delivers granted keys to a 0600 dotenv file and never returns the value", async () => {
     const result = toolText(
       await host.harness.behavior.callAgentTool("murk_get", {}, { threadId: THREAD_ID, projectId: PROJECT_ID }),
@@ -544,7 +559,7 @@ describe("vault-truth fail-closed", () => {
   it("murk_get fails closed when the vault no longer holds a key the grant still claims", async () => {
     murk(["add", "DOOMED_KEY", "--desc", "Short-lived key", "--tag", "agents"], "doomed-value-31337");
     const mint = await host.harness.behavior.runCli(
-      ["grant", "mint", "--keys", "DOOMED_KEY", "--ttl", "1h"],
+      ["grant", "mint", "--keys", "DOOMED_KEY,TEST_API_KEY", "--ttl", "1h"],
       { cwd: worktree, projectId: PROJECT_ID },
     );
     expect(mint.exitCode, mint.stderr).toBe(0);
@@ -552,7 +567,8 @@ describe("vault-truth fail-closed", () => {
 
     // Delete the key from the vault directly — the plugin's grant record
     // still lists DOOMED_KEY as covered, so assignGrants lets it through and
-    // only the vault read itself can refuse.
+    // only the vault read itself can refuse. TEST_API_KEY keeps the grant a
+    // recipient, so the refusal comes from the per-key get(), not load().
     murk(["rm", "DOOMED_KEY"]);
 
     const result = toolText(
