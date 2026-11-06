@@ -34,9 +34,9 @@ work=$(mktemp -d "${ISOLATION_WORK_ROOT:-${TMPDIR:-/tmp}}/murk-isolation.XXXXXX"
 trap 'rm -rf "$work"' EXIT
 
 if [ -n "${IMAGE_MURK:-}" ]; then
-    mkdir "$work/murk-bin"
-    cp "$IMAGE_MURK" "$work/murk-bin/murk"
-    docker build -q -t "$image" --build-context murk-bin="$work/murk-bin" "$here" >/dev/null
+    mkdir "$work/local-binary"
+    cp "$IMAGE_MURK" "$work/local-binary/murk"
+    docker build -q -t "$image" --build-context local-binary="$work/local-binary" "$here" >/dev/null
 else
     docker build -q -t "$image" "$here" >/dev/null
 fi

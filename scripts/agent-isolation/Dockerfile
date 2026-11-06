@@ -7,9 +7,9 @@
 
 # A directory with a Linux murk binary to install instead of the release, for
 # testing a local build. It is empty unless you name one at build time:
-#   docker build --build-context murk-bin=DIR scripts/agent-isolation
+#   docker build --build-context local-binary=DIR scripts/agent-isolation
 # where DIR holds only the `murk` binary.
-FROM scratch AS murk-bin
+FROM scratch AS local-binary
 
 FROM debian:bookworm-slim
 
@@ -17,10 +17,10 @@ ARG MURK_VERSION=v0.14.1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*
-RUN --mount=type=bind,from=murk-bin,target=/tmp/murk-bin \
+RUN --mount=type=bind,from=local-binary,target=/tmp/local-binary \
     set -eu; \
-    if [ -e /tmp/murk-bin/murk ]; then \
-        install -m 0755 /tmp/murk-bin/murk /usr/local/bin/murk; \
+    if [ -e /tmp/local-binary/murk ]; then \
+        install -m 0755 /tmp/local-binary/murk /usr/local/bin/murk; \
         exit 0; \
     fi; \
     archive="murk-${MURK_VERSION}-$(uname -m)-unknown-linux-gnu.tar.gz"; \
