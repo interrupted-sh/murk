@@ -2,33 +2,48 @@
 
 ## Cryptography
 
-murk implements no cryptographic primitives. [age](https://age-encryption.org/) (the [rage](https://github.com/str4d/rage) Rust crate) encrypts and decrypts every value. BLAKE3 and Ed25519 provide the integrity MAC, the signing-key derivation and the vault signatures, and murk defines how they combine (see [THREAT_MODEL.md](THREAT_MODEL.md)). A new key is 32 random bytes from a cryptographically secure random number generator, shown as a 24-word BIP39 recovery phrase.
+murk implements no cryptographic primitives. [age](https://age-encryption.org/) (the [rage](https://github.com/str4d/rage) Rust crate) encrypts and decrypts every value. BLAKE3 and Ed25519 provide the integrity MAC, the signing-key derivation and the vault signatures. The vault format, its keyed MAC and its signature scheme are murk's own (see [THREAT_MODEL.md](THREAT_MODEL.md)). A new key is 32 random bytes from a cryptographically secure random number generator, shown as a 24-word BIP39 recovery phrase.
 
 If you find a vulnerability in the underlying cryptographic primitives, report it to the [age](https://github.com/FiloSottile/age) or [rage](https://github.com/str4d/rage) project directly. Report a flaw in how murk combines them (its MAC, signature or signing-key construction) to murk, as described below.
 
-For a detailed analysis of what murk protects and what it doesn't, see [THREAT_MODEL.md](THREAT_MODEL.md).
+For a detailed analysis of what murk protects and what it does not, see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Known Limitations
 
 - **Not audited.** murk has not had an independent security audit. It is pre-1.0 software. Use good judgment with production secrets.
 - **Not a secrets server.** murk is a file-based secrets manager for dev teams. It is not designed for regulated environments, dynamic secrets, automatic provider-side rotation or provable access controls. murk can record rotation intervals and expiry dates and report overdue secrets. If you need a secrets server, use one such as HashiCorp Vault.
-- **Revoked recipients can read old git history.** Revoking a recipient re-encrypts the vault going forward, but old `.murk` versions remain in git. The revoked user can still decrypt any version they had access to. Always rotate secrets after revocation.
-- **Plaintext during edit.** `murk edit` writes decrypted values to a temp file for `$EDITOR`. The file is overwritten with zeros and deleted afterward, but the plaintext is on disk for as long as the editor runs. Core dumps, swap, or filesystem journaling could retain fragments.
-- **Compromised workstation = full access.** If an attacker has access to the machine where your key lives, they can decrypt all shared secrets. murk is not a defense against a compromised machine — it protects secrets at rest in git and in transit.
-- **Key names are public.** The `.murk` header exposes what secrets exist (e.g. `STRIPE_SECRET_KEY`). Only values are encrypted. This is a deliberate trade-off for usability (`murk info` without a key, readable git diffs).
-- **No custom cryptographic primitives.** murk uses age, BLAKE3 and Ed25519. The vault format, its keyed MAC and its signature scheme are murk's own.
+- **Revoked recipients can read old git history.** Revoking a recipient re-encrypts the shared values and the group values that the revoker can read. A group value held by a group the revoker is not in keeps the revoked recipient in its ciphertext until a member of that group rotates it. Old `.murk` versions remain in git, and the revoked user can still decrypt any version they had access to. Always rotate secrets after revocation.
+- **Plaintext during edit.** `murk edit` writes decrypted values to a temporary file for `$EDITOR`. murk overwrites the file with zeros and deletes it afterward, but the plaintext is on disk for as long as the editor runs. If murk is killed with SIGKILL, crashes or loses power, the file can stay behind. Core dumps, swap or filesystem journaling could also keep fragments. Under `MURK_STRICT`, `murk edit` refuses to run unless its scratch directory is RAM-backed (`XDG_RUNTIME_DIR` or `/dev/shm`).
+- **A compromised workstation gives full access.** If an attacker has access to the machine where your key lives, they can decrypt all shared secrets. murk is not a defense against a compromised machine. It protects secrets at rest in git and in transit.
+- **Secret names and metadata are public.** The `.murk` header is plaintext. It shows what secrets exist (for example `STRIPE_SECRET_KEY`), and for each one its description, example, tags, created and updated times, rotation interval and expiry. It also shows the recipients' public keys and the names of the groups that hold values. Only values are encrypted, so never put a real value in `--example`. This is a deliberate trade-off for usability (`murk info` without a key, readable git diffs).
 
 ## Known Issues
 
-**SSH-RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate used by age's SSH-RSA support is affected by the Marvin Attack, a timing sidechannel. murk rejects `ssh-rsa` recipients by default: `circle authorize` and `ssh:` paths refuse to authorize RSA keys unless the caller passes `--allow-ssh-rsa`. `github:username` skips RSA keys with a warning, and refuses only when every key it finds is RSA. The risk is low for a local CLI (the attack requires many decryption queries against a server), but the default-closed posture keeps weak keys out of the recipient list. Prefer ed25519 keys. No upstream fix is available yet.
+**SSH-RSA timing side channel (RUSTSEC-2023-0071).** The `rsa` crate behind age's SSH-RSA support is affected by the Marvin Attack, a timing side channel. There is no upstream fix yet.
+
+murk rejects `ssh-rsa` recipients by default:
+
+- `circle authorize` and `ssh:` paths refuse RSA keys unless you pass `--allow-ssh-rsa`.
+- `github:username` skips RSA keys with a warning. It refuses only when every key it finds is RSA.
+
+The risk is low for a local CLI, because the attack needs many decryption queries against a server. The default still keeps weak keys out of the recipient list. Prefer ed25519 keys.
 
 ## Supply Chain
 
-Every release artifact is built and published from GitHub Actions on hosted runners, and most carry signed provenance. Release binaries include [Sigstore artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). Verify one downloaded binary at a time:
+Every release artifact is built and published from GitHub Actions on hosted runners. Each channel carries signed provenance, but older releases have gaps on some channels:
+
+- GitHub release archives and `SHA256SUMS`: Sigstore build provenance per file, 0.3.1 and later.
+- Homebrew: the formula pins the SHA-256 of the attested GitHub release archives.
+- crates.io: Sigstore build provenance for the exact `.crate` file, 0.13.0 and later.
+- npm: registry signatures and Sigstore provenance.
+- PyPI: PEP 740 Sigstore attestations per wheel and sdist.
+
+Release binaries include [Sigstore artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). Verify one downloaded binary at a time:
 
 ```bash
 gh attestation verify murk-v<version>-<target>.tar.gz --repo interrupted-sh/murk \
-  --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml
+  --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml \
+  --source-ref refs/tags/v<version>
 ```
 
 This covers murk 0.12.0 and later. Earlier releases name an older repository in their provenance. That is `interrupted-inc/murk` for 0.10.2 to 0.11.0 and `iicky/murk` for 0.3.1 to 0.10.1. [VERIFYING.md](VERIFYING.md) shows how to verify them.
@@ -54,11 +69,7 @@ Workflow `GITHUB_TOKEN` permissions follow least privilege: read-only by default
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.x     | Latest release only |
-
-murk is pre-1.0 software. Only the latest release receives security fixes.
+murk is pre-1.0 software. Only the latest 0.x release receives security fixes.
 
 ## Reporting a Vulnerability
 
