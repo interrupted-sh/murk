@@ -13,7 +13,9 @@ Run an MCP (Model Context Protocol) stdio server for AI agents (experimental)
 Vault filename
 .TP
 \fB\-\-allow\-exec\fR
-Enable the murk_exec tool (run commands with scoped secrets injected). Off by default: it runs arbitrary commands as this user — the injected secrets are grant\-scoped, but the command itself is not sandboxed
+Enable the murk_exec tool, which runs commands with the grant\*(Aqs secrets injected
+
+Off by default. The tool runs arbitrary commands as this user. The injected secrets are limited to the grant, but the command itself is not sandboxed.
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)

@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH murk 1  "murk " 
 .SH NAME
-murk \- Encrypted secrets manager for developers — one file, age encryption, git\-friendly
+murk \- Encrypted secrets manager for developers: one file, age encryption, git\-friendly
 .SH SYNOPSIS
 \fBmurk\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
-Encrypted secrets manager for developers — one file, age encryption, git\-friendly
+Encrypted secrets manager for developers: one file, age encryption, git\-friendly
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
@@ -23,7 +23,7 @@ murk\-restore(1)
 Print the key encoded by a BIP39 recovery phrase (saves nothing)
 .TP
 murk\-recover(1)
-Print the BIP39 recovery phrase for the key murk resolves (MURK_KEY, MURK_KEY_FILE or the stored key for .murk)
+Print the BIP39 recovery phrase for your age key
 .TP
 murk\-add(1)
 Add or update a secret
@@ -44,7 +44,7 @@ murk\-edit(1)
 Edit secrets in $EDITOR (experimental)
 .TP
 murk\-ls(1)
-List all key names
+List all secret names
 .TP
 murk\-export(1)
 Export all secrets as shell export statements
@@ -53,7 +53,7 @@ murk\-import(1)
 Import secrets from a .env file
 .TP
 murk\-describe(1)
-Set a key\*(Aqs description, example, tags and rotation or expiry policy
+Set a secret\*(Aqs description, example, tags and rotation or expiry policy
 .TP
 murk\-info(1)
 Show public schema and key info

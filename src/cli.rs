@@ -67,6 +67,11 @@ pub enum Command {
     },
 
     /// Write a .envrc for direnv integration
+    ///
+    /// Creates `.envrc` in the current directory with a line that runs
+    /// `murk export`. If `.envrc` already exists, murk appends the line. If it
+    /// already has a `murk export` line, murk changes nothing. Run
+    /// `direnv allow` afterward.
     Env {
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
@@ -80,22 +85,30 @@ pub enum Command {
         vault: String,
     },
 
-    /// Print the BIP39 recovery phrase for the key murk resolves (MURK_KEY, MURK_KEY_FILE or the stored key for .murk)
+    /// Print the BIP39 recovery phrase for your age key
+    ///
+    /// murk uses the key from `MURK_KEY`, `MURK_KEY_FILE` or the stored key for
+    /// `.murk`. SSH keys and plugin identities have no recovery phrase.
     Recover,
 
     // Secrets
     /// Add or update a secret
+    ///
+    /// On a terminal, murk asks for the value with a hidden prompt. When stdin
+    /// is piped, murk reads all of it as the value and drops one trailing
+    /// newline.
     Add {
-        /// Secret key name
+        /// Name of the secret
         key: String,
-        /// Description for this key
+        /// Description of the secret
         #[arg(long, value_parser = NewText::BLOCK)]
         desc: Option<String>,
         /// Example value
         #[arg(long, value_parser = NewText::LINE)]
         example: Option<String>,
-        /// Who can read it: a group name (experimental), `everyone`, or `me`. Omit to keep an
-        /// existing key's tier; a new key is shared with everyone
+        /// Who can read the secret: `everyone`, `me` (a private value for you
+        /// only) or a group name (experimental). Omit it to keep an existing
+        /// secret's tier. A new secret is shared with everyone
         #[arg(long)]
         group: Option<String>,
         /// Deprecated alias for `--group me`
@@ -111,7 +124,7 @@ pub enum Command {
 
     /// Generate a random secret and store it
     Generate {
-        /// Secret key name
+        /// Name of the secret
         key: String,
         /// Length in bytes
         #[arg(long, default_value = "32")]
@@ -119,14 +132,15 @@ pub enum Command {
         /// Encode the value as hex instead of URL-safe base64
         #[arg(long)]
         hex: bool,
-        /// Description for this key
+        /// Description of the secret
         #[arg(long, value_parser = NewText::BLOCK)]
         desc: Option<String>,
         /// Example value
         #[arg(long, value_parser = NewText::LINE)]
         example: Option<String>,
-        /// Who can read it: a group name (experimental), `everyone`, or `me`. Omit to keep an
-        /// existing key's tier; a new key is shared with everyone
+        /// Who can read the secret: `everyone`, `me` (a private value for you
+        /// only) or a group name (experimental). Omit it to keep an existing
+        /// secret's tier. A new secret is shared with everyone
         #[arg(long)]
         group: Option<String>,
         /// Tag for grouping (repeatable)
@@ -138,13 +152,19 @@ pub enum Command {
     },
 
     /// Rotate secrets with new values
+    ///
+    /// New values come from a hidden prompt on a terminal, or from piped
+    /// stdin. With a KEY, murk reads all of stdin as the value. With `--all`,
+    /// it reads one line per secret, in name order. `--generate` and
+    /// `--values-from` supply values another way. murk refuses `--generate`
+    /// with `--all`.
     Rotate {
-        /// Secret key name (omit for --all)
+        /// Secret to rotate. Omit it when you use `--all`
         key: Option<String>,
         /// Rotate all secrets in the vault
         #[arg(long)]
         all: bool,
-        /// Generate random values instead of prompting
+        /// Generate random values instead of prompting (refused with `--all`)
         #[arg(long)]
         generate: bool,
         /// Length in bytes for generated values
@@ -153,13 +173,13 @@ pub enum Command {
         /// Encode generated values as hex instead of URL-safe base64
         #[arg(long)]
         hex: bool,
-        /// Read new values from a dotenv file of KEY=value lines (`-` for stdin), matched by key name
+        /// Read new values from a dotenv file of KEY=value lines (`-` for stdin), matched by secret name
         #[arg(long, value_name = "FILE", conflicts_with_all = ["generate", "list"])]
         values_from: Option<String>,
-        /// List keys needing rotation instead of rotating (exits 1 if any)
+        /// List the secrets that need rotation instead of rotating (exits 1 if any do)
         #[arg(long, conflicts_with_all = ["key", "all", "generate", "hex"])]
         list: bool,
-        /// Output the listing as JSON, an object with `verified` and `issues` (with --list, exits 0 even when keys need rotating)
+        /// Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
         #[arg(long, requires = "list", conflicts_with_all = ["key", "all", "generate", "hex"])]
         json: bool,
         /// Vault filename
@@ -169,7 +189,7 @@ pub enum Command {
 
     /// Remove a secret
     Rm {
-        /// Secret key name
+        /// Name of the secret
         key: String,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
@@ -178,7 +198,7 @@ pub enum Command {
 
     /// Get a single decrypted value
     Get {
-        /// Secret key name
+        /// Name of the secret
         key: String,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
@@ -187,12 +207,12 @@ pub enum Command {
 
     /// Edit secrets in $EDITOR (experimental)
     Edit {
-        /// Edit a single key (omit to edit all)
+        /// Edit one secret. Omit it to edit all
         key: Option<String>,
-        /// Edit scoped overrides instead of shared secrets
+        /// Deprecated alias for `--group me`. Edits your private values instead of shared secrets
         #[arg(long)]
         scoped: bool,
-        /// Edit values for this group instead of shared secrets (experimental)
+        /// Edit this group's values instead of shared secrets. `me` means your private values. A group name is experimental
         #[arg(long)]
         group: Option<String>,
         /// Vault filename
@@ -200,7 +220,7 @@ pub enum Command {
         vault: String,
     },
 
-    /// List all key names
+    /// List all secret names
     Ls {
         /// Filter by tag (repeatable)
         #[arg(long)]
@@ -221,7 +241,7 @@ pub enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Allow keys named like loader/shell/tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
+        /// Allow secrets named like loader, shell or tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
         #[arg(long)]
         allow_reserved: bool,
         /// Vault filename
@@ -234,15 +254,15 @@ pub enum Command {
         /// Path to the .env file to import
         #[arg(default_value = ".env")]
         file: String,
-        /// Overwrite existing secrets. Without it, import stops if any key already exists
+        /// Overwrite existing secrets. Without it, import stops if any secret already exists
         #[arg(long)]
         force: bool,
-        /// Assign imported secrets to this group (`everyone`, `me`, or a group
-        /// name, which is experimental). Omit to keep each existing key's
-        /// tier; new keys are shared with everyone
+        /// Who can read the imported secrets: `everyone`, `me` (private values
+        /// for you only) or a group name (experimental). Omit it to keep each
+        /// existing secret's tier. New secrets are shared with everyone
         #[arg(long)]
         group: Option<String>,
-        /// Example value applied to every imported key
+        /// Example value applied to every imported secret
         #[arg(long, value_parser = NewText::LINE)]
         example: Option<String>,
         /// Vault filename
@@ -251,13 +271,13 @@ pub enum Command {
     },
 
     // Metadata & inspection
-    /// Set a key's description, example, tags and rotation or expiry policy
+    /// Set a secret's description, example, tags and rotation or expiry policy
     ///
     /// Each call replaces the description. It also replaces the example:
     /// omitting `--example` clears it. `--tag` replaces the tags only when
     /// given. `--rotate-every` and `--expires` change only when given.
     Describe {
-        /// Secret key name
+        /// Name of the secret
         key: String,
         /// Description text (replaces the current one)
         #[arg(value_parser = NewText::BLOCK)]
@@ -294,7 +314,7 @@ pub enum Command {
 
     /// Export schema-only vault with no secrets or recipients
     Skeleton {
-        /// New output file; refuses an existing path (prints to stdout if omitted)
+        /// New output file. murk refuses a path that already exists. Without this option, murk prints to stdout
         #[arg(long, short)]
         output: Option<String>,
         /// Vault filename
@@ -306,22 +326,29 @@ pub enum Command {
     /// Run a command with secrets injected as environment variables
     #[command(trailing_var_arg = true)]
     Exec {
-        /// Only inject these specific keys (repeatable)
+        /// Inject only these secrets (repeatable)
         #[arg(long)]
         only: Vec<String>,
         /// Filter by tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
-        /// Start the command with only murk secrets plus PATH, HOME and TERM on Unix (on Windows, PATH and a fixed set of system variables)
+        /// Start the command with only the injected secrets plus PATH, HOME and TERM on Unix
+        ///
+        /// On Windows, murk keeps PATH and a fixed set of system variables.
         #[arg(long)]
         clean_env: bool,
-        /// Allow keys named like loader/shell/tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
+        /// Allow secrets named like loader, shell or tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
         #[arg(long)]
         allow_reserved: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
-        /// Command and arguments to execute
+        /// Command and arguments to run
+        ///
+        /// Put murk options such as `--only` before the command. murk passes
+        /// everything after the command name to the command, so
+        /// `murk exec echo hi --only FOO` runs `echo hi --only FOO` and injects
+        /// every secret.
         #[arg(required = true)]
         command: Vec<String>,
     },
@@ -338,9 +365,12 @@ pub enum Command {
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
-        /// Enable the murk_exec tool (run commands with scoped secrets injected).
-        /// Off by default: it runs arbitrary commands as this user — the injected
-        /// secrets are grant-scoped, but the command itself is not sandboxed.
+        /// Enable the murk_exec tool, which runs commands with the grant's
+        /// secrets injected
+        ///
+        /// Off by default. The tool runs arbitrary commands as this user. The
+        /// injected secrets are limited to the grant, but the command itself is
+        /// not sandboxed.
         #[arg(long = "allow-exec")]
         allow_exec: bool,
     },
@@ -353,11 +383,13 @@ pub enum Command {
 
     // Recipients & groups
     /// Manage recipients
+    ///
+    /// With no subcommand, lists the vault's recipients.
     #[command(alias = "recipients")]
     Circle {
         #[command(subcommand)]
         sub: Option<CircleCommand>,
-        /// Output as JSON
+        /// Output the recipient list as JSON
         #[arg(long)]
         json: bool,
         /// Vault filename
@@ -365,6 +397,7 @@ pub enum Command {
         vault: String,
     },
 
+    // Hidden: `murk authorize` exists for old scripts. Use `murk circle authorize`.
     /// Add a recipient to the vault
     #[command(hide = true)]
     Authorize {
@@ -384,6 +417,7 @@ pub enum Command {
         vault: String,
     },
 
+    // Hidden: `murk revoke` exists for old scripts. Use `murk circle revoke`.
     /// Remove a recipient from the vault
     #[command(hide = true)]
     Revoke {
@@ -426,7 +460,7 @@ pub enum Command {
     /// trusted the vault, and asks before recording it. An unsigned vault is
     /// signed with your key.
     Trust {
-        /// Accept without asking (for scripts; review first)
+        /// Accept without asking, for scripts. Review the vault first
         #[arg(long)]
         yes: bool,
         /// Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and
@@ -434,8 +468,8 @@ pub enum Command {
         #[arg(long, conflicts_with = "yes")]
         print_key: bool,
         /// Trust a key this machine recorded as removed from the vault again
-        /// (its public key, or its name in the vault). Repeat for each key;
-        /// a vault signed by or listing a removed key is never trusted
+        /// (its public key, or its name in the vault). Repeat for each key.
+        /// A vault signed by or listing a removed key is never trusted
         /// without it
         #[arg(long = "re-add", value_name = "KEY", conflicts_with = "print_key")]
         re_add: Vec<String>,
@@ -464,13 +498,13 @@ pub enum Command {
     /// Show secret and access changes vs a git ref (experimental)
     ///
     /// Lists recipients, signer, signing keys, policy, grants and group members
-    /// that changed, then the secrets. The vault at the ref is verified first;
-    /// a revision this machine's trust pin refuses is never shown.
+    /// that changed, then the secrets. The vault at the ref is verified first.
+    /// murk never shows a revision that this machine's trust pin refuses.
     Diff {
         /// Git ref to compare against
         #[arg(default_value = "HEAD")]
         git_ref: String,
-        /// Show actual values (not just key names)
+        /// Show actual values (not just secret names)
         #[arg(long)]
         show_values: bool,
         /// Output JSON: {"secrets": [...], "changes": [...]} (values only with --show-values)
@@ -485,12 +519,12 @@ pub enum Command {
     #[command(name = "setup-merge-driver")]
     SetupMergeDriver,
 
-    /// Git merge driver for .murk vault files (called by git; experimental)
+    /// Git merge driver for .murk vault files (called by git, experimental)
     #[command(name = "merge-driver", hide = true)]
     MergeDriver {
         /// Path to base version (%O)
         base: String,
-        /// Path to ours version (%A) — result is written here
+        /// Path to ours version (%A). murk writes the result here
         ours: String,
         /// Path to theirs version (%B)
         theirs: String,
@@ -513,7 +547,15 @@ pub enum CompletionAction {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
-    /// Install completions to the standard path
+    /// Install completions under your home directory
+    ///
+    /// Writes `~/.zfunc/_murk` for zsh,
+    /// `~/.local/share/bash-completion/completions/murk` for bash,
+    /// `~/.config/fish/completions/murk.fish` for fish,
+    /// `~/.config/elvish/lib/murk.elv` for elvish and
+    /// `~/.config/powershell/_murk.ps1` for PowerShell. It replaces a file that
+    /// is already there and needs HOME. For zsh and bash, murk then prints the
+    /// lines to add to your shell startup file.
     Install {
         /// Shell to install completions for
         shell: clap_complete::Shell,
@@ -530,7 +572,7 @@ pub enum AgentCommand {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// New output file; refuses an existing path (prints to stdout if omitted)
+        /// New output file. murk refuses a path that already exists. Without this option, murk prints to stdout
         #[arg(long, short)]
         output: Option<String>,
         /// Vault filename
@@ -538,13 +580,15 @@ pub enum AgentCommand {
         vault: String,
     },
 
-    /// Run a command with strict agent-safe defaults (experimental; keeps only PATH, HOME and
-    /// TERM from the inherited environment on Unix, or PATH and a fixed set of
-    /// system variables on Windows, strips MURK_KEY, requires --only, masks
-    /// injected values in the output)
+    /// Run a command with strict agent-safe defaults (experimental)
+    ///
+    /// On Unix the command keeps only PATH, HOME and TERM from the inherited
+    /// environment. On Windows it keeps PATH and a fixed set of system
+    /// variables. murk strips MURK_KEY, requires `--only` and masks the
+    /// injected values in the output.
     #[command(trailing_var_arg = true)]
     Exec {
-        /// Inject these specific keys (required — agent mode fails closed)
+        /// Inject only these secrets (repeatable, required)
         #[arg(long, required = true)]
         only: Vec<String>,
         /// Decrypt with a key that is not an agent grant: your own stored key
@@ -552,13 +596,17 @@ pub enum AgentCommand {
         /// MURK_KEY_FILE. Without this, agent exec needs an agent grant key
         #[arg(long)]
         allow_operator_key: bool,
-        /// Allow keys named like loader/shell/tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
+        /// Allow secrets named like loader, shell or tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
         #[arg(long)]
         allow_reserved: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
-        /// Command and arguments to execute
+        /// Command and arguments to run
+        ///
+        /// Put murk options such as `--only` before the command. murk passes
+        /// everything after the command name to the command, so
+        /// `murk agent exec echo hi --only FOO` fails with a missing `--only`.
         #[arg(required = true)]
         command: Vec<String>,
     },
@@ -568,10 +616,10 @@ pub enum AgentCommand {
         /// Grant name (used to revoke it later)
         #[arg(long)]
         name: String,
-        /// Keys this grant can read (required — fails closed)
+        /// Secrets this grant can read (repeatable, required)
         #[arg(long, required = true)]
         only: Vec<String>,
-        /// Time to live, e.g. 30m, 2h, 7d; at most 365d (reads fail closed after expiry)
+        /// Time to live, e.g. 30m, 2h or 7d, up to 365d. Reads fail closed after expiry
         #[arg(long, default_value = "2h")]
         ttl: String,
         /// Replace the grant with this name: revoke its key, mint a fresh one. Without this, murk
@@ -590,19 +638,20 @@ pub enum AgentCommand {
         vault: String,
     },
 
-    /// One-shot onboarding (experimental): optionally set the agent allow-list,
-    /// mint a scoped grant, and print how to run the agent safely
+    /// Mint a scoped grant and print how to run the agent safely (experimental)
+    ///
+    /// With `--allow-tag`, murk first sets the agent allow-list to those tags.
     Init {
         /// Grant name (used to revoke it later)
         #[arg(long)]
         name: String,
-        /// Keys the agent can read (required — fails closed)
+        /// Secrets the agent can read (repeatable, required)
         #[arg(long, required = true)]
         only: Vec<String>,
         /// Set the agent allow-list to these tags before granting (repeatable)
         #[arg(long = "allow-tag", value_parser = NewText::LINE)]
         allow_tag: Vec<String>,
-        /// Time to live, e.g. 30m, 2h, 7d; at most 365d (reads fail closed after expiry)
+        /// Time to live, e.g. 30m, 2h or 7d, up to 365d. Reads fail closed after expiry
         #[arg(long, default_value = "2h")]
         ttl: String,
         /// Where to write the agent key: a path, or `-` for stdout
@@ -652,7 +701,7 @@ pub enum AgentCommand {
         /// Omit it to configure every client that already has a config file or
         /// marker directory (such as `.cursor/`) next to the vault
         client: Option<String>,
-        /// Keys the agent may read (required — fails closed)
+        /// Secrets the agent may read (repeatable, required)
         #[arg(long, required = true)]
         only: Vec<String>,
         /// Set the agent allow-list to these tags before granting (repeatable)
@@ -661,7 +710,7 @@ pub enum AgentCommand {
         /// Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)
         #[arg(long)]
         allow_exec: bool,
-        /// Grant time to live, e.g. 30m, 2h, 7d; at most 365d (reads fail closed after expiry)
+        /// Grant time to live, e.g. 30m, 2h or 7d, up to 365d. Reads fail closed after expiry
         #[arg(long, default_value = "2h")]
         ttl: String,
         /// Grant name (used to disconnect/revoke it later)
@@ -672,12 +721,15 @@ pub enum AgentCommand {
         vault: String,
     },
 
-    /// Remove murk's entry from an AI editor's MCP config (experimental). No CLIENT clears every
-    /// configured editor. `--rotate` also revokes the grant and rotates its keys.
+    /// Remove murk's entry from an AI editor's MCP config (experimental)
+    ///
+    /// With no CLIENT, murk clears every configured editor. The grant stays
+    /// live unless you pass `--rotate`, which also revokes the grant named by
+    /// `--name` and rotates the secrets it could read.
     Disconnect {
         /// Editor to disconnect. Omit for every configured editor
         client: Option<String>,
-        /// Revoke the grant and rotate the keys it could read
+        /// Revoke the grant and rotate the secrets it could read
         #[arg(long)]
         rotate: bool,
         /// Grant name to revoke with --rotate
@@ -799,7 +851,7 @@ pub enum PolicyCommand {
         vault: String,
     },
 
-    /// Remove the policy — agent mode becomes unrestricted again
+    /// Remove the policy. Agent mode becomes unrestricted again
     Clear {
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]

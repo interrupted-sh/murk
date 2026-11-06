@@ -529,8 +529,12 @@ pub(crate) fn offer_gitignore(project_dir: &Path, config_path: &Path) {
         content.push_str(&rel);
         content.push('\n');
         match fs::write(&gitignore, content) {
-            Ok(()) => eprintln!("  {} added {} to .gitignore", "ok".green(), rel.bold()),
-            Err(e) => eprintln!("  {} could not update .gitignore: {e}", "✗".red()),
+            Ok(()) => eprintln!(
+                "  {} added {} to .gitignore",
+                "ok".green().bold(),
+                rel.bold()
+            ),
+            Err(e) => eprintln!("  {} could not update .gitignore: {e}", "✕".red()),
         }
     }
 }
@@ -637,7 +641,7 @@ pub(crate) fn cmd_agent_connect(
         match connect::plan_connect(adapter, &project_dir, &key_path, &extra_args) {
             Ok(edit) => edits.push((*adapter, edit)),
             Err(e) => {
-                eprintln!("{} {}: {e}", "✗".red(), adapter.display);
+                eprintln!("{} {}: {e}", "✕".red(), adapter.display);
                 plan_failed = true;
             }
         }
@@ -680,14 +684,14 @@ pub(crate) fn cmd_agent_connect(
     let mut applied: Vec<(&connect::ClientAdapter, &connect::ConfigEdit)> = Vec::new();
     for (adapter, edit) in &edits {
         if let Err(e) = edit.apply() {
-            eprintln!("{} {}: {e}", "✗".red(), adapter.display);
+            eprintln!("{} {}: {e}", "✕".red(), adapter.display);
             let mut restored_all = true;
             for (done_adapter, done) in applied.iter().rev() {
                 if let Err(e) = done.undo() {
                     restored_all = false;
                     eprintln!(
                         "{} {}: could not restore {}: {e}",
-                        "✗".red(),
+                        "✕".red(),
                         done_adapter.display,
                         done.path.display()
                     );
@@ -771,7 +775,7 @@ fn revoke_unhanded_grant(name: &str, key_file: &Path, minted_pubkey: &str, vault
     if let Err(e) = fs::remove_file(key_file) {
         eprintln!(
             "{} could not delete key file {}: {e}",
-            "✗".red(),
+            "✕".red(),
             key_file.display()
         );
     }
@@ -818,7 +822,7 @@ pub(crate) fn cmd_agent_disconnect(
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("{} {}: {e}", "✗".red(), adapter.display);
+                eprintln!("{} {}: {e}", "✕".red(), adapter.display);
                 failed = true;
             }
         }
@@ -880,6 +884,10 @@ pub(crate) fn print_isolation_snippet() {
     eprintln!(
         "  {}",
         "  user or container — with only the grant key file readable to it.".dimmed()
+    );
+    eprintln!(
+        "  {}",
+        "  tested recipes: https://murk.interrupted.sh/guides/agent-isolation/".dimmed()
     );
 }
 

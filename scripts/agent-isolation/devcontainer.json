@@ -1,0 +1,13 @@
+{
+  "name": "murk agent",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "agent",
+  "updateRemoteUserUID": true,
+  "mounts": [
+    "source=${localEnv:MURK_GRANT_KEY_FILE},target=/run/murk/key,type=bind,readonly"
+  ],
+  "containerEnv": {
+    "MURK_KEY_FILE": "/run/murk/key",
+    "MURK_AGENT": "1"
+  }
+}

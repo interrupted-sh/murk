@@ -6,9 +6,9 @@ Who can run which vault command. Each row is a command and each column a role; `
 
 The rows run against one fixture vault:
 
-- `SHARED`: shared with everyone. The override owner also has a personal (`--group me`) value for it.
+- `SHARED`: shared with everyone. The override owner also has a private (`--group me`) value for it.
 - `OPS`: held by the group `ops`.
-- `PRIV`: only the override owner's personal value.
+- `PRIV`: only the override owner's private value.
 - `AGENT_OK`: shared with everyone, and the scope of the agent grants.
 - Every key carries the tag `agents`, which the agent policy allows.
 - `spare` is a recipient in `ops` that commands act on. `idle` is a group with no secrets, whose members are the owner and the group member. `X` is a key that isn't on the vault yet.

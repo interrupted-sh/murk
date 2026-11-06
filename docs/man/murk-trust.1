@@ -12,13 +12,13 @@ Needed once per vault on a new clone, whenever a teammate\*(Aqs first signed wri
 .SH OPTIONS
 .TP
 \fB\-\-yes\fR
-Accept without asking (for scripts; review first)
+Accept without asking, for scripts. Review the vault first
 .TP
 \fB\-\-print\-key\fR
 Print your own trusted\-signer entry (for MURK_TRUSTED_SIGNERS) and signing\-key fingerprint (for teammates to confirm), then exit
 .TP
 \fB\-\-re\-add\fR \fI<KEY>\fR
-Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key; a vault signed by or listing a removed key is never trusted without it
+Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename

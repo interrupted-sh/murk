@@ -62,7 +62,7 @@ pub fn phrase_from_key(secret_key: &str) -> Result<Zeroizing<String>, RecoveryEr
             "plugin identities (YubiKey, Secure Enclave, FIDO2) do not have recovery phrases. \
              BIP39 words encode the raw 32 key bytes, but hardware-backed keys never leave the \
              device — there are no bytes to encode. Recovery means enrolling a backup hardware \
-             device at setup and adding its pubkey as a recipient with `murk authorize`"
+             device at setup and adding its pubkey as a recipient with `murk circle authorize`"
                 .into(),
         ));
     }

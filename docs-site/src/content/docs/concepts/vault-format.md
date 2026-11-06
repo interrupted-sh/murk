@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-A `.murk` file is a single JSON document. Every field is plaintext except the encrypted values and one encrypted `meta` blob. This page walks through the structure conceptually. See [SPEC.md](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#file-format) on GitHub for the exact field-by-field schema.
+A `.murk` file is a single JSON document. Every field is plaintext except the encrypted values, the per-grant `agents` blobs and one encrypted `meta` blob. This page walks through the structure conceptually. See [SPEC.md](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#file-format) on GitHub for the exact field-by-field schema.
 
 ## The plaintext header
 
@@ -22,12 +22,12 @@ A `.murk` file is a single JSON document. Every field is plaintext except the en
 Each key in `secrets` carries up to three ciphertext fields, one age blob per tier:
 
 - **`shared`**: encrypted to every recipient except agent grants (the `everyone` group). Empty (`""`) when the secret has no shared value, because its base tier is a named group or it has only private values.
-- **`scoped`**: a map of recipient pubkey → ciphertext, one entry per recipient with a private override (the `me` tier). The field kept its old name for compatibility with vaults written before the tier was renamed. Each agent grant also has its entries here.
+- **`scoped`**: a map of recipient pubkey → ciphertext, one entry per recipient with a private value (`--group me`). The field kept its old name for compatibility with vaults written before the tier was renamed. Each agent grant also has its entries here.
 - **`grouped`**: a map of group name → ciphertext, for secrets whose base tier is a named group rather than `everyone`.
 
-A secret has at most one base tier: `shared` or a single `grouped` entry. Assigning it to a named group drops any existing shared value. A secret can also have only private (`me`) values, with an empty `shared` and no `grouped` entry. The private (`me`) override layers on top of any base tier. Because age determines readability from the ciphertext's recipients, a non-member of a group can't decrypt its `grouped` entry. There's no separate access check.
+A secret has at most one base tier: `shared` or a single `grouped` entry. Assigning it to a named group drops any existing shared value. A secret can also have only a private value, with an empty `shared` and no `grouped` entry. A private value overrides the base value on export. Because age determines readability from the ciphertext's recipients, a non-member of a group can't decrypt its `grouped` entry. There's no separate access check.
 
-A top-level **`agents`** map *(optional)* maps each grant pubkey to an age blob encrypted to that grant only. The blob holds the grant's own record: its name, scope, issue and expiry times, and issuer. It holds no values and nothing else from the meta. It is omitted when the vault has no grants.
+A top-level **`agents`** map *(optional)* maps each grant pubkey to an age blob encrypted to that grant only. The blob holds the grant's own record: its name, scope, issue and expiry times, issuer, and the signer keys it trusts (its anchors, plain recipient keys). It holds no values and nothing else from the meta. It is omitted when the vault has no grants.
 
 ## The encrypted meta blob
 
@@ -35,7 +35,7 @@ A top-level **`agents`** map *(optional)* maps each grant pubkey to an age blob 
 
 - **`recipients`**: the only place public keys are mapped to display names.
 - **`groups`**: group name → member pubkeys, kept out of the header so org structure (who's in which group) doesn't leak to a non-recipient.
-- **`grants`**: the agent grant registry (ephemeral pubkey, scope, TTL, issuer), kept out of the header so grant names, TTLs and issuers don't leak. The agent's pubkey is still a plaintext recipient, and its `scoped` entries on the secrets show which secrets it can read. See [Grants](/concepts/grants/).
+- **`grants`**: the agent grant registry (ephemeral pubkey, scope, TTL, issuer, trusted-signer anchors), kept out of the header so grant names, TTLs and issuers don't leak. The agent's pubkey is still a plaintext recipient, and its `scoped` entries on the secrets show which secrets it can read. See [Grants](/concepts/grants/).
 - **`mac` / `mac_key`**: the keyed integrity hash covering the vault's contents, including the header identity fields (`vault_name`, `repo`, `created`, `vault_id` and `generation`), and the key used to compute it.
 - **`signers`** *(age keys only)*: the signer registry, mapping each age signer's recipient to the base64 Ed25519 verifying key it signs with. That key can't be computed from the `age1...` recipient, so the writer records it on every save, and a loader believes an entry only as [Recipients & signatures](/concepts/recipients-signatures/#a-new-teammates-first-write) describes. `ssh-ed25519` keys are never listed: the recipient string is the verifying key.
 - **`github_pins`**: GitHub username to the SHA-256 fingerprints of the keys fetched when you authorized `github:USER`, used to detect changed keys.

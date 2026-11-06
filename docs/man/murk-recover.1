@@ -2,12 +2,14 @@
 .el .ds Aq '
 .TH murk-recover 1  "recover " 
 .SH NAME
-murk\-recover \- Print the BIP39 recovery phrase for the key murk resolves (MURK_KEY, MURK_KEY_FILE or the stored key for .murk)
+murk\-recover \- Print the BIP39 recovery phrase for your age key
 .SH SYNOPSIS
 \fBmurk recover\fR [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Print the BIP39 recovery phrase for the key murk resolves (MURK_KEY, MURK_KEY_FILE or the stored key for .murk)
+Print the BIP39 recovery phrase for your age key
+.PP
+murk uses the key from `MURK_KEY`, `MURK_KEY_FILE` or the stored key for `.murk`. SSH keys and plugin identities have no recovery phrase.
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
