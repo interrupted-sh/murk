@@ -12,14 +12,20 @@ murk is configured almost entirely through environment variables, so it composes
 | Variable | Description |
 | --- | --- |
 | `MURK_KEY` | Your raw age private key (`AGE-SECRET-KEY-1...`), inline. Convenient for scripts and CI, but the key sits in plaintext wherever this variable is set: an env file, a CI secret store, a process environment. Rejected if set to a hardware-plugin identity string (`AGE-PLUGIN-...`). Use `MURK_KEY_FILE` for those. |
-| `MURK_KEY_FILE` | Path to a file holding your private key: a raw age key, an SSH PEM key, or an age plugin identity file (with a `# Recipient:` or `# public key:` header). `murk init` writes this variable into `.env`. |
+| `MURK_KEY_FILE` | Path to a file that holds your private key: a raw age key, an unencrypted OpenSSH private key, or an age plugin identity file (with a `# Recipient:` or `# public key:` header). murk refuses an encrypted SSH key, a symlink, and, on Unix, a file with any permission bit set for group or others. If murk can't read the file, it stops with an error and doesn't fall back to the stored key. `murk init` writes this variable into `.env`. |
 | `MURK_VAULT` | Vault filename, defaulting to `.murk`. Equivalent to passing `--vault` on every command. |
 
-murk resolves your identity from `MURK_KEY` or `MURK_KEY_FILE`, then from an automatic lookup at `~/.config/murk/keys/<vault-hash>` (the file `murk init` writes). Set one of the two variables, not both: murk refuses to run when both are non-empty rather than guess which key you meant, and an empty value counts as unset. The automatic step is disabled whenever strict mode is active (see below), so an agent context always needs an explicit key of its own.
+murk resolves your identity in this order:
+
+1. `MURK_KEY` or `MURK_KEY_FILE`. Set one of the two, not both: murk refuses to run when both are non-empty rather than guess which key you meant. An empty value counts as unset. If murk can't read `MURK_KEY_FILE`, it stops with an error. It doesn't go on to step 2 or 3.
+2. The key that `murk init` stored for this vault, at `~/.config/murk/keys/<vault-hash>`. `<vault-hash>` is the first 16 hex digits of the SHA-256 of the vault's absolute path.
+3. The key stored for the same vault in a sibling worktree of the same git repository: the main checkout first, then the linked worktrees.
+
+murk checks a stored key the same way as `MURK_KEY_FILE`: it refuses a symlink and, on Unix, a file with any permission bit set for group or others. Strict mode skips steps 2 and 3 (see below), so an agent context always needs an explicit key of its own.
 
 `.env` is a write-only convenience. `murk init` puts a `MURK_KEY_FILE` reference in it so you can `source .env`, or load it with direnv's `dotenv` command. The `.envrc` that `murk env` writes does not load it, because direnv finds the key through the stored-key lookup. murk never reads `.env` to find a key. Otherwise a vault copied into another repo could borrow whatever key that directory's `.env` points to. murk uses only the process environment and the stored-key lookup. (`murk doctor` and `murk init` read `.env` to check it for an inline `MURK_KEY`, and `murk import` imports from it.)
 
-The automatic lookup is keyed on the vault's absolute path, and a git worktree puts the same committed vault at a different one. So murk also accepts the key stored for that vault in a sibling worktree of the same repository — the main checkout first, then linked worktrees. A fresh worktree needs no key provisioning: check it out and `murk get` works, with no `.env` to copy and nothing to re-run. Only checkouts git itself records as part of the repository count, verified in both directions against git's own metadata, so a copied vault in a directory that merely *claims* to be a worktree still gets nothing. Strict mode and agent context skip the automatic lookup entirely, worktree or not.
+A git worktree puts the same committed vault at a different absolute path, so its `<vault-hash>` differs. Step 3 covers that. A fresh worktree needs no key provisioning: check it out and `murk get` works, with no `.env` to copy and nothing to re-run. Only checkouts that git itself records as part of the repository count. murk verifies that in both directions against git's own metadata, so a copied vault in a directory that merely *claims* to be a worktree still gets nothing.
 
 ## Safety and agent context
 
@@ -29,11 +35,32 @@ Strict mode (`MURK_STRICT`, and the strict mode that `MURK_AGENT` forces) is exp
 
 | Variable | Description |
 | --- | --- |
-| `MURK_STRICT` | Experimental. Any value except unset, empty, `0`, `false`, `no` and `off` (any letter case; a typo turns it on) turns it on. `murk edit` aborts before it starts the editor unless its scratch file is on a RAM-backed filesystem. `export`, `get` and `diff --show-values` refuse to run when stdout is a regular file. murk skips the stored-key lookup in `~/.config/murk/keys`. It also refuses a result that no key checked, such as `murk rotate --list` run without a key, and a `murk diff` revision it could only show with a warning. It does not stop a process from writing values elsewhere. |
-| `MURK_AGENT` | Marks the process as running on behalf of an AI agent. Forces strict mode unconditionally: there's no way to turn strict back off from inside an agent context, even by setting `MURK_STRICT=0`. `murk agent exec` sets it (alongside `MURK_STRICT=1`) on its child process automatically. |
+| `MURK_STRICT` | Experimental. Any value except unset, empty, `0`, `false`, `no` and `off` turns it on, in any letter case. A typo turns it on too. Strict mode runs the checks listed below the table. |
+| `MURK_AGENT` | Marks the process as running on behalf of an AI agent. Forces strict mode unconditionally: there's no way to turn strict back off from inside an agent context, even by setting `MURK_STRICT=0`. `murk agent exec` sets it (alongside `MURK_STRICT=1`) on its child process automatically. `murk mcp` refuses to run unless `MURK_AGENT` is set, and it also needs a grant key. |
 | `MURK_SELF_SCOPE` | Read like `MURK_STRICT` (any value except unset, empty, `0`, `false`, `no` and `off`). Holds *your own* key to the vault's agent allow-tag policy, as if you were an agent: `get`, `exec`/`agent exec`, and single-key `edit KEY` fail closed on a non-allowed key, `export` withholds forbidden keys, and bulk `edit` is refused. Implied automatically inside an agent context. A no-op on a vault with no policy set. See [Grants](/concepts/grants/). |
-| `MURK_TRUSTED_SIGNERS` | Signers trusted to sign the vault, separated by commas or newlines. An age signer is `age1...:<verifying key>` (the recipient, a colon, the base64 Ed25519 verifying key); an `ssh-ed25519` signer is its public key line. `murk trust --print-key` prints the entry for your own key. For CI runners and other machines with no [trust pin](/concepts/recipients-signatures/#trusting-a-signer): set it from a CI secret next to `MURK_KEY`. When set, it replaces the pin's trusted set, an age signer's signature has to verify under the verifying key given here, and it makes an unsigned vault an error even for a key that can't sign. Trust that comes from this variable is not written into the pin, so it never widens what the machine trusts once the variable is gone. Agent grant keys listed here still never count, and an entry in neither form, including a bare `age1...` key without its verifying key, is an error. |
+| `MURK_TRUSTED_SIGNERS` | Signers that this machine trusts to sign the vault, separated by commas or newlines. Use it on CI runners and other machines with no [trust pin](/concepts/recipients-signatures/#trusting-a-signer). Set it only from a CI secret or the real process environment, never from a file in the repository or a `.env` that an app's dotenv loader reads, because it decides which signers this machine trusts. The entry forms and effects follow the table. |
 | `MURK_NO_SIGNER_PIN` | Any value counts, including `0` and an empty string, so unset the variable to turn it off. murk neither reads nor writes the local trust pin, so trust comes only from `MURK_TRUSTED_SIGNERS`. It doesn't switch the trust check off: without `MURK_TRUSTED_SIGNERS`, every signed vault is refused, and rollback and stripped-signature detection are off. A machine with no home directory behaves the same way. |
+
+Strict mode runs these checks:
+
+- `murk edit` aborts before it starts the editor unless its scratch file is on a RAM-backed filesystem.
+- `export`, `get` and `diff --show-values` refuse to run when stdout is a regular file.
+- murk skips the stored-key lookup in `~/.config/murk/keys`.
+- murk refuses a result that no key checked, such as `murk rotate --list` run without a key, and a `murk diff` revision it could only show with a warning.
+
+Strict mode does not stop a process from writing values elsewhere.
+
+A `MURK_TRUSTED_SIGNERS` entry takes one of two forms:
+
+- An age signer is `age1...:<verifying key>`: the recipient, a colon, and the base64 Ed25519 verifying key.
+- An `ssh-ed25519` signer is its public key line.
+
+`murk trust --print-key` prints the entry for your own key. An entry in neither form is an error, including a bare `age1...` key without its verifying key. When the variable is set:
+
+- It replaces the pin's trusted set. An age signer's signature has to verify under the verifying key given in its entry.
+- It makes an unsigned vault an error, even for a key that can't sign.
+- Agent grant keys listed in it still never count.
+- murk doesn't write the trust it gives into the pin, so the variable never widens what the machine trusts once it is gone.
 
 ## Also honored
 
