@@ -116,7 +116,10 @@ pub fn create_grant(
         // The hint is a whole `agent grant` command, not a bare flag: `agent
         // init` reaches this error too and has no `--renew`, so the user must
         // be able to run the line as printed.
-        let only: String = scope.iter().map(|k| format!(" --only {k}")).collect();
+        let only: String = scope
+            .iter()
+            .flat_map(|k| [" --only ", k.as_str()])
+            .collect();
         return Err(MurkError::Grant(format!(
             "grant already exists: {name} — replace it with `murk agent grant --name {name}{only} --renew`"
         )));

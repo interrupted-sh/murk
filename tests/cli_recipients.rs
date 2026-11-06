@@ -723,12 +723,10 @@ fn group_ls_with_a_grant_key_says_it_cannot_read_membership() {
         if json {
             cmd.arg("--json");
         }
-        cmd.assert()
-            .success()
-            .stderr(
-                predicate::str::contains("agent grants cannot read group membership")
-                    .and(predicate::str::contains("no groups").not()),
-            );
+        cmd.assert().success().stderr(
+            predicate::str::contains("agent grants cannot read group membership")
+                .and(predicate::str::contains("no groups").not()),
+        );
     }
 }
 
