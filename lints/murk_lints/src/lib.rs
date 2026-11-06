@@ -59,7 +59,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
 //   discover *new* secret-holding fields on its own (documented limitation:
 //   there is no marker trait/attribute in murk_cli today that would let a
 //   lint infer "this new field holds a secret" without either guessing from
-//   names or an allowlist — see the bead notes).
+//   names or an allowlist).
 // - Lint (b) is fully general: any struct/enum with a field that resolves
 //   (through containers) to a wrapper/ZeroizeOnDrop-implementing type is
 //   "secret-bearing" by that same real type check — no allowlist needed.

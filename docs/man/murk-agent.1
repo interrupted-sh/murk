@@ -17,13 +17,13 @@ murk\-agent\-plan(1)
 Emit schema\-only context safe to paste into an AI agent prompt (experimental)
 .TP
 murk\-agent\-exec(1)
-Run a command with strict agent\-safe defaults (experimental; keeps only PATH, HOME and TERM from the inherited environment on Unix, or PATH and a fixed set of system variables on Windows, strips MURK_KEY, requires \-\-only, masks injected values in the output)
+Run a command with strict agent\-safe defaults (experimental)
 .TP
 murk\-agent\-grant(1)
 Mint a scoped ephemeral key that can read only the named secrets (experimental)
 .TP
 murk\-agent\-init(1)
-One\-shot onboarding (experimental): optionally set the agent allow\-list, mint a scoped grant, and print how to run the agent safely
+Mint a scoped grant and print how to run the agent safely (experimental)
 .TP
 murk\-agent\-ls(1)
 List active agent grants and their TTLs (experimental)
@@ -35,7 +35,7 @@ murk\-agent\-connect(1)
 Add `murk mcp` to an AI client\*(Aqs MCP config and mint a scoped grant for it (experimental)
 .TP
 murk\-agent\-disconnect(1)
-Remove murk\*(Aqs entry from an AI editor\*(Aqs MCP config (experimental). No CLIENT clears every configured editor. `\-\-rotate` also revokes the grant and rotates its keys
+Remove murk\*(Aqs entry from an AI editor\*(Aqs MCP config (experimental)
 .TP
 murk\-agent\-help(1)
 Print this message or the help of the given subcommand(s)

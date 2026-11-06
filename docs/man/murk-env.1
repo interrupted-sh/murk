@@ -7,10 +7,12 @@ murk\-env \- Write a .envrc for direnv integration
 \fBmurk env\fR [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Write a .envrc for direnv integration
+.PP
+Creates `.envrc` in the current directory with a line that runs `murk export`. If `.envrc` already exists, murk appends the line. If it already has a `murk export` line, murk changes nothing. Run `direnv allow` afterward.
 .SH OPTIONS
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)

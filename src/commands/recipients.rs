@@ -522,7 +522,7 @@ pub(crate) fn cmd_revoke(
                 ),
                 Err(e) => eprintln!(
                     "{} could not delete its key file {}: {e} — delete it by hand",
-                    "✗".red(),
+                    "✕".red(),
                     p.display()
                 ),
             },
@@ -572,6 +572,15 @@ pub(crate) fn cmd_group(sub: GroupCommand) {
             let vault_path = murk_cli::resolve_vault_path(&vault);
             let (_vault, murk, identity) = load_vault(&vault_path);
             let self_pubkey = identity.pubkey_string().ok();
+            // A grant cannot open the meta, which holds group membership, so it
+            // sees no groups even when the vault has some. Say so instead of
+            // reporting that the vault has none.
+            if murk.loaded_as_grant {
+                eprintln!(
+                    "{} agent grants cannot read group membership: it is in the encrypted meta, which a grant cannot open",
+                    "warn".yellow().bold()
+                );
+            }
 
             if json {
                 let map: serde_json::Map<String, serde_json::Value> = murk
@@ -590,6 +599,9 @@ pub(crate) fn cmd_group(sub: GroupCommand) {
             }
 
             if murk.groups.is_empty() {
+                if murk.loaded_as_grant {
+                    return;
+                }
                 eprintln!(
                     "{}",
                     "no groups — create one with `murk group create`".dimmed()

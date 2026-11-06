@@ -7,23 +7,32 @@ sidebar:
 
 The authoritative, per-version changelog lives on the GitHub releases page:
 
-- **[github.com/interrupted-sh/murk/releases](https://github.com/interrupted-sh/murk/releases)**
+- [github.com/interrupted-sh/murk/releases](https://github.com/interrupted-sh/murk/releases)
 
-Each release's notes are generated from the commit subjects at tag time (via
-[git-cliff](https://git-cliff.org/), grouped by
-[conventional-commit](https://www.conventionalcommits.org/) type). Rather than
-mirror a copy here that would go stale between builds, this page points at that
-single source.
+This page does not mirror the notes. A copy here would go stale between
+builds, so this page points at that single source.
+
+## Reading the release notes
+
+Read a release's notes before you upgrade across a minor version. The notes
+for 0.14.0 and 0.14.1 open with hand-written sections, above the list of
+changes. Those sections hold the upgrade steps ("Upgrade first" in 0.14.0,
+"Upgrade notes" in 0.14.1), any breaking changes, and the known limits.
+
+Every release's notes end with a list of changes. It is generated from the
+commit subjects at tag time (via [git-cliff](https://git-cliff.org/), grouped
+by [conventional-commit](https://www.conventionalcommits.org/) type).
 
 ## Versioning
 
 murk is pre-1.0 and uses [Semantic Versioning](https://semver.org/). Before
-1.0, a **minor** bump (0.12 to 0.13) may break compatibility. Patch bumps are
-fixes and additions. Breaking changes are marked with `!` in the release notes,
-for example `fix!: refuse to run when both key variables are set` in 0.13.0. A
-newer murk reads vaults written by older 0.x versions, but a vault written by a
-newer murk may not open in an older one. The [roadmap](/roadmap/) lists the
-format guarantee 1.0 will add.
+1.0, a minor bump (0.13 to 0.14) may break compatibility. Patch bumps are
+fixes and additions.
+
+A newer murk reads vaults written by older 0.x versions, but a vault written by
+a newer murk may not open in an older one. For example, murk 0.14 changed the
+vault format to 3.0, and murk 0.13 cannot read a 3.0 vault. The
+[roadmap](/roadmap/) lists the format guarantee 1.0 will add.
 
 ## Installing a specific version of the CLI
 

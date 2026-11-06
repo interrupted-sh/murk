@@ -57,7 +57,9 @@ set up. Starting a project of your own? See
    replaces a key that is already stored.
 
    murk stores your key in `~/.config/murk/keys/`, not in the repo. It also
-   writes a `.env` file that points at the key: add `.env` to `.gitignore`.
+   writes a `.env` file that points at the key. Make sure `.gitignore` lists
+   `.env` and `.murk.lock` (the empty lock file murk creates next to the
+   vault on every write).
 
 3. ## Get authorized
 
@@ -72,27 +74,49 @@ set up. Starting a project of your own? See
    Then they commit and push `.murk`.
 
    **Confirm your signing-key fingerprint (age keys only).** Your first write
-   after you are authorized is refused once on each teammate's machine until
-   they confirm the key you sign with. `murk init` printed its fingerprint
-   (`signing key SHA256:…`). To see it again, run `murk trust --print-key`. It
-   prints your signer entry on stdout and the fingerprint on stderr. Read the
-   fingerprint to a teammate over something other than the repo. They compare
-   it with the one `murk trust` shows, then accept. This is a one-time step per
-   teammate. An `ssh-ed25519` key, including one added with `github:`, is its
-   own verifying key and skips it.
+   after you are authorized is refused once on each teammate's machine. It
+   stays refused until that teammate confirms the key you sign with:
+
+   - `murk init` printed your fingerprint (`signing key SHA256:…`). To see it
+     again, run `murk trust --print-key`. It prints your signer entry on
+     stdout and the fingerprint on stderr.
+   - Read the fingerprint to each teammate over something other than the
+     repo.
+   - Each teammate compares it with the one `murk trust` shows, then accepts.
+
+   You do this once per teammate. An `ssh-ed25519` key, including one added
+   with `github:`, is its own verifying key and skips this step.
 
    **Using a GitHub SSH key instead.** If you have an ed25519 SSH key on
-   GitHub, the recipient can add it without exchanging keys. They run
+   GitHub, a recipient can add it without exchanging keys. They run
    `murk circle authorize github:YOUR_USERNAME`, then commit and push
-   `.murk`. murk adds your GitHub SSH public keys as recipients (RSA keys are
-   skipped). On this path your SSH key is your murk identity, so you do not
-   need the key from step 2. murk does not look in `~/.ssh` on its own. After
-   you `git pull`, unset `MURK_KEY` and point murk at your SSH private key:
-   `export MURK_KEY_FILE=~/.ssh/id_ed25519`. The key must be unencrypted (no
-   passphrase) and readable only by you. Without this, `murk get`,
-   `murk export` and `murk exec` fail with "you are not a recipient".
+   `.murk`. murk adds your GitHub SSH public keys as recipients and skips RSA
+   keys.
+
+   :::caution[Experimental]
+   `github:` recipients are experimental. murk fetches the keys from GitHub
+   over the network and trusts them on first use. The recipient must confirm
+   with you that the keys are yours. See
+   [Authorizing via GitHub](/guides/teams/#authorizing-via-github).
+   :::
 
    ![Authorizing a teammate by GitHub username](https://raw.githubusercontent.com/interrupted-sh/murk/demo/github.gif)
+
+   On this path your SSH key is your murk identity, so you do not need the
+   key from step 2. murk does not look in `~/.ssh` on its own. After you
+   `git pull`, point murk at your SSH private key:
+
+   ```bash
+   unset MURK_KEY
+   export MURK_KEY_FILE=~/.ssh/id_ed25519
+   ```
+
+   The key must be unencrypted (no passphrase) and readable only by you.
+   Until murk finds it, `murk get`, `murk export` and `murk exec` fail:
+
+   - With no key at all, they fail with "MURK_KEY not set".
+   - With a key that is not a recipient, such as one from `murk init`, they
+     fail with "you are not a recipient of this vault".
 
    If your GitHub keys change later, the next `authorize github:YOUR_USERNAME`
    refuses and lists the added and removed keys. The recipient must review
@@ -107,25 +131,32 @@ set up. Starting a project of your own? See
    murk trust                  # once per machine: review the signer, then accept
    ```
 
-   `murk trust` prints who signed the vault (their full key and its
-   signing-key fingerprint) and every recipient, then asks before it records
-   anything. Check the signer's fingerprint with the person who invited you,
-   over something other than the repo. Run
-   `git log -p -- .murk` first if you want to see what changed. On a machine
-   that already trusts the vault, `murk diff 'HEAD@{1}'` shows what a pull
-   changed. Skip this step and the first load on a machine is refused with
-   "not trusted on this machine yet". murk remembers your answer on this
-   machine, not in the repo, and asks again only if a later vault looks
-   wrong: unsigned, signed by an unfamiliar key, or older than one you've
-   already accepted. See [Recipients &
+   `murk trust` prints who signed the vault and every recipient, then asks
+   before it records anything. For the signer it shows the full key and its
+   signing-key fingerprint. Check that fingerprint with the person who
+   invited you, over something other than the repo. To see what changed
+   first, run `git log -p -- .murk`. On a machine that already trusts the
+   vault, `murk diff ORIG_HEAD`, run right after a pull, shows what the pull
+   changed.
+
+   If you skip this step, murk refuses the first load on a machine with "not
+   trusted on this machine yet". murk records your answer on this machine,
+   not in the repo. It asks again only if a later vault looks wrong:
+   unsigned, signed by an unfamiliar key, or older than one you have already
+   accepted. See [Recipients &
    signatures](/concepts/recipients-signatures/#trusting-a-signer) for the
    rules.
 
-   Do this once on every machine, after every fresh clone (the trust pin
-   lives outside the repo). A CI runner has no pin and nobody to run
-   `murk trust`: set `MURK_TRUSTED_SIGNERS` instead, with the entry each
-   signer's `murk trust --print-key` prints (comma or newline separated),
-   next to the key. See [CI/CD](/guides/cicd/).
+   Do this once on every machine, after every fresh clone, because the trust
+   pin lives outside the repo. A CI runner has no pin and nobody to run
+   `murk trust`. Set `MURK_TRUSTED_SIGNERS` on it instead, next to the key.
+   Its value is the entry that each signer's `murk trust --print-key` prints,
+   separated by commas or newlines. See [CI/CD](/guides/cicd/).
+
+   Set `MURK_TRUSTED_SIGNERS` only from a CI secret or the real process
+   environment. Never set it from a file in the repository or a `.env` that
+   an app's dotenv loader reads, because it decides which signers the
+   machine trusts.
 
 5. ## Use secrets
 
@@ -154,40 +185,49 @@ set up. Starting a project of your own? See
 ## Start a new vault
 
 Run `murk init` in a project directory that has no `.murk` file. murk asks
-for your name or email, creates the vault with you as its first recipient,
-and prints your recovery words. Write them down. If `MURK_KEY` or
+for your name or email and creates the vault with you as its first
+recipient. It prints your recovery words: write them down. If `MURK_KEY` or
 `MURK_KEY_FILE` is set, or murk already stores a key for this vault (here or
 in another git worktree of the repo), murk uses that key and prints no
-recovery words. Then add secrets, commit the vault and load it with direnv:
+recovery words.
+
+Then add secrets, keep the local files out of git, commit the vault and load
+it with direnv. `murk init` writes no `.gitignore`. Its `.env` points at your
+key, and every write creates an empty `.murk.lock` next to the vault.
+Neither belongs in git.
 
 ```bash
 murk init
 murk add DATABASE_URL   # prompts for the value (hidden input)
-git add .murk && git commit -m "add secrets vault"
+printf '.env\n.murk.lock\n' >> .gitignore
+git add .murk .gitignore && git commit -m "add secrets vault"
 murk env
 direnv allow
 ```
 
-Add `.env` to `.gitignore` before you commit. To add a teammate, run the
-`murk circle authorize` command from step 3, then commit and push `.murk`.
+To add a teammate, run the `murk circle authorize` command from step 3, then
+commit and push `.murk`.
 
 ## What to know
 
-- **Key names are public.** Anyone with repo access can see what secrets
-  exist (e.g. `STRIPE_KEY`). Only values are encrypted.
-- **Your key is your identity.** Don't share it. Don't paste it into chat.
-  Don't commit it.
-- **Recovery phrase = your key.** If someone has your 24 words, they have
-  your key. See [Key recovery](/guides/recovery/).
-- **Revocation doesn't erase history.** If you leave the team, your access to
-  old git history remains. The team should rotate secrets after revoking
-  you. See [Offboarding](/guides/offboarding/).
-- **Trust is per machine.** murk checks every vault against what your
-  machine has accepted, so a file copied over the vault or an older revision
-  is refused. Pass `--yes` to `murk trust` only in scripts, after reviewing
+- Secret names are public. Anyone with repo access can see what secrets exist
+  (for example `STRIPE_KEY`) and their descriptions. Only values are
+  encrypted.
+- Your key is your identity. Do not share it, paste it into chat or commit
+  it.
+- Your 24 recovery words rebuild your key. Anyone who has them has your key,
+  so store them as carefully as the key itself. See
+  [Key recovery](/guides/recovery/).
+- Revoking someone does not erase history. A teammate who leaves can still
+  decrypt every vault version they could read before. The team rotates those
+  secrets after revoking them. See [Offboarding](/guides/offboarding/).
+- Trust is per machine. murk checks every vault against what your machine
+  has accepted, so it refuses a file copied over the vault or an older
+  revision. Pass `--yes` to `murk trust` only in scripts, after you review
   the vault.
-- **A vault can't set sensitive variables.** `murk export`, `exec` and
+- A vault cannot set sensitive variables. `murk export`, `exec` and
   `agent exec` refuse a key named like `PATH`, `LD_PRELOAD`, `GIT_*`,
   `HTTPS_PROXY` or `MURK_*`, because whoever last wrote the vault chose those
-  names. Review who added it, then pass `--allow-reserved` if you mean it. See
+  names. Review who added the key, then pass `--allow-reserved` if you mean
+  it. See
   [Environment variables](/concepts/env-vars/#variable-names-a-vault-may-not-set).

@@ -10,13 +10,13 @@ Import secrets from a .env file
 .SH OPTIONS
 .TP
 \fB\-\-force\fR
-Overwrite existing secrets. Without it, import stops if any key already exists
+Overwrite existing secrets. Without it, import stops if any secret already exists
 .TP
 \fB\-\-group\fR \fI<GROUP>\fR
-Assign imported secrets to this group (`everyone`, `me`, or a group name, which is experimental). Omit to keep each existing key\*(Aqs tier; new keys are shared with everyone
+Who can read the imported secrets: `everyone`, `me` (private values for you only) or a group name (experimental). Omit it to keep each existing secret\*(Aqs tier. New secrets are shared with everyone
 .TP
 \fB\-\-example\fR \fI<EXAMPLE>\fR
-Example value applied to every imported key
+Example value applied to every imported secret
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename

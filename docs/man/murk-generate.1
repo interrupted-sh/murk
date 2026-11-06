@@ -16,13 +16,13 @@ Length in bytes
 Encode the value as hex instead of URL\-safe base64
 .TP
 \fB\-\-desc\fR \fI<DESC>\fR
-Description for this key
+Description of the secret
 .TP
 \fB\-\-example\fR \fI<EXAMPLE>\fR
 Example value
 .TP
 \fB\-\-group\fR \fI<GROUP>\fR
-Who can read it: a group name (experimental), `everyone`, or `me`. Omit to keep an existing key\*(Aqs tier; a new key is shared with everyone
+Who can read the secret: `everyone`, `me` (a private value for you only) or a group name (experimental). Omit it to keep an existing secret\*(Aqs tier. A new secret is shared with everyone
 .TP
 \fB\-\-tag\fR \fI<TAG>\fR
 Tag for grouping (repeatable)
@@ -34,4 +34,4 @@ Vault filename
 Print help
 .TP
 <\fIKEY\fR>
-Secret key name
+Name of the secret

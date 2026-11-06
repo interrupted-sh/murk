@@ -10,22 +10,26 @@ Run a command with secrets injected as environment variables
 .SH OPTIONS
 .TP
 \fB\-\-only\fR \fI<ONLY>\fR
-Only inject these specific keys (repeatable)
+Inject only these secrets (repeatable)
 .TP
 \fB\-\-tag\fR \fI<TAG>\fR
 Filter by tag (repeatable)
 .TP
 \fB\-\-clean\-env\fR
-Start the command with only murk secrets plus PATH, HOME and TERM on Unix (on Windows, PATH and a fixed set of system variables)
+Start the command with only the injected secrets plus PATH, HOME and TERM on Unix
+
+On Windows, murk keeps PATH and a fixed set of system variables.
 .TP
 \fB\-\-allow\-reserved\fR
-Allow keys named like loader/shell/tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
+Allow secrets named like loader, shell or tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 <\fICOMMAND\fR>
-Command and arguments to execute
+Command and arguments to run
+
+Put murk options such as `\-\-only` before the command. murk passes everything after the command name to the command, so `murk exec echo hi \-\-only FOO` runs `echo hi \-\-only FOO` and injects every secret.

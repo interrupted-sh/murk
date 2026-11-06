@@ -3,7 +3,7 @@ title: murk
 description: "Encrypted secrets manager for developers: one file, age encryption, git-friendly."
 template: splash
 hero:
-  tagline: Encrypted secrets in a single git-friendly file. One key on your machine, one <code>.murk</code> file in your repo. Age encryption, readable key names, no server.
+  tagline: Encrypted secrets in a single git-friendly file. One key on your machine, one <code>.murk</code> file in your repo. age encryption, readable key names, no server.
   image:
     file: ../../assets/murk-logo.svg
   actions:
@@ -31,10 +31,12 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
   </Card>
   <Card title="Per-recipient encryption" icon="approve-check">
     Every teammate gets their own key. Add and revoke recipients with
-    `murk circle`, so there's no shared password to rotate when someone leaves.
+    `murk circle`. There is no shared vault password, but when someone leaves
+    you still rotate the secrets they could read.
   </Card>
   <Card title="Scoped agent access (experimental)" icon="rocket">
-    Grant AI agents access to specific secrets over MCP, no broad exposure.
+    Give an AI agent a grant that reads only the secrets you name, through
+    `murk agent exec` or MCP. The agent receives those values in plaintext.
     See [AI agents &amp; MCP](/guides/ai-agents-mcp/).
   </Card>
   <Card title="Recover from a phrase" icon="seti:lock">
@@ -58,7 +60,10 @@ has more to configure.
 
 murk is simple: one key on your machine, one encrypted file in your repo. See
 the [threat model](/security/threat-model/) for what it protects and what it
-doesn't.
+does not.
+
+murk is pre-1.0 and has not been independently audited. Use good judgment
+with production secrets.
 
 ### How murk compares
 
@@ -68,7 +73,7 @@ doesn't.
 |---|---|---|---|---|---|
 | Encrypted values, readable keys | Yes | Yes | N/A | Yes | No (whole file) |
 | Per-recipient encryption | Yes | Yes | ACL-based | No (shared key) | Yes (GPG) |
-| Scoped per-user overrides | Yes | No | No | No | No |
+| Private per-user overrides | Yes | No | No | No | No |
 | Requires a server | No | No | Yes | No | No |
 | Cloud KMS required | No | Optional | Typically | No | No |
 | Single binary, no runtime | Yes | Yes | Yes (needs a server) | Yes | Yes |
@@ -80,25 +85,23 @@ doesn't.
 Compared against each project's documentation as of murk v0.14.0. Other tools
 change, so check their current docs.
 
-**SOPS** is the closest alternative. Both encrypt values in-place and support
-age. murk differs in having scoped (per-user) secrets, a single-file vault
-model, built-in team management (`murk circle`), and BIP39 key recovery. SOPS
-has broader KMS backend support and a larger ecosystem.
+**SOPS** is the closest alternative. Both encrypt values in place and support
+age. murk adds private per-user values, a single-file vault, built-in team
+management (`murk circle`) and BIP39 key recovery. SOPS supports more KMS
+backends and has a larger ecosystem.
 
-**Vault** solves a different problem: it's centralized infrastructure for
-secret storage, rotation, and dynamic credentials. If you need a secrets
-server, use Vault. murk is scoped to encrypted secrets in a repo.
+**Vault** solves a different problem. It is central infrastructure for
+secret storage, rotation and dynamic credentials. If you need a secrets
+server, use Vault. murk keeps encrypted secrets in a repo.
 
-**dotenvx** encrypts `.env` files but uses a single shared key for the whole
-team. There's no per-recipient encryption: if someone leaves, everyone needs
-a new key.
+**dotenvx** encrypts `.env` files with one shared key for the whole team. It
+has no per-recipient encryption, so when someone leaves, everyone needs a new
+key.
 
-**git-crypt** encrypts entire files via git filters. Diffs are opaque, and
-revoking a team member is effectively impractical without re-encrypting git
-history.
+**git-crypt** encrypts whole files through git filters. Its diffs are opaque.
+Revoking a team member is impractical without re-encrypting git history.
 
 Not sure murk is the right fit? See [Is murk right for you?](/suitability/) for
 a situation-by-situation suitability matrix and the 0.x release contract.
 
-Ready to try it? Head to [install & verify](/install/) or jump straight into
-the [quick start](/quick-start/).
+To try it, [install murk](/install/), then follow the [quick start](/quick-start/).

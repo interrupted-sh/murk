@@ -6,6 +6,26 @@ use age::secrecy::ExposeSecret;
 use colored::Colorize;
 use std::path::Path;
 
+/// Returns `text` in bold brand purple (#8760FF).
+///
+/// `colored` downgrades `.truecolor()` to bright blue unless `COLORTERM` is
+/// `truecolor` or `24bit`, so the escape is written directly: 24-bit when
+/// `COLORTERM` says the terminal supports it, otherwise 256-colour 99
+/// (#875FFF), the nearest palette entry, which every 256-colour terminal
+/// renders. It still follows `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE`
+/// through `SHOULD_COLORIZE`.
+fn brand_purple_bold(text: &str) -> String {
+    if !colored::control::SHOULD_COLORIZE.should_colorize() {
+        return text.to_string();
+    }
+    let truecolor = std::env::var_os("COLORTERM").is_some_and(|v| v == "truecolor" || v == "24bit");
+    if truecolor {
+        format!("\x1b[1;38;2;135;96;255m{text}\x1b[0m")
+    } else {
+        format!("\x1b[1;38;5;99m{text}\x1b[0m")
+    }
+}
+
 pub(crate) fn cmd_info(tags: &[String], json: bool, vault_path: &str) {
     // Route through the hardened loader so info rejects symlinked vaults and
     // enforces the version check — same as every other read path.
@@ -61,11 +81,7 @@ pub(crate) fn cmd_info(tags: &[String], json: bool, vault_path: &str) {
 
     let info = &info.for_terminal();
     // Nameplate: ░▓ vault_name
-    println!(
-        "{} {}",
-        "▓░".dimmed(),
-        info.vault_name.truecolor(135, 95, 255).bold()
-    );
+    println!("{} {}", "▓░".dimmed(), brand_purple_bold(&info.vault_name));
     println!("   {}    {}", "codename".dimmed(), info.codename);
     if !info.repo.is_empty() {
         println!("   {}        {}", "repo".dimmed(), info.repo);

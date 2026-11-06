@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: murk contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Encrypted secrets manager for developers — one file, age encryption, git-friendly.
+//! Encrypted secrets manager for developers: one file, age encryption, git-friendly.
 //!
 //! This library provides the core functionality for murk: vault I/O, age encryption,
 //! BIP39 key recovery, and secret management. The CLI binary wraps this library.

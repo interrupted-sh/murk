@@ -2,27 +2,31 @@
 .el .ds Aq '
 .TH murk-agent-exec 1  "exec " 
 .SH NAME
-murk\-agent\-exec \- Run a command with strict agent\-safe defaults (experimental; keeps only PATH, HOME and TERM from the inherited environment on Unix, or PATH and a fixed set of system variables on Windows, strips MURK_KEY, requires \-\-only, masks injected values in the output)
+murk\-agent\-exec \- Run a command with strict agent\-safe defaults (experimental)
 .SH SYNOPSIS
 \fBmurk agent exec\fR [\fB\-\-allow\-operator\-key\fR] [\fB\-\-allow\-reserved\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fB\-\-only\fR> <\fICOMMAND\fR> 
 .SH DESCRIPTION
-Run a command with strict agent\-safe defaults (experimental; keeps only PATH, HOME and TERM from the inherited environment on Unix, or PATH and a fixed set of system variables on Windows, strips MURK_KEY, requires \-\-only, masks injected values in the output)
+Run a command with strict agent\-safe defaults (experimental)
+.PP
+On Unix the command keeps only PATH, HOME and TERM from the inherited environment. On Windows it keeps PATH and a fixed set of system variables. murk strips MURK_KEY, requires `\-\-only` and masks the injected values in the output.
 .SH OPTIONS
 .TP
 \fB\-\-only\fR \fI<ONLY>\fR
-Inject these specific keys (required — agent mode fails closed)
+Inject only these secrets (repeatable, required)
 .TP
 \fB\-\-allow\-operator\-key\fR
 Decrypt with a key that is not an agent grant: your own stored key from ~/.config/murk/keys, or a full recipient\*(Aqs MURK_KEY or MURK_KEY_FILE. Without this, agent exec needs an agent grant key
 .TP
 \fB\-\-allow\-reserved\fR
-Allow keys named like loader/shell/tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
+Allow secrets named like loader, shell or tool variables (PATH, LD_*, GIT_*, MURK_*, ...)
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 <\fICOMMAND\fR>
-Command and arguments to execute
+Command and arguments to run
+
+Put murk options such as `\-\-only` before the command. murk passes everything after the command name to the command, so `murk agent exec echo hi \-\-only FOO` fails with a missing `\-\-only`.
