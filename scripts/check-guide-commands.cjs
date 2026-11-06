@@ -112,10 +112,16 @@ function* murkInvocations(text) {
 
 // Fenced code blocks only — inline `code` in prose is a reference, not a
 // runnable example, and often uses alternation like `create|ls|add|rm`.
+// Blocks tagged as data or output (a harness's permission rules in JSON or
+// Starlark, a command's printed output) name murk commands without running
+// them, so they are skipped.
+const NOT_COMMANDS = new Set(["json", "python", "text", "toml"]);
 function* fencedBlocks(md) {
-  const re = /```[^\n]*\n([\s\S]*?)```/g;
+  const re = /```([^\n]*)\n([\s\S]*?)```/g;
   let m;
-  while ((m = re.exec(md)) !== null) yield m[1];
+  while ((m = re.exec(md)) !== null) {
+    if (!NOT_COMMANDS.has(m[1].trim().split(/\s+/)[0])) yield m[2];
+  }
 }
 
 function guidePages() {

@@ -18,7 +18,7 @@ grid.
 |---|---|---|
 | Solo dev or small team keeping secrets out of git and synced through the repo | Yes | This is the core use case: one key, one committed `.murk` file. |
 | Onboarding and offboarding teammates with age or SSH keys | Yes | `murk circle` adds and revokes recipients; `murk rotate` reissues after someone leaves. |
-| Giving an AI agent or CI job scoped access to specific secrets without sharing your key | Yes | `murk agent exec` and grants inject only the named keys and fail closed. See [AI agents & MCP](/guides/ai-agents-mcp/). |
+| Giving an AI agent or CI job scoped access to specific secrets without sharing your key | Yes | `murk agent exec` and grants inject only the named keys and fail closed. An agent running as your user can drop agent mode and reach your stored key, so the grant is a real boundary only under a separate OS user or in a container. See [AI agents & MCP](/guides/ai-agents-mcp/). |
 | Application and CI configuration secrets loaded through your shell | Yes | Works with [direnv](/guides/direnv/); no runtime to install. |
 | You want dynamic, short-lived credentials or server-driven rotation | No | Use HashiCorp Vault or a cloud secrets manager. murk stores static secrets in a file. |
 | You need provable access control and audit logs for compliance (SOC 2, PCI, HIPAA) | Not yet | murk's only audit trail is git history, and it is not independently audited. Use Vault. |

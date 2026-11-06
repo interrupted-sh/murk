@@ -881,6 +881,10 @@ pub(crate) fn print_isolation_snippet() {
         "  {}",
         "  user or container — with only the grant key file readable to it.".dimmed()
     );
+    eprintln!(
+        "  {}",
+        "  tested recipes: https://murk.interrupted.sh/guides/agent-isolation/".dimmed()
+    );
 }
 
 pub(crate) fn cmd_agent_ls(json: bool, vault_path: &str) {
