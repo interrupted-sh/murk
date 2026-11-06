@@ -138,7 +138,8 @@ pub(crate) fn cmd_setup_merge_driver() {
 
     eprintln!(
         "  {}",
-        "commit .gitattributes so all collaborators use the merge driver".dimmed()
+        "commit .gitattributes, and have each collaborator run `murk setup-merge-driver` in their own clone: git reads the driver from each clone's .git/config"
+            .dimmed()
     );
 }
 

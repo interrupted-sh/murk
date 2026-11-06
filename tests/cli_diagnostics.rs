@@ -1400,6 +1400,23 @@ fn setup_merge_driver_appends_to_existing_gitattributes() {
     );
 }
 
+/// The driver definition lives in each clone's `.git/config`, which git does
+/// not share, so committing `.gitattributes` alone leaves teammates on a text
+/// merge. The hint must tell every collaborator to run the command.
+#[test]
+fn setup_merge_driver_tells_each_clone_to_run_it() {
+    let dir = TempDir::new().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    murk_bin(dir.path())
+        .current_dir(dir.path())
+        .args(["setup-merge-driver"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "have each collaborator run `murk setup-merge-driver` in their own clone",
+        ));
+}
+
 // ── recover / restore ──
 
 #[test]

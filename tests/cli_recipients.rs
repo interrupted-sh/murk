@@ -693,6 +693,45 @@ fn group_membership_lifecycle() {
     );
 }
 
+/// A grant cannot open the meta, so it sees no groups. `group ls` must say so,
+/// not claim the vault has none.
+#[test]
+fn group_ls_with_a_grant_key_says_it_cannot_read_membership() {
+    let dir = TempDir::new().unwrap();
+    let (key, _) = init_vault(&dir);
+    murk(&dir, &key)
+        .args(["group", "create", "prod", "--vault", "test.murk"])
+        .assert()
+        .success();
+    murk(&dir, &key)
+        .args(["add", "A", "--vault", "test.murk"])
+        .write_stdin("v\n")
+        .assert()
+        .success();
+    let grant_path = dir.path().join("bot.key");
+    murk(&dir, &key)
+        .args(["agent", "grant", "--name", "bot", "--only", "A", "--out"])
+        .arg(&grant_path)
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    let grant = fs::read_to_string(&grant_path).unwrap();
+
+    for json in [false, true] {
+        let mut cmd = murk(&dir, grant.trim());
+        cmd.args(["group", "ls", "--vault", "test.murk"]);
+        if json {
+            cmd.arg("--json");
+        }
+        cmd.assert()
+            .success()
+            .stderr(
+                predicate::str::contains("agent grants cannot read group membership")
+                    .and(predicate::str::contains("no groups").not()),
+            );
+    }
+}
+
 // ── policy ──
 
 /// `policy show --json` reports `null` (unrestricted) until a policy is set,
