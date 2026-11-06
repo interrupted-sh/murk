@@ -1,0 +1,74 @@
+name: Agent isolation
+
+# Runs the agent isolation recipes in scripts/agent-isolation against murk
+# built from this commit, not the release the recipe image downloads: the
+# container and separate-OS-user checks, and `docker stop` against
+# `murk agent exec` as a container's PID 1.
+
+on:
+  push:
+    branches: [main, "release/**"]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/agent-isolation/**"
+      - "docs-site/src/content/docs/guides/agent-isolation.md"
+      - "docs-site/src/content/docs/guides/containers.md"
+      - ".github/workflows/agent-isolation.yaml"
+      # A toolchain bump must pass the recipes in its own PR.
+      - "rust-toolchain.toml"
+      - ".github/actions/setup-rust/**"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/agent-isolation/**"
+      - "docs-site/src/content/docs/guides/agent-isolation.md"
+      - "docs-site/src/content/docs/guides/containers.md"
+      - ".github/workflows/agent-isolation.yaml"
+      - "rust-toolchain.toml"
+      - ".github/actions/setup-rust/**"
+  schedule:
+    - cron: "41 4 * * 1" # weekly Monday 04:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-isolation-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  recipes:
+    name: Recipes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The host murk creates the throwaway vault; the image gets the same
+      # binary instead of the release download.
+      MURK: ${{ github.workspace }}/target/release/murk
+      IMAGE_MURK: ${{ github.workspace }}/target/release/murk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Build murk
+        run: cargo build --release --locked --bin murk
+
+      - name: Container recipe
+        run: sh scripts/agent-isolation/run-checks.sh container
+
+      - name: Separate OS user recipe
+        run: sh scripts/agent-isolation/run-checks.sh os-user
+
+      - name: docker stop reaches the app under murk agent exec as PID 1
+        run: sh scripts/agent-isolation/run-checks.sh stop
