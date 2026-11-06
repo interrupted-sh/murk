@@ -259,6 +259,8 @@ pub(crate) fn cmd_revoke(
     let source = values_from.map_or(ValueSource::Prompt, |p| {
         ValueSource::Named(read_values_from(p))
     });
+    // The confirmation and rotation prompts can take minutes; see `VaultSnapshot`.
+    let on_disk = VaultSnapshot::take(vault_path);
     let (mut vault, murk, identity, _lock) = load_vault_locked(vault_path);
     let original = murk.clone();
     let mut current = murk;
@@ -461,6 +463,10 @@ pub(crate) fn cmd_revoke(
         }
     }
 
+    on_disk.refuse_if_changed(
+        "while murk waited for input",
+        "re-run murk circle revoke to revoke from the current vault",
+    );
     save_vault(vault_path, &mut vault, &original, &current);
 
     eprintln!(

@@ -228,6 +228,12 @@ Three things to keep in mind:
   bypass murk. `MURK_STRICT` stops murk from *handing over* your key, but
   for true containment run the agent in a sandbox, container, or under a
   separate user that can't read your key directory.
+- **An agent can fall back to your key without reading the key directory.**
+  If it unsets `MURK_AGENT`, `MURK_KEY` and `MURK_KEY_FILE` in its own shell,
+  its next `murk` command finds your stored key from the vault's path and
+  decrypts with it, as it would in your terminal. Its grant no longer limits
+  it. Run agents as a separate user, in a container, or with a hardware key
+  that needs a touch for each decrypt if that matters to you.
 
 ## Vault trust and reserved names
 

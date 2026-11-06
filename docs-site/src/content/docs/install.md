@@ -50,7 +50,7 @@ provenance with the [GitHub CLI](https://cli.github.com) (`gh`, logged in with
 `gh auth login` or `GH_TOKEN`). A check that fails stops the install. If `gh` is
 missing or not logged in, it asks whether to install anyway (default no).
 Without a terminal, as in CI or a docker build, it stops unless
-`MURK_SKIP_ATTESTATION=1` is set for `sh`. Set `MURK_TAG=v0.14.0` to install a
+`MURK_SKIP_ATTESTATION=1` is set for `sh`. Set `MURK_TAG=v0.14.1` to install a
 specific release.
 
 It installs to `/usr/local/bin/murk` by default, using `sudo` only when that
@@ -91,7 +91,7 @@ Binary releases carry signed build provenance
 backed by Sigstore/Fulcio). Verify a downloaded artifact with the GitHub CLI:
 
 ```bash
-gh attestation verify murk-v0.14.0-aarch64-apple-darwin.tar.gz \
+gh attestation verify murk-v0.14.1-aarch64-apple-darwin.tar.gz \
   --repo interrupted-sh/murk \
   --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml
 ```

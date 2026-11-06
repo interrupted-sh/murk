@@ -90,6 +90,32 @@ branch, a detached HEAD or a PR branch never adds a signer. So reviewing a PR th
 trust them: that happens only once the change reaches a branch this machine
 accepted, or you run `murk trust`.
 
+Upgrading from 0.13 follows the same split. The pin is shared, but the
+refusal of a 0.13 vault is per branch. murk refuses one only on a branch
+where this machine has accepted or saved a 0.14 vault. A detached HEAD has
+no mark, so it never refuses one. The first 0.14 save in one worktree
+therefore doesn't make your other worktrees refuse their committed 0.13
+vaults. Make that first save on the default branch and commit it, then merge
+it into the other branches.
+
+A branch gets its 0.14 mark only when this machine saves there. Merging the
+upgrade into it does not give it one. Until this machine saves on that
+branch (a merge alone does not count), an older 0.13 revision checked out
+there still loads, as history, so it never adds trust. Once this machine has
+seen a 0.14 vault, that history is read-only. murk refuses every write over
+it and says the vault "is in the pre-0.14 format on a branch that hasn't
+taken the upgrade, and this machine hasn't accepted this copy, so it is
+read-only here". Merge the upgrade from the default branch, or review the
+file and run `murk trust --vault .murk` in that worktree to accept this copy.
+The next write upgrades the vault and gives the branch its 0.14 mark. On a
+detached HEAD, check out a branch first.
+
+If a branch that already has its mark then shows a 0.13 vault, murk says the
+vault "is in the pre-0.14 format, but this repository's vault has already
+been upgraded on this branch". The file is an older revision. Switch back to
+the newer one, or commit the upgrade on the default branch and merge it. See
+[upgrading to 0.14](/guides/teams/#upgrading-to-014).
+
 ## Agents need their own key
 
 Discovery of a stored key is disabled entirely in strict mode and in agent

@@ -23,7 +23,10 @@
 //! - `removed`: keys removed from the vault, with the generation they were
 //!   removed at, so an older revision cannot bring them back;
 //! - `head` and `branch_heads`: fingerprints of the vaults accepted at the
-//!   marks, so a different vault with the same counter is seen as a fork.
+//!   marks, so a different vault with the same counter is seen as a fork;
+//! - `accepted_pre_upgrade`: per branch, the murk 0.13 file the user accepted
+//!   there with `murk trust` once this machine had seen the vault in 0.14
+//!   form, so that copy, and only it, may be written (upgraded) there.
 //!
 //! The pin is written only by an accepted load, an explicit `murk trust`, or
 //! this machine's own save — never from an unverified vault. See
@@ -112,6 +115,15 @@ pub struct TrustPin {
     /// Fingerprint of the vault accepted at each branch's mark.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_heads: BTreeMap<String, String>,
+    /// Branch → fingerprint ([`crate::trust::pre_upgrade_fingerprint`]) of
+    /// the murk 0.13 file `murk trust` accepted there (`""` outside git).
+    /// Once this machine has seen the vault in 0.14 form, a 0.13 file that
+    /// loads as history is read-only: a save or keyed merge over it is
+    /// refused unless it is the copy recorded here for the branch. A pin
+    /// written by murk 0.14.0 has no such entries, which refuses those writes
+    /// until `murk trust`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_pre_upgrade: BTreeMap<String, String>,
     /// Whether a signed version of this vault was ever accepted here.
     #[serde(default)]
     pub was_signed: bool,

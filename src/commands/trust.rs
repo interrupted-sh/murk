@@ -53,7 +53,40 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
 
     print_summary(vault_path, &inspected);
 
+    let head = murk_cli::trust::head_of(vault_path);
+    let read_only = murk_cli::trust::pre_upgrade_read_only(
+        inspected.assessment.pin.as_ref(),
+        &head,
+        &inspected.vault,
+    );
     let refusal = match &inspected.assessment.verdict {
+        Verdict::Trusted if readmit.is_empty() && read_only => {
+            // A murk 0.13 copy that loads as history here is read-only until
+            // the user accepts it; then the next write upgrades it.
+            if head == murk_cli::trust::HeadState::Detached {
+                die(
+                    &format_args!(
+                        "{vault_path} is in the pre-0.14 format and HEAD is detached, so there is no branch to accept it on\ncheck out a branch, then run `murk trust --vault {vault_path}`"
+                    ),
+                    1,
+                );
+            }
+            eprintln!(
+                "{} {vault_path} is in the pre-0.14 format on a branch that hasn't taken the upgrade: it loads, but is read-only until you accept this copy",
+                "⚠".yellow()
+            );
+            if !yes
+                && !confirmed("accept this copy on this machine, so the next write upgrades it?")
+            {
+                die(&"not trusted", 1);
+            }
+            try_or_die(inspected.record_pre_upgrade_copy(vault_path));
+            eprintln!(
+                "{} accepted {vault_path} on this machine — the next write upgrades it to the 0.14 format; commit the result",
+                "◆".magenta()
+            );
+            return;
+        }
         Verdict::Trusted if readmit.is_empty() => {
             eprintln!(
                 "{} {vault_path} is already trusted on this machine",
@@ -103,15 +136,27 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
             1,
         );
     }
+    // Another vault's unsigned murk 0.13 file: nothing signed shows whose it
+    // is, and accepting it would record its recipients (or re-sign it) under
+    // this vault's id. Never.
+    if matches!(refusal, Refusal::OtherVault { .. })
+        && murk_cli::trust::written_by_0_13(&inspected.vault)
+        && matches!(inspected.murk.signature, types::SignatureState::Unsigned)
+    {
+        die(
+            &format_args!(
+                "refusing to trust it: an unsigned pre-0.14 file of another vault can't be accepted as this one\nrestore {vault_path} from git"
+            ),
+            1,
+        );
+    }
 
-    // A murk 0.13 (v1) revision accepted after this machine saw the vault in
+    // A murk 0.13 (v1) revision accepted where this machine saw the vault in
     // 0.14 form can only be pinned by moving it to v2: re-sign it.
-    let legacy = matches!(
-        &inspected.murk.signature,
-        types::SignatureState::Signed { v: 1, .. }
+    let needs_signature = matches!(
+        refusal,
+        Refusal::Unsigned | Refusal::Downgraded | Refusal::PreUpgrade { .. }
     );
-    let needs_signature = matches!(refusal, Refusal::Unsigned | Refusal::Downgraded)
-        || (legacy && matches!(refusal, Refusal::RolledBack { .. }));
     let resign = needs_signature && inspected.identity.is_signing_capable();
     if needs_signature && !resign && !matches!(refusal, Refusal::Downgraded) {
         die(
@@ -137,6 +182,14 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
                 pin.removed.retain(|k, _| !readmit.contains(k));
                 Ok(Some(pin))
             }));
+        }
+        if read_only {
+            // A murk 0.13 file that is read-only here (refused as pre-0.14,
+            // unsigned or stripped): record this copy as accepted first, so
+            // the re-signing save below is allowed. Only the copy is
+            // recorded; the save itself changes the trusted set only by what
+            // it adds or removes.
+            try_or_die(inspected.record_pre_upgrade_copy(vault_path));
         }
         // Re-sign exactly the current content: save with no changes.
         let murk_cli::InspectedVault {
@@ -333,8 +386,28 @@ fn print_summary(vault_path: &str, inspected: &murk_cli::InspectedVault) {
         }
     }
     if let Some(p) = pin {
+        // An older 0.13 copy of this vault that is read-only here is accepted
+        // without narrowing trust: members it doesn't list stay trusted. A
+        // file of another vault (its derived id differs), whatever else it
+        // is refused for, replaces the trust state instead.
+        let older_copy = murk_cli::trust::pre_upgrade_read_only(
+            inspected.assessment.pin.as_ref(),
+            &murk_cli::trust::head_of(vault_path),
+            vault,
+        ) && murk_cli::trust::pre_upgrade_is_this_vault(
+            inspected.assessment.pin.as_ref(),
+            vault,
+        );
         for gone in p.trusted.difference(&shown) {
-            eprintln!("  {} {}", "-".red().bold(), murk_cli::truncate_pubkey(gone));
+            if older_copy {
+                eprintln!(
+                    "    {} {}",
+                    murk_cli::truncate_pubkey(gone),
+                    "(not in this copy; stays trusted)".dimmed()
+                );
+            } else {
+                eprintln!("  {} {}", "-".red().bold(), murk_cli::truncate_pubkey(gone));
+            }
         }
     }
 }

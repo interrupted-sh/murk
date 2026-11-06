@@ -46,6 +46,13 @@ fn murk_error(e: MurkError) -> napi::Error<String> {
     napi::Error::new(code.to_string(), e)
 }
 
+/// Name this binding in vault-format errors, so a stale binding is not
+/// mistaken for the CLI.
+#[napi_derive::module_init]
+fn init() {
+    murk_cli::set_component("murk-secrets node binding", env!("CARGO_PKG_VERSION"));
+}
+
 /// A loaded and decrypted murk vault.
 #[napi]
 pub struct Vault {

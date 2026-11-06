@@ -18,6 +18,16 @@ pub struct MergeConflict {
     pub reason: String,
 }
 
+impl MergeConflict {
+    /// Whether this conflict refuses the merge outright, so the driver writes
+    /// nothing and git keeps ours as the working file: the merged counter
+    /// would pass the limit, or a side is a murk 0.13 file this machine has
+    /// not accepted (see [`crate::trust::pre_upgrade_read_only`]).
+    pub fn writes_nothing(&self) -> bool {
+        matches!(self.field.as_str(), "generation" | "pre_upgrade")
+    }
+}
+
 /// Result of a three-way vault merge.
 #[derive(Debug)]
 pub struct MergeResult {
@@ -1206,6 +1216,25 @@ fn authenticate_inputs(
             field: "vault_id".into(),
             reason: "ours and theirs are different vaults".into(),
         });
+    }
+    // A murk 0.13 side is read-only where this machine has not accepted it:
+    // the merged vault would carry this vault's id and counter.
+    let pin = crate::pins::read(vault_path).map_err(|reason| MergeConflict {
+        field: "pin".into(),
+        reason,
+    })?;
+    let head = crate::trust::head_of(vault_path);
+    for (side, vault) in [("ours", ours), ("theirs", theirs)] {
+        if crate::trust::pre_upgrade_read_only(pin.as_ref(), &head, vault) {
+            return Err(MergeConflict {
+                field: "pre_upgrade".into(),
+                reason: format!(
+                    "{side} is a pre-0.14 vault this machine hasn't accepted on this branch, so nothing is merged: {}",
+                    crate::trust::pre_upgrade_read_only_message(vault_path, &head)
+                        .replace('\n', "; ")
+                ),
+            });
+        }
     }
     Ok(base_groups.is_some())
 }

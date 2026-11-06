@@ -3,6 +3,7 @@
 
 //! Git integration helpers (merge driver setup, worktree layout).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -561,12 +562,124 @@ pub fn head_state(abs_vault: &Path) -> HeadState {
             None => return HeadState::Detached,
         }
     };
-    match fs::read_to_string(gitdir.join("HEAD")) {
-        Ok(head) => match head.trim().strip_prefix("ref: refs/heads/") {
-            Some(branch) => HeadState::Branch(branch.to_string()),
+    let reftable = gitdir.join("reftable").is_dir();
+    let head = if reftable {
+        // The reftable backend leaves HEAD as a stub (`refs/heads/.invalid`)
+        // and keeps the real one in its tables: ask git.
+        git_output(&root, &["symbolic-ref", "--quiet", "HEAD"]).map(|h| format!("ref: {h}"))
+    } else {
+        fs::read_to_string(gitdir.join("HEAD")).ok()
+    };
+    match head {
+        Some(head) => match head.trim().strip_prefix("ref: refs/heads/") {
+            Some(branch) => HeadState::Branch(stored_branch_name(&root, branch, reftable)),
             None => HeadState::Detached,
         },
-        Err(_) => HeadState::Detached,
+        None => HeadState::Detached,
+    }
+}
+
+/// The trimmed stdout of `git args` run in `dir` (murk's hardened git), or
+/// `None` when git fails.
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = git_command()
+        .args(args)
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `branch` as the repository stores it. On a case-insensitive filesystem
+/// (`core.ignorecase`), `git checkout Main` checks out branch `main` while
+/// HEAD records `Main`; the branch's trust marks are under the stored name,
+/// so HEAD's spelling is mapped to the one ref that matches it ignoring
+/// case. An exact match, no match, or several matches keep HEAD's spelling.
+fn stored_branch_name(root: &Path, branch: &str, reftable: bool) -> String {
+    let Some(common) = common_dir(root) else {
+        return branch.to_string();
+    };
+    if !ignores_case(&common) {
+        return branch.to_string();
+    }
+    let mut names = BTreeSet::new();
+    if reftable {
+        let refs = git_output(
+            root,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .unwrap_or_default();
+        names.extend(
+            refs.lines()
+                .filter_map(|l| l.strip_prefix("refs/heads/"))
+                .map(str::to_string),
+        );
+    } else {
+        collect_loose_refs(&common.join("refs/heads"), "", &mut names);
+        if let Ok(packed) = fs::read_to_string(common.join("packed-refs")) {
+            names.extend(
+                packed
+                    .lines()
+                    .filter_map(|l| l.split_once(' ')?.1.strip_prefix("refs/heads/"))
+                    .map(str::to_string),
+            );
+        }
+    }
+    if names.contains(branch) {
+        return branch.to_string();
+    }
+    let mut folded = names.into_iter().filter(|n| n.eq_ignore_ascii_case(branch));
+    match (folded.next(), folded.next()) {
+        (Some(only), None) => only,
+        _ => branch.to_string(),
+    }
+}
+
+/// Whether the repository's config sets `core.ignorecase` true.
+fn ignores_case(common: &Path) -> bool {
+    let Ok(config) = fs::read_to_string(common.join("config")) else {
+        return false;
+    };
+    let mut in_core = false;
+    let mut ignore = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_core = line
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .eq_ignore_ascii_case("core");
+        } else if in_core
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("ignorecase")
+        {
+            ignore = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            );
+        }
+    }
+    ignore
+}
+
+/// Loose branch refs under `dir`, as names relative to `refs/heads`.
+fn collect_loose_refs(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{prefix}{name}");
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => collect_loose_refs(&entry.path(), &format!("{path}/"), out),
+            Ok(t) if t.is_file() => {
+                out.insert(path);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -707,6 +820,40 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::testutil::CWD_LOCK;
+
+    #[test]
+    fn a_case_folded_head_maps_to_the_stored_branch_where_git_ignores_case() {
+        // HEAD as `git checkout Main` leaves it on a case-insensitive
+        // filesystem, where the branch is stored as `main`. Written by hand,
+        // so this runs the same on any filesystem.
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(git.join("refs/heads/team")).unwrap();
+        std::fs::write(git.join("refs/heads/main"), "0\n").unwrap();
+        std::fs::write(
+            git.join("packed-refs"),
+            "# pack-refs\n1 refs/heads/team/Feature\n",
+        )
+        .unwrap();
+        let vault = dir.path().join(".murk");
+        let head = |h: &str| {
+            std::fs::write(git.join("HEAD"), format!("ref: refs/heads/{h}\n")).unwrap();
+            head_state(&vault)
+        };
+        let branch = |b: &str| HeadState::Branch(b.into());
+        // Without core.ignorecase the names are distinct branches.
+        std::fs::write(git.join("config"), "[core]\n\tbare = false\n").unwrap();
+        assert_eq!(head("Main"), branch("Main"));
+        std::fs::write(git.join("config"), "[core]\n\tignorecase = true\n").unwrap();
+        assert_eq!(head("Main"), branch("main"));
+        assert_eq!(head("main"), branch("main"));
+        assert_eq!(head("TEAM/feature"), branch("team/Feature"));
+        // No ref matches: an unborn branch keeps HEAD's spelling.
+        assert_eq!(head("Other"), branch("Other"));
+        // Two refs match ignoring case (packed and loose): ambiguous, kept.
+        std::fs::write(git.join("packed-refs"), "1 refs/heads/MAIN\n").unwrap();
+        assert_eq!(head("Main"), branch("Main"));
+    }
 
     #[test]
     fn setup_merge_driver_creates_gitattributes() {
