@@ -1480,9 +1480,12 @@ fn recover_refuses_keys_without_a_phrase() {
         .arg("recover")
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "plugin identities (YubiKey, Secure Enclave, FIDO2) do not have recovery phrases",
-        ))
+        .stderr(
+            predicate::str::contains(
+                "plugin identities (YubiKey, Secure Enclave, FIDO2) do not have recovery phrases",
+            )
+            .and(predicate::str::contains("`murk circle authorize`")),
+        )
         .stdout(predicate::str::is_empty());
 }
 

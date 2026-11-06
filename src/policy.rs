@@ -12,7 +12,7 @@
 //! Two policies apply here today: a tag allow-list (in agent mode a secret may
 //! be injected or granted only if it carries an allowed tag; once a policy is
 //! set it is default-deny) and grant expiry (an agent grant past its TTL fails
-//! closed at read time, from every entry point).
+//! closed on every value read, from every entry point).
 
 use crate::error::MurkError;
 use crate::types::{GrantEntry, Murk, Policy, Vault};

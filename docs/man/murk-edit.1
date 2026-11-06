@@ -10,10 +10,10 @@ Edit secrets in $EDITOR (experimental)
 .SH OPTIONS
 .TP
 \fB\-\-scoped\fR
-Edit scoped overrides instead of shared secrets
+Deprecated alias for `\-\-group me`. Edits your private values instead of shared secrets
 .TP
 \fB\-\-group\fR \fI<GROUP>\fR
-Edit values for this group instead of shared secrets (experimental)
+Edit this group\*(Aqs values instead of shared secrets. `me` means your private values. A group name is experimental
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
@@ -22,4 +22,4 @@ Vault filename
 Print help
 .TP
 [\fIKEY\fR]
-Edit a single key (omit to edit all)
+Edit one secret. Omit it to edit all

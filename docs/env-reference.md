@@ -2,7 +2,7 @@
 
 # murk environment variable reference
 
-The environment variables murk reads, and the CLI flags they mirror where one exists. This is the terse reference. The narrative version with resolution order and interactions lives in the Environment variables concept page.
+The environment variables murk reads. Only `MURK_VAULT` has a matching flag, `--vault`. This page is the short reference. For the order in which murk resolves them and how they interact, see [Environment variables](https://murk.interrupted.sh/concepts/env-vars/).
 
 A variable marked "truthy" is on when set to `1`, `true` or `yes` (any case). Other values, including `0`, mean off.
 
@@ -10,25 +10,25 @@ A variable marked "truthy" is on when set to `1`, `true` or `yes` (any case). Ot
 
 | Variable | Description |
 | --- | --- |
-| `MURK_KEY` | Your raw age private key (`AGE-SECRET-KEY-1…`), inline. Rejected for hardware-plugin identity strings (`AGE-PLUGIN-…`) — use `MURK_KEY_FILE` for those. Set this or `MURK_KEY_FILE`, not both: murk refuses both non-empty, and an empty value counts as unset. |
-| `MURK_KEY_FILE` | Path to a private-key file: a raw age key, an SSH PEM key, or an age plugin identity file. `murk init` writes this reference into `.env`. |
-| `MURK_VAULT` | Vault filename, defaulting to `.murk`. Equivalent to passing `--vault` on every command (the one variable in the clap model). |
+| `MURK_KEY` | Your raw age private key (`AGE-SECRET-KEY-1...`), inline. murk rejects a hardware plugin identity string (`AGE-PLUGIN-...`) here, so use `MURK_KEY_FILE` for those. Set `MURK_KEY` or `MURK_KEY_FILE`, not both. murk refuses to run when both are non-empty. An empty value counts as unset. |
+| `MURK_KEY_FILE` | Path to a key file. murk accepts an age key file, an unencrypted OpenSSH private key, or an age plugin identity file. It refuses an encrypted SSH key. It also refuses a symlink and, on Unix, a file with any group or other permission bits, so use mode 600. An unreadable or refused file is an error: murk does not fall back to the stored key. An empty value counts as unset. `murk init` writes this reference into `.env`. |
+| `MURK_VAULT` | Vault filename, `.murk` by default. It sets the same option as `--vault` on every command that takes it. The flag wins when both are set. |
 
 ## Safety and agent context
 
 | Variable | Description |
 | --- | --- |
-| `MURK_STRICT` | Experimental. On for any value except unset, empty, `0`, `false`, `no` and `off`, so a typo turns it on. A short list of checks, not a guarantee that no plaintext reaches disk. Disables the automatic key lookup under `~/.config/murk/keys`, needs RAM-backed scratch for `murk edit`, refuses to write `get`, `export` or `murk diff --show-values` output to a regular file, refuses a result that no key checked, and makes `murk diff` refuse a revision it could only show with a warning. It does not stop a process from writing values elsewhere. |
-| `MURK_AGENT` | Marks the process as running for an AI agent. Forces strict mode unconditionally. `murk agent exec` sets it on its child. Read like `MURK_STRICT`: any value except unset, empty, `0`, `false`, `no` and `off` turns it on. |
+| `MURK_STRICT` | Experimental. Any value except unset, empty, `0`, `false`, `no` and `off` turns it on, in any letter case, so a typo turns it on. It is a short list of checks, not a guarantee that no plaintext reaches disk. murk skips the stored-key lookup under `~/.config/murk/keys`. `murk edit` needs a RAM-backed scratch file. `get`, `export` and `diff --show-values` refuse to write to a regular file. murk refuses a result that no key checked, such as `rotate --list` without a key. `murk diff` refuses most revisions it could only show with a warning. One exception: with a key that cannot sign (a hardware or ssh-rsa key) and no `MURK_TRUSTED_SIGNERS`, `murk diff` still shows an unsigned revision with a warning. It does not stop a process from writing values elsewhere. |
+| `MURK_AGENT` | Marks the process as running for an AI agent. Forces strict mode unconditionally. Read like `MURK_STRICT`: any value except unset, empty, `0`, `false`, `no` and `off` turns it on. `murk mcp` refuses to start without it, and then accepts only an agent grant key. `murk agent connect` writes it into the client's MCP config. `murk agent exec` and the `murk_exec` tool of `murk mcp` set it on the command they run. |
 | `MURK_SELF_SCOPE` | Holds your own key to the vault's agent allow-tag policy, as if you were an agent. Implied inside an agent context. Read like `MURK_STRICT`. |
-| `MURK_TRUSTED_SIGNERS` | Signers trusted to sign the vault on this machine, separated by commas or newlines, replacing the local trust pin's set. An age signer is `age1...:<verifying key>` and an ssh-ed25519 signer is its public key line; `murk trust --print-key` prints the entry for your own key. For CI runners and other machines with no pin (set it from a CI secret). Any other entry, including a bare age key, is an error. |
+| `MURK_TRUSTED_SIGNERS` | Signers trusted to sign the vault on this machine, separated by commas or newlines. It replaces the set in the local trust pin. An age signer is `age1...:<verifying key>`. An ssh-ed25519 signer is its public key line. `murk trust --print-key` prints the entry for your own key. Use it on CI runners and other machines with no pin. Any other entry, including a bare age key, is an error. Set it only from a CI secret or the real process environment. Never set it from a file in the repository or from a `.env` that an app's dotenv loader reads, because it decides which signers this machine trusts. |
 | `MURK_NO_SIGNER_PIN` | Present (any value) stops murk reading or writing the local trust pin. Trust then comes only from `MURK_TRUSTED_SIGNERS`, and rollback and stripped-signature detection are off. |
 
 ## Also honored
 
 | Variable | Description |
 | --- | --- |
-| `CI` | Truthy prints a short hint toward the scoped-agent path when a pipeline decrypts with a personal key. Advisory only. |
+| `CI` | Truthy (`1`, `true` or `yes`). When murk decrypts with the key it finds itself under `~/.config/murk/keys`, it prints a hint toward a scoped grant key. The hint does not change behavior. It stays quiet with an explicit `MURK_KEY` or `MURK_KEY_FILE`, in agent context and in strict mode. |
 | `EDITOR, VISUAL` | Editor launched by `murk edit`, checking `EDITOR` then `VISUAL`, falling back to `vi`. On Unix it runs through `sh`, as with git, so it may include arguments (`code --wait`). `MURK_KEY` and `MURK_KEY_FILE` are removed from its environment. |
 | `XDG_RUNTIME_DIR` | Scratch location for `murk edit`'s temporary file when it is a directory (typically tmpfs). Otherwise murk uses `/dev/shm` if it is RAM-backed, then the system temp dir (`$TMPDIR`, else `/tmp`), and warns when the file will not be in RAM. |
-| `HOME, then USERPROFILE` | Base directory for murk state: `~/.config/murk/keys`, `agent-keys` and `signer-pins`; outside a git checkout, also where the search for `.murk` in parent directories stops. murk reads `HOME` and falls back to `USERPROFILE` on any platform. `murk completion install` and `murk circle authorize ssh:` need `HOME`. |
+| `HOME, then USERPROFILE` | Base directory for murk state: `~/.config/murk/keys`, `agent-keys` and `signer-pins`. Outside a git checkout, it is also where the search for `.murk` in parent directories stops. murk reads `HOME` and falls back to `USERPROFILE` on any platform. `murk completion install` and `murk circle authorize ssh:` need `HOME`. |

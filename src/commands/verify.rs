@@ -212,7 +212,9 @@ pub(crate) fn cmd_verify(vault_path: &str) {
                 rsa_recipients.len(),
                 if rsa_recipients.len() == 1 { "" } else { "s" }
             ),
-            fix: Some("rotate to ed25519 keys and `murk revoke` the old ssh-rsa recipients".into()),
+            fix: Some(
+                "rotate to ed25519 keys and `murk circle revoke` the old ssh-rsa recipients".into(),
+            ),
         });
     }
 

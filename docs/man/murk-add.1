@@ -7,16 +7,18 @@ murk\-add \- Add or update a secret
 \fBmurk add\fR [\fB\-\-desc\fR] [\fB\-\-example\fR] [\fB\-\-group\fR] [\fB\-\-tag\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIKEY\fR> 
 .SH DESCRIPTION
 Add or update a secret
+.PP
+On a terminal, murk asks for the value with a hidden prompt. When stdin is piped, murk reads all of it as the value and drops one trailing newline.
 .SH OPTIONS
 .TP
 \fB\-\-desc\fR \fI<DESC>\fR
-Description for this key
+Description of the secret
 .TP
 \fB\-\-example\fR \fI<EXAMPLE>\fR
 Example value
 .TP
 \fB\-\-group\fR \fI<GROUP>\fR
-Who can read it: a group name (experimental), `everyone`, or `me`. Omit to keep an existing key\*(Aqs tier; a new key is shared with everyone
+Who can read the secret: `everyone`, `me` (a private value for you only) or a group name (experimental). Omit it to keep an existing secret\*(Aqs tier. A new secret is shared with everyone
 .TP
 \fB\-\-tag\fR \fI<TAG>\fR
 Tag for grouping (repeatable)
@@ -25,7 +27,7 @@ Tag for grouping (repeatable)
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 <\fIKEY\fR>
-Secret key name
+Name of the secret

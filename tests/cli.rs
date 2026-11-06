@@ -1062,6 +1062,55 @@ fn info_works_without_murk_key() {
         .stdout(predicate::str::contains("TOKEN"));
 }
 
+/// The first line of `murk info` stdout. `no_color` sets NO_COLOR=1, otherwise
+/// CLICOLOR_FORCE=1 forces color on the piped output.
+fn info_first_line(dir: &TempDir, colorterm: Option<&str>, no_color: bool) -> String {
+    let mut cmd = murk_bin(dir.path());
+    cmd.args(["info", "--vault", "test.murk"])
+        .current_dir(dir.path());
+    if no_color {
+        cmd.env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
+    } else {
+        cmd.env("CLICOLOR_FORCE", "1").env_remove("NO_COLOR");
+    }
+    match colorterm {
+        Some(v) => cmd.env("COLORTERM", v),
+        None => cmd.env_remove("COLORTERM"),
+    };
+    let out = cmd.assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(out).unwrap();
+    text.lines().next().unwrap().to_string()
+}
+
+#[test]
+fn info_nameplate_is_brand_purple_whatever_colorterm_says() {
+    let dir = TempDir::new().unwrap();
+    init_vault(&dir);
+
+    // #8760FF as a bold 24-bit foreground where COLORTERM allows it.
+    for colorterm in ["truecolor", "24bit"] {
+        let line = info_first_line(&dir, Some(colorterm), false);
+        assert!(
+            line.contains("\u{1b}[1;38;2;135;96;255m") && line.ends_with("\u{1b}[0m"),
+            "COLORTERM={colorterm:?}: {line:?}"
+        );
+    }
+
+    // Otherwise the nearest 256-colour entry (99, #875FFF), never the bright
+    // blue (SGR 94) that `colored` alone would print.
+    for colorterm in [None, Some("")] {
+        let line = info_first_line(&dir, colorterm, false);
+        assert!(
+            line.contains("\u{1b}[1;38;5;99m") && line.ends_with("\u{1b}[0m"),
+            "COLORTERM={colorterm:?}: {line:?}"
+        );
+    }
+
+    // NO_COLOR still removes every escape.
+    let plain = info_first_line(&dir, None, true);
+    assert!(!plain.contains('\u{1b}'), "{plain:?}");
+}
+
 // ── export ──
 
 #[test]
@@ -7747,6 +7796,70 @@ fn agent_init_policy_set_is_atomic_when_grant_fails() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"a4\"").not());
+}
+
+/// `agent init` has no `--renew`, so the hint after a duplicate name must be a
+/// whole `agent grant` command. Running it as printed replaces the grant.
+#[test]
+fn agent_init_duplicate_name_hint_runs_as_printed() {
+    let dir = TempDir::new().unwrap();
+    let (key, _) = init_vault(&dir);
+    murk(&dir, &key)
+        .args(["add", "STRIPE_KEY", "--vault", "test.murk"])
+        .write_stdin("sk_live_secret\n")
+        .assert()
+        .success();
+
+    let first = dir.path().join("a5-first.key");
+    murk(&dir, &key)
+        .args(["agent", "init", "--name", "a5", "--only", "STRIPE_KEY"])
+        .arg("--out")
+        .arg(&first)
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    let first_key = read_agent_key(&first);
+
+    let again = murk(&dir, &key)
+        .args(["agent", "init", "--name", "a5", "--only", "STRIPE_KEY"])
+        .args(["--out", "-", "--vault", "test.murk"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("grant already exists: a5"));
+    let stderr = String::from_utf8_lossy(&again.get_output().stderr).to_string();
+    assert!(!stderr.contains("pass --renew"), "{stderr}");
+
+    // The hint is the one backticked command. Run it exactly as printed; the
+    // test vault is not `.murk`, so the vault comes from the environment.
+    let hint = stderr
+        .split('`')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no backticked command in: {stderr}"));
+    assert_eq!(
+        hint, "murk agent grant --name a5 --only STRIPE_KEY --renew",
+        "{stderr}"
+    );
+    let argv: Vec<&str> = hint.split_whitespace().collect();
+    assert_eq!(argv[0], "murk");
+    murk(&dir, &key)
+        .env("MURK_VAULT", "test.murk")
+        .args(&argv[1..])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("renewing a5"));
+
+    // One grant named a5 remains, and the first init's key no longer reads.
+    let ls = murk(&dir, &key)
+        .args(["agent", "ls", "--json", "--vault", "test.murk"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&ls.get_output().stdout).to_string();
+    assert_eq!(stdout.matches("\"a5\"").count(), 1, "one grant: {stdout}");
+    murk(&dir, &first_key)
+        .args(["get", "STRIPE_KEY", "--vault", "test.murk"])
+        .assert()
+        .failure();
 }
 
 // ── operator self-scope ──

@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH murk-describe 1  "describe " 
 .SH NAME
-murk\-describe \- Set a key\*(Aqs description, example, tags and rotation or expiry policy
+murk\-describe \- Set a secret\*(Aqs description, example, tags and rotation or expiry policy
 .SH SYNOPSIS
 \fBmurk describe\fR [\fB\-\-example\fR] [\fB\-\-tag\fR] [\fB\-\-rotate\-every\fR] [\fB\-\-expires\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIKEY\fR> <\fIDESCRIPTION\fR> 
 .SH DESCRIPTION
-Set a key\*(Aqs description, example, tags and rotation or expiry policy
+Set a secret\*(Aqs description, example, tags and rotation or expiry policy
 .PP
 Each call replaces the description. It also replaces the example: omitting `\-\-example` clears it. `\-\-tag` replaces the tags only when given. `\-\-rotate\-every` and `\-\-expires` change only when given.
 .SH OPTIONS
@@ -30,7 +30,7 @@ Vault filename
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 <\fIKEY\fR>
-Secret key name
+Name of the secret
 .TP
 <\fIDESCRIPTION\fR>
 Description text (replaces the current one)

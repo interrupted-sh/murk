@@ -7,13 +7,15 @@ murk\-rotate \- Rotate secrets with new values
 \fBmurk rotate\fR [\fB\-\-all\fR] [\fB\-\-generate\fR] [\fB\-\-length\fR] [\fB\-\-hex\fR] [\fB\-\-values\-from\fR] [\fB\-\-list\fR] [\fB\-\-json\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIKEY\fR] 
 .SH DESCRIPTION
 Rotate secrets with new values
+.PP
+New values come from a hidden prompt on a terminal, or from piped stdin. With a KEY, murk reads all of stdin as the value. With `\-\-all`, it reads one line per secret, in name order. `\-\-generate` and `\-\-values\-from` supply values another way. murk refuses `\-\-generate` with `\-\-all`.
 .SH OPTIONS
 .TP
 \fB\-\-all\fR
 Rotate all secrets in the vault
 .TP
 \fB\-\-generate\fR
-Generate random values instead of prompting
+Generate random values instead of prompting (refused with `\-\-all`)
 .TP
 \fB\-\-length\fR \fI<LENGTH>\fR [default: 32]
 Length in bytes for generated values
@@ -22,19 +24,19 @@ Length in bytes for generated values
 Encode generated values as hex instead of URL\-safe base64
 .TP
 \fB\-\-values\-from\fR \fI<FILE>\fR
-Read new values from a dotenv file of KEY=value lines (`\-` for stdin), matched by key name
+Read new values from a dotenv file of KEY=value lines (`\-` for stdin), matched by secret name
 .TP
 \fB\-\-list\fR
-List keys needing rotation instead of rotating (exits 1 if any)
+List the secrets that need rotation instead of rotating (exits 1 if any do)
 .TP
 \fB\-\-json\fR
-Output the listing as JSON, an object with `verified` and `issues` (with \-\-list, exits 0 even when keys need rotating)
+Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 [\fIKEY\fR]
-Secret key name (omit for \-\-all)
+Secret to rotate. Omit it when you use `\-\-all`
