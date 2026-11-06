@@ -16,6 +16,7 @@ For a detailed analysis of what murk protects and what it doesn't, see [THREAT_M
 - **Plaintext during edit.** `murk edit` writes decrypted values to a temp file for `$EDITOR`. The file is overwritten with zeros and deleted afterward, but the plaintext is on disk for as long as the editor runs. Core dumps, swap, or filesystem journaling could retain fragments.
 - **Compromised workstation = full access.** If an attacker has access to the machine where your key lives, they can decrypt all shared secrets. murk is not a defense against a compromised machine — it protects secrets at rest in git and in transit.
 - **Key names are public.** The `.murk` header exposes what secrets exist (e.g. `STRIPE_SECRET_KEY`). Only values are encrypted. This is a deliberate trade-off for usability (`murk info` without a key, readable git diffs).
+- **Agent mode holds only while its variables stay set.** Strict and agent mode (`MURK_STRICT`, `MURK_AGENT`) stop murk from looking up your stored key. They hold only while `MURK_AGENT`, `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE` stay set in the agent's shell. An agent that runs as your user can unset them. Its next `murk` command then finds your stored key from the vault's path, and its grant no longer limits it. A change to this lookup is planned for 0.15. Until then, the boundary is a separate OS user or a container that cannot read `~/.config/murk`.
 - **No custom cryptographic primitives.** murk uses age, BLAKE3 and Ed25519. The vault format, its keyed MAC and its signature scheme are murk's own.
 
 ## Known Issues
@@ -85,4 +86,5 @@ Out of scope:
 - Vulnerabilities in the age or rage primitives (report upstream)
 - Attacks that need local access to your key file, `MURK_KEY`, or an `.env` that contains `MURK_KEY` (these hold the secret key by definition). The default `.env` from `murk init` holds only the key file's path
 - Limits that [THREAT_MODEL.md](THREAT_MODEL.md) lists under "What murk does not protect", for example values that output masking misses, or a policy bypassed by using age directly
+- An agent that runs as your user and unsets `MURK_AGENT`, `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE` to reach your stored key. This is the known limit above. A bypass of a grant's scope while those variables stay set, or by a user that cannot read your key directory, is in scope
 - Denial of service against the CLI
