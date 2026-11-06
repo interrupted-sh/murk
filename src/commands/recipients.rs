@@ -522,7 +522,7 @@ pub(crate) fn cmd_revoke(
                 ),
                 Err(e) => eprintln!(
                     "{} could not delete its key file {}: {e} — delete it by hand",
-                    "✗".red(),
+                    "✕".red(),
                     p.display()
                 ),
             },

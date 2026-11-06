@@ -12,7 +12,7 @@ export default defineConfig({
     starlight({
       title: "murk",
       description:
-        "Encrypted secrets manager for developers — one file, age encryption, git-friendly.",
+        "Encrypted secrets manager for developers: one file, age encryption, git-friendly.",
       logo: {
         src: "./src/assets/murk-logo.svg",
         alt: "murk",

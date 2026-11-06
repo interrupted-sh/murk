@@ -14,7 +14,7 @@
 //! agent's own grant, in its `agents` record, covered by the signature.
 //!
 //! The TTL is enforced at read time by the murk binary: an expired grant fails
-//! closed at every entry point (CLI, MCP, bindings — see
+//! closed on every value read (CLI, MCP, bindings — see
 //! [`crate::enforce_agent_policy`]). That is a guardrail, not cryptography:
 //! age keys cannot self-destruct and old `.murk` versions stay readable in
 //! git, so a leaked grant key works against history until `agent revoke` +
@@ -113,8 +113,12 @@ pub fn create_grant(
 ) -> Result<types::GrantEntry, MurkError> {
     validate_grant_name(name)?;
     if current.grants.contains_key(name) {
+        // The hint is a whole `agent grant` command, not a bare flag: `agent
+        // init` reaches this error too and has no `--renew`, so the user must
+        // be able to run the line as printed.
+        let only: String = scope.iter().map(|k| format!(" --only {k}")).collect();
         return Err(MurkError::Grant(format!(
-            "grant already exists: {name} — pass --renew to replace it"
+            "grant already exists: {name} — replace it with `murk agent grant --name {name}{only} --renew`"
         )));
     }
     // One key, one grant: a pubkey shared across grants would make read-time
@@ -342,17 +346,21 @@ mod tests {
             Duration::hours(1),
         )
         .unwrap();
+        let err = create_grant(
+            &mut current,
+            "dup",
+            "age1b",
+            &["K".into(), "J".into()],
+            "age1owner",
+            issued,
+            Duration::hours(1),
+        )
+        .unwrap_err()
+        .to_string();
+        // The hint is a command that runs as printed, also from `agent init`.
         assert!(
-            create_grant(
-                &mut current,
-                "dup",
-                "age1b",
-                &["K".into()],
-                "age1owner",
-                issued,
-                Duration::hours(1),
-            )
-            .is_err()
+            err.contains("`murk agent grant --name dup --only K --only J --renew`"),
+            "{err}"
         );
     }
 

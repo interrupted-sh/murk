@@ -1,78 +1,84 @@
 # murk_lints
 
 Type-aware secret-handling lints for the murk codebase.
-`tests/invariants.rs` scans source text and cannot express type-level rules;
-these are [dylint](https://github.com/trailofbits/dylint) lints built on real
-rustc type information instead.
+`tests/invariants.rs` scans source text and cannot express type-level rules.
+These [dylint](https://github.com/trailofbits/dylint) lints use real rustc
+type information instead.
+
+A secret field is a struct field that holds decrypted secret plaintext.
 
 ## Lints
 
-- `secret_field_missing_zeroize` — the crate's *known* plaintext
-  secret-holding fields (see `SECRET_FIELDS` in `src/lib.rs`) must resolve —
-  possibly through `HashMap`/`BTreeMap`/`Option`/`Vec` — to
-  `zeroize::Zeroizing<_>`, `age::secrecy::SecretString`, or a type
-  implementing `zeroize::ZeroizeOnDrop`.
-- `secret_debug_leak` — no `Debug` impl (derived, or the standard
-  `Formatter::debug_struct(..).field(name, value)` manual builder pattern)
-  may print a field whose type is/contains `Zeroizing<_>` or another
-  `ZeroizeOnDrop` type that (like `Zeroizing`) doesn't redact its own
-  `Debug` output. `age::secrecy::SecretString` is deliberately *not* in this
-  marker set — see "Marker strategy" below.
-- `secret_uncontrolled_escape` — `.clone()`/`.to_string()` may not escape a
-  secret wrapper into a plain, never-zeroized value (`(*v).clone()` or
-  `v.to_string()` where `v: Zeroizing<_>`/`SecretString`).
+- `secret_field_missing_zeroize`: each known secret field (see
+  `SECRET_FIELDS` in `src/lib.rs`) must resolve to `zeroize::Zeroizing<_>`,
+  `age::secrecy::SecretString`, or a type that implements
+  `zeroize::ZeroizeOnDrop`. The type may sit inside `HashMap`, `BTreeMap`,
+  `Option` or `Vec`.
+- `secret_debug_leak`: no `Debug` impl may print a field whose type is or
+  contains `Zeroizing<_>`, or another `ZeroizeOnDrop` type that does not
+  redact its own `Debug` output. The lint checks derived impls, and manual
+  impls that use the `Formatter::debug_struct(..).field(name, value)` builder
+  pattern. `age::secrecy::SecretString` is not in this marker set (see
+  [Marker strategy](#marker-strategy)).
+- `secret_uncontrolled_escape`: `.clone()` and `.to_string()` may not copy a
+  secret wrapper into a plain value that nothing zeroizes. The lint flags
+  `(*v).clone()` and `v.to_string()` where `v` is `Zeroizing<_>` or
+  `SecretString`.
 
 ## Marker strategy
 
-The murk codebase wraps decrypted plaintext in `zeroize::Zeroizing<_>`, and
-key material (in `env.rs`, `init.rs` and the CLI's key resolution) in
-`age::secrecy::SecretString`. Zeroization is best-effort: see
-[THREAT_MODEL.md](../../THREAT_MODEL.md) for the buffers it cannot reach
-(age internals, serialization, FFI bindings, OS copies). The wrapper use was
-verified by grepping the crate before writing these lints; there are no
-hand-rolled `impl Zeroize` types today. So "correctly handled" is checked
-with real trait/ADT resolution against those two wrapper types, plus a
-generic fallback that accepts any type implementing `zeroize::ZeroizeOnDrop`
-(not plain `Zeroize` — see the note in `src/lib.rs` on why `ZeroizeOnDrop` is
-the trait that matters: `String`/`Vec<u8>` implement `Zeroize` but nothing
-calls it for you, so treating bare `Zeroize` as sufficient would be unsound).
+The lints decide what counts as correctly handled from resolved types, not
+from text.
 
-`secret_field_missing_zeroize` additionally needs a way to know *which*
-fields are secret-holding in the first place — it can't require a wrapper
-that isn't there yet to prove a field should have one. There is no marker
-trait/attribute for this in murk_cli today, so rather than guess from field
-names (which produces false positives — `Murk::recipients`,
-`Murk::groups`, `MurkIdentity::Plugin::pubkey`, etc. hold non-secret
-metadata right alongside the secret fields, in the *same* structs), this
-lint uses a **verified allowlist**: the exact `(type path, field name)`
-pairs identified by reading the source (`SECRET_FIELDS` in `src/lib.rs`).
-It is a regression guard for those known-sensitive fields, not a discovery
-tool — extend the list by hand when a new field starts holding decrypted
-plaintext.
+- murk wraps decrypted plaintext in `zeroize::Zeroizing<_>`.
+- murk wraps key material in `age::secrecy::SecretString`. The code is in
+  `env.rs`, `init.rs` and the CLI's key resolution.
+- Any type that implements `zeroize::ZeroizeOnDrop` also counts for
+  `secret_field_missing_zeroize` and `secret_debug_leak`.
+- Plain `Zeroize` does not count. `String` and `Vec<u8>` implement `Zeroize`,
+  but nothing calls it for you.
+- murk_cli has no hand-rolled `impl Zeroize`, so the two wrappers cover its
+  secrets.
+- Zeroization is best effort. [THREAT_MODEL.md](../../THREAT_MODEL.md) lists
+  the buffers it cannot reach: age internals, serialization, FFI bindings and
+  OS copies.
 
-`secret_debug_leak` doesn't need an allowlist either: the wrapper type
-itself, resolved from real field types (not text), *is* the marker. But it
-deliberately uses a **narrower** marker set than the other two lints:
-`Zeroizing<_>` and any other `ZeroizeOnDrop` type count, but
-`age::secrecy::SecretString` (`secrecy::SecretBox<str>`) does not, even
-though it also implements `ZeroizeOnDrop`. `SecretBox`'s own `Debug` impl
-unconditionally prints `SecretBox<str>([REDACTED])` (verified in the
-`secrecy` crate source) — deriving `Debug` over a `SecretString` field is
-already safe. Treating it as unsafe produced a real false positive during
-development (`init::DiscoveredKey`, which derives `Debug` over a
-`secret_key: SecretString` field) before this exclusion was added.
+`secret_field_missing_zeroize` needs a list of secret fields. murk_cli has no
+marker trait or attribute that says "this field holds a secret". Field names
+are a poor guide: `Murk::recipients`, `Murk::groups` and
+`MurkIdentity::Plugin::pubkey` hold non-secret metadata next to secret fields
+in the same structs. The lint uses an allowlist of exact `(type path, field
+name)` pairs instead (`SECRET_FIELDS` in `src/lib.rs`). The allowlist is a
+regression guard, not a discovery tool. Add a field by hand when it starts to
+hold decrypted plaintext.
 
-## Known limitations (scoped down deliberately)
+`secret_debug_leak` needs no list. The wrapper type, resolved from real field
+types, is the marker. Its marker set is narrower than the one for
+`secret_field_missing_zeroize`. `Zeroizing<_>` and other `ZeroizeOnDrop` types
+count. `age::secrecy::SecretString` (`secrecy::SecretBox<str>`) does not,
+although it implements `ZeroizeOnDrop`. The `Debug` impl of `SecretBox`
+always prints `SecretBox<str>([REDACTED])`, so deriving `Debug` over a
+`SecretString` field is safe. `init::DiscoveredKey` does this: it derives
+`Debug` over `secret_key: SecretString`.
 
-- `secret_debug_leak`'s manual-impl check only recognizes the standard
-  `.field(name, &self.field)` builder pattern, not `write!`/`format!`
-  interpolation of a secret field. Reliably matching macro-desugared
-  argument sinks is fragile across rustc versions. As of this writing, each
-  manual `Debug` impl in `src/` either uses the builder pattern or never
-  references a secret field, so this covers every real call site.
-- `secret_field_missing_zeroize` only covers the fields in its allowlist.
+`secret_uncontrolled_escape` checks for `Zeroizing<_>` and `SecretString`
+themselves. It does not check for other `ZeroizeOnDrop` types.
+
+## Limitations
+
+- `secret_field_missing_zeroize` checks only the fields in its allowlist. It
+  does not find new secret fields. A marker attribute or trait on secret
+  fields would let the lint find them. murk_cli has none.
+- `secret_debug_leak` recognizes a manual `Debug` impl only when it uses the
+  `.field(name, &self.field)` builder pattern. It does not see a secret field
+  that `write!` or `format!` prints. Matching the arguments that macros
+  generate breaks across rustc versions. Every manual `Debug` impl in `src/`
+  uses the builder pattern or never reads a secret field, so the check covers
+  all of them.
 
 ## Running
+
+CI does not run these lints.
 
 One-time setup (external tools, not part of the murk workspace's own build):
 
@@ -82,32 +88,23 @@ rustup toolchain install nightly-2026-05-28 --profile minimal \
 rustup run stable cargo install cargo-dylint dylint-link --locked
 ```
 
-Run the lints over the whole workspace (the root `Cargo.toml`'s
-`[workspace.metadata.dylint]` entry points `cargo dylint` at this crate, and
-`rust-toolchain.toml` here pins the nightly):
+Run the lints over the whole workspace. The `[workspace.metadata.dylint]`
+entry in the root `Cargo.toml` points `cargo dylint` at this crate. The
+`rust-toolchain.toml` in this directory pins the nightly.
 
 ```sh
 cargo dylint --all --workspace --no-deps -- --lib --tests --bins
 ```
 
-UI tests:
+Run the UI tests:
 
 ```sh
 cd lints/murk_lints && cargo test
 ```
 
-Both commands require a rustup-managed Rust: `cargo`/`rustc` must resolve to
-rustup's proxies, which read `rust-toolchain.toml` and export
-`RUSTUP_TOOLCHAIN` to child processes (`dylint-link` depends on it, and
-cargo-dylint builds its per-toolchain driver through rustup). This is
-[dylint's own prerequisite](https://github.com/trailofbits/dylint), not a
-murk-specific one. A non-rustup Rust first on PATH (e.g. Homebrew's) is not
-a supported environment for running these lints.
-
-
-## Follow-up (not done in this pass)
-
-- CI wiring.
-- `secret_field_missing_zeroize` is a hand-maintained allowlist; if murk
-  grows a general "this holds a secret" marker (attribute or trait) in the
-  future, this lint should switch to discovering fields from it instead.
+Both commands need a rustup-managed Rust. `cargo` and `rustc` must resolve to
+rustup's proxies. The proxies read `rust-toolchain.toml` and export
+`RUSTUP_TOOLCHAIN` to child processes. `dylint-link` depends on that
+variable, and `cargo-dylint` builds its per-toolchain driver through rustup.
+This is [dylint's own prerequisite](https://github.com/trailofbits/dylint).
+A non-rustup Rust first on `PATH`, such as Homebrew's, is not supported.

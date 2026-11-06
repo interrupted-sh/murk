@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: murk contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! GitHub SSH key fetching for `murk authorize github:username`.
+//! GitHub SSH key fetching for `murk circle authorize github:username`.
 
 use std::collections::HashMap;
 use std::fmt::Write;

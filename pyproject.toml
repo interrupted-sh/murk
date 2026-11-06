@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "murk-secrets"
 dynamic = ["version"]
-description = "Python bindings for murk — encrypted secrets manager"
+description = "Python bindings for murk, an encrypted secrets manager for developers"
 readme = "python/README.md"
 license = { text = "MIT OR Apache-2.0" }
 requires-python = ">=3.9"

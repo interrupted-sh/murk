@@ -8,11 +8,11 @@ murk\-diff \- Show secret and access changes vs a git ref (experimental)
 .SH DESCRIPTION
 Show secret and access changes vs a git ref (experimental)
 .PP
-Lists recipients, signer, signing keys, policy, grants and group members that changed, then the secrets. The vault at the ref is verified first; a revision this machine\*(Aqs trust pin refuses is never shown.
+Lists recipients, signer, signing keys, policy, grants and group members that changed, then the secrets. The vault at the ref is verified first. murk never shows a revision that this machine\*(Aqs trust pin refuses.
 .SH OPTIONS
 .TP
 \fB\-\-show\-values\fR
-Show actual values (not just key names)
+Show actual values (not just secret names)
 .TP
 \fB\-\-json\fR
 Output JSON: {"secrets": [...], "changes": [...]} (values only with \-\-show\-values)
