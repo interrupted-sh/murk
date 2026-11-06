@@ -36,7 +36,7 @@ murk has no admin role. Every recipient except agent grants can add and remove r
 
 | Feature | Why it is experimental |
 | --- | --- |
-| [Agent grants, `agent exec`, `murk mcp`, `agent connect`/`disconnect`](/guides/ai-agents-mcp/) | New, and their access rules changed in 0.14. A running `murk mcp` server does not see a revocation or policy change until it restarts. A guardrail, not a security boundary. |
+| [Agent grants, `agent exec`, `murk mcp`, `agent connect`/`disconnect`](/guides/ai-agents-mcp/) | New, and their access rules changed in 0.14. A guardrail, not a security boundary. |
 | [Agent policy](/guides/ai-agents-mcp/) (`murk policy`, `--allow-tag`) | Limits which tagged secrets agents receive. A guardrail, not access control. |
 | [Named groups](/guides/teams/#listing-and-managing-recipients) (`murk group`, `--group NAME`) | Newer than the shared and personal layers, with less test coverage across update paths. |
 | [Signatures and signer pinning](/concepts/recipients-signatures/) | New in 0.14: the trust pin, `murk trust` and the signed form may change in a minor release. Keys that cannot sign (hardware, `ssh-rsa`) leave a vault unsigned and rely on signed git commits, and the first trust decision on a machine is yours to check. |

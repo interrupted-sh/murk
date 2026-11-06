@@ -41,7 +41,7 @@ A cell marked with a number was decided where the policy left it open; the notes
 | `agent exec --only AGENT_OK -- env` | no (2) | no (2) | no (2) | no (2) | no (2) | yes | yes | no | no | no |
 | `agent exec --only SHARED -- env` | no (2) | no (2) | no (2) | no (2) | no (2) | no | no | no | no | no |
 | `agent exec --allow-operator-key --only SHARED -- env` | yes | yes | yes | yes | yes | no | no | no | no | no |
-| `mcp (murk_get AGENT_OK)` | no (3) | no (3) | no (3) | no (3) | no (3) | no (3) | yes | no | no | no |
+| `mcp --allow-get (murk_get AGENT_OK)` | no (3) | no (3) | no (3) | no (3) | no (3) | no (3) | yes | no | no | no |
 | `diff --show-values` | yes | yes | yes | yes | yes | no (4) | no (4) | no | no | no |
 | `verify` | yes | yes | yes | yes | yes | yes (5) | yes (5) | no | no | no |
 | `scan` | yes | yes | yes | yes | yes | yes (1) | yes (1) | no | no | no |

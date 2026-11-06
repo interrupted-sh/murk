@@ -77,6 +77,16 @@ pub fn read(path: &Path) -> Result<Vault, VaultError> {
 /// the symlink rejection and version check that `read` enforces. Callers
 /// should always prefer this or `read` over calling `fs::read(path)` directly.
 pub fn read_with_raw(path: &Path) -> Result<(Vault, Vec<u8>), VaultError> {
+    let contents = read_contents(path)?;
+    let vault = parse(&contents)?;
+    Ok((vault, contents.into_bytes()))
+}
+
+/// Read a .murk vault file's contents without parsing them, under the same
+/// symlink refusal and size bound as [`read`]. For a caller that hashes the
+/// bytes and parses them only when they changed (`murk mcp`); the result must
+/// still go through [`parse`] before anything trusts it.
+pub fn read_contents(path: &Path) -> Result<String, VaultError> {
     if path.is_symlink() {
         return Err(VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -95,8 +105,7 @@ pub fn read_with_raw(path: &Path) -> Result<(Vault, Vec<u8>), VaultError> {
     let mut contents = String::new();
     file.take(MAX_VAULT_BYTES as u64 + 1)
         .read_to_string(&mut contents)?;
-    let vault = parse(&contents)?;
-    Ok((vault, contents.into_bytes()))
+    Ok(contents)
 }
 
 /// An exclusive advisory lock on a vault file.

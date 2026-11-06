@@ -592,6 +592,7 @@ Add `murk mcp` to an AI client's MCP config and mint a scoped grant for it (expe
 * `--only <ONLY>` — Secrets the agent may read (repeatable, required)
 * `--allow-tag <ALLOW_TAG>` — Set the agent allow-list to these tags before granting (repeatable)
 * `--allow-exec` — Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)
+* `--allow-get` — Also enable the `murk_get` tool in the MCP server (writes `--allow-get` into the client config)
 * `--ttl <TTL>` — Grant time to live, e.g. 30m, 2h or 7d, up to 365d. Reads fail closed after expiry
 
   Default value: `2h`
@@ -642,6 +643,9 @@ Run an MCP (Model Context Protocol) stdio server for AI agents (experimental)
 * `--allow-exec` — Enable the murk_exec tool, which runs commands with the grant's secrets injected
 
    Off by default. The tool runs arbitrary commands as this user. The injected secrets are limited to the grant, but the command itself is not sandboxed.
+* `--allow-get` — Enable the murk_get tool, which returns a secret value to the agent
+
+   Off by default. The value lands in the model's context and its transcript. Prefer --allow-exec, which injects secrets without showing them.
 
 
 

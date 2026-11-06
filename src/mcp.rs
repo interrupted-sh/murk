@@ -13,20 +13,30 @@
 //! diagnostic goes to stderr via `tracing`. tokio is confined to this module —
 //! the rest of murk stays synchronous.
 //!
-//! Tools: `murk_plan` (value-free, grant-scoped schema) and `murk_get` (scoped
-//! read) are always on and fail closed. `murk_exec` (run a command with scoped
-//! secrets injected) is opt-in via `murk mcp --allow-exec` — off by default,
-//! since command execution is a wider blast radius than a scoped read.
+//! Tools: `murk_plan` (value-free, grant-scoped schema) is always on and fails
+//! closed. `murk_get` (scoped read, the value lands in the model's context) is
+//! opt-in via `murk mcp --allow-get`. `murk_exec` (run a command with scoped
+//! secrets injected) is opt-in via `murk mcp --allow-exec`, since command
+//! execution is a wider blast radius than a scoped read.
+//!
+//! Every tool call re-checks the vault file first ([`VaultWatch::current`]): a
+//! revoke, a tightened policy or a tampered file applies to the next call, not
+//! to the next server start.
 
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use age::secrecy::{ExposeSecret, SecretString};
 use murk_cli::types::{Murk, Vault};
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ServerCapabilities, ServerConfig,
+    },
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -35,26 +45,137 @@ use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command as TokioCommand};
 
-/// The decrypted, grant-scoped vault state the tools read from. Loaded once by
-/// [`crate::cmd_mcp`] after the identity guard passes, then shared read-only for
-/// the server's lifetime. Holds decrypted secret material (bounded to the grant),
-/// so its lifetime is the connection's lifetime — the same tradeoff any
-/// long-running secrets server makes.
-pub struct McpState {
-    pub vault: Vault,
-    pub murk: Murk,
+/// The decrypted, grant-scoped vault state the tools read from: one trusted
+/// load of the vault file. Holds decrypted secret material (bounded to the
+/// grant), so it lives as long as the server, or until a changed vault file
+/// replaces it. The same tradeoff any long-running secrets server makes.
+struct McpState {
+    vault: Vault,
+    murk: Murk,
     /// The grant identity's public key — the reader `get_secret` resolves values
     /// for, and the subject of the agent-policy check.
-    pub pubkey: String,
+    pubkey: String,
 }
 
-/// The murk MCP server handler. Cheap to clone — the state is behind an `Arc` and
-/// the generated `#[tool_handler]` dispatch reads the router per request.
+/// The vault the server reads, the grant key it was opened with, and the state
+/// of the last load that passed.
+///
+/// The key is resolved once, at startup, and kept: a reload opens the vault as
+/// the same grant identity, never as a key found later. The state is replaced
+/// only by a reload that passes every check a startup load does.
+pub struct VaultWatch {
+    path: String,
+    key: SecretString,
+    loaded: Mutex<Loaded>,
+}
+
+/// A trusted load and the BLAKE3 hash of the exact file bytes it came from.
+struct Loaded {
+    state: Arc<McpState>,
+    digest: blake3::Hash,
+}
+
+impl VaultWatch {
+    /// Load the vault at `path` as the grant whose key text is `key`. Fails
+    /// as a startup load does: the full library load path (MAC, signature,
+    /// trust, grant expiry), then a refusal unless the key is one of the
+    /// vault's grants. On success also returns the load's warnings.
+    pub fn open(path: &str, key: SecretString) -> Result<(Self, Vec<String>), String> {
+        let contents = murk_cli::vault::read_contents(std::path::Path::new(path))
+            .map_err(|e| e.to_string())?;
+        let (state, warnings) = load_state(path, &key, &contents)?;
+        let loaded = Loaded {
+            state: Arc::new(state),
+            digest: blake3::hash(contents.as_bytes()),
+        };
+        Ok((
+            Self {
+                path: path.to_string(),
+                key,
+                loaded: Mutex::new(loaded),
+            },
+            warnings,
+        ))
+    }
+
+    /// The state a tool call must use: the loaded one if the vault file's
+    /// bytes are unchanged, else a fresh load of the new bytes.
+    ///
+    /// The file is read once, and the hash and the reload both use those
+    /// bytes, so a write between the check and the load cannot slip in. Any
+    /// failure (an unreadable, tampered or untrusted file, a revoked or
+    /// expired grant) fails the call and keeps the previous state, which
+    /// serves again only if the file returns to the bytes it was loaded from.
+    /// Calls check one at a time.
+    fn current(&self) -> Result<Arc<McpState>, String> {
+        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        let refuse = |e: &dyn std::fmt::Display| {
+            tracing::warn!("murk mcp: the vault could not be checked or reloaded: {e}");
+            format!("refusing this call: the vault could not be checked or reloaded: {e}")
+        };
+        let contents = murk_cli::vault::read_contents(std::path::Path::new(&self.path))
+            .map_err(|e| refuse(&e))?;
+        let digest = blake3::hash(contents.as_bytes());
+        if digest == loaded.digest {
+            return Ok(Arc::clone(&loaded.state));
+        }
+        let (state, warnings) =
+            load_state(&self.path, &self.key, &contents).map_err(|e| refuse(&e))?;
+        for warning in warnings {
+            tracing::warn!("murk mcp: {warning}");
+        }
+        tracing::info!("murk mcp: the vault changed on disk; reloaded it");
+        *loaded = Loaded {
+            state: Arc::new(state),
+            digest,
+        };
+        Ok(Arc::clone(&loaded.state))
+    }
+}
+
+/// Parse and load `contents`, read from `path`, as the grant whose key text is
+/// `key`, and refuse any identity that is not one of the vault's grants.
+fn load_state(
+    path: &str,
+    key: &SecretString,
+    contents: &str,
+) -> Result<(McpState, Vec<String>), String> {
+    let vault = murk_cli::vault::parse(contents).map_err(|e| e.to_string())?;
+    let (vault, mut murk, identity) =
+        murk_cli::load_parsed_vault(path, vault, key.expose_secret()).map_err(|e| e.to_string())?;
+    let pubkey = identity.pubkey_string().map_err(|e| e.to_string())?;
+    // Anything other than one of the vault's grants (the operator's own key, a
+    // plain recipient, a key whose grant was revoked) is refused: the point is
+    // to bound the agent to a grant's scope.
+    if !murk_cli::is_agent_identity(&murk, &pubkey) {
+        return Err(
+            "murk mcp refuses to run without a scoped grant: this identity is not a `murk agent grant` key (fail-closed). Mint one with `murk agent init`."
+                .into(),
+        );
+    }
+    let warnings = std::mem::take(&mut murk.warnings);
+    Ok((
+        McpState {
+            vault,
+            murk,
+            pubkey,
+        },
+        warnings,
+    ))
+}
+
+/// The murk MCP server handler. Cheap to clone — the vault is behind an `Arc`
+/// and the generated `#[tool_handler]` dispatch reads the router per request.
 #[derive(Clone)]
 pub struct MurkMcp {
-    state: Arc<McpState>,
+    vault: Arc<VaultWatch>,
     tool_router: ToolRouter<Self>,
+    allow_get: bool,
 }
+
+/// The refusal for a `murk_get` call to a server started without `--allow-get`.
+const GET_OFF: &str = "murk_get is off on this server: it would put the secret value into \
+     the model's context. The operator can turn it on with `murk mcp --allow-get`";
 
 /// `murk_plan` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -88,14 +209,28 @@ struct ExecRequest {
 
 #[tool_router]
 impl MurkMcp {
-    fn new(state: Arc<McpState>, allow_exec: bool) -> Self {
+    fn new(vault: Arc<VaultWatch>, allow_exec: bool, allow_get: bool) -> Self {
         let mut tool_router = Self::tool_router();
-        // murk_exec is opt-in: unless the operator launched with --allow-exec,
-        // drop it entirely so it never appears in tools/list or accepts a call.
+        // murk_exec and murk_get are opt-in: unless the operator launched with
+        // the flag, drop the route so the tool never appears in tools/list.
+        // A murk_exec call then fails as an unknown tool; a murk_get call gets
+        // a refusal naming --allow-get (`call_tool` below).
         if !allow_exec {
             tool_router.remove_route("murk_exec");
         }
-        Self { state, tool_router }
+        if !allow_get {
+            tool_router.remove_route("murk_get");
+        }
+        Self {
+            vault,
+            tool_router,
+            allow_get,
+        }
+    }
+
+    /// The vault state for this call, or the refusal to return instead.
+    fn state(&self) -> Result<Arc<McpState>, CallToolResult> {
+        self.vault.current().map_err(|e| tool_err(&e))
     }
 
     /// The secret *schema* for keys this grant may read — key names, descriptions,
@@ -109,7 +244,10 @@ impl MurkMcp {
         &self,
         Parameters(PlanRequest { tags }): Parameters<PlanRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let st = &self.state;
+        let st = match self.state() {
+            Ok(st) => st,
+            Err(refusal) => return Ok(refusal),
+        };
         let mut plan = murk_cli::agent_plan(&st.vault, &tags);
         // Bound the plan to exactly the set murk_get would serve: keys allowed by
         // the agent policy AND readable under this grant. Without this a one-key
@@ -136,7 +274,10 @@ impl MurkMcp {
         &self,
         Parameters(GetRequest { key }): Parameters<GetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let st = &self.state;
+        let st = match self.state() {
+            Ok(st) => st,
+            Err(refusal) => return Ok(refusal),
+        };
 
         // Defense-in-depth policy gate: apply the vault's agent allow-tag policy
         // at read time (the cryptographic bound is the grant recipient set; this
@@ -176,7 +317,6 @@ impl MurkMcp {
         &self,
         Parameters(ExecRequest { only, command }): Parameters<ExecRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let st = &self.state;
         if command.is_empty() {
             return Ok(tool_err("command must not be empty"));
         }
@@ -185,6 +325,10 @@ impl MurkMcp {
                 "only must name at least one key — murk_exec never runs with an unscoped environment",
             ));
         }
+        let st = match self.state() {
+            Ok(st) => st,
+            Err(refusal) => return Ok(refusal),
+        };
         // Policy gate for every requested key (retroactive allow-tag enforcement).
         if let Err(e) = murk_cli::enforce_agent_policy(&st.vault, &st.murk, &st.pubkey, &only) {
             return Ok(tool_err(&e.to_string()));
@@ -228,15 +372,32 @@ impl MurkMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MurkMcp {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        // murk_get is not routed without --allow-get; refuse it by name so
+        // the caller learns which flag turns it on.
+        if !self.allow_get && request.name == "murk_get" {
+            return Ok(CallToolResponse::Complete(tool_err(GET_OFF)));
+        }
+        let tcc = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     fn get_info(&self) -> ServerConfig {
+        let instructions = if self.allow_get {
+            "murk secrets for AI agents, bounded to this grant's scope. Use murk_plan \
+             for the value-free schema and murk_get to read an in-scope key; both fail \
+             closed on anything outside the grant."
+        } else {
+            "murk secrets for AI agents, bounded to this grant's scope. Use murk_plan \
+             for the value-free schema; it fails closed on anything outside the grant."
+        };
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("murk-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "murk secrets for AI agents, bounded to this grant's scope. Use murk_plan \
-                 for the value-free schema and murk_get to read an in-scope key; both fail \
-                 closed on anything outside the grant."
-                    .to_string(),
-            )
+            .with_instructions(instructions.to_string())
     }
 }
 
@@ -245,11 +406,15 @@ impl ServerHandler for MurkMcp {
 /// tokio is confined here via `#[tokio::main]`; the caller stays synchronous.
 /// All logging is routed to stderr — stdout carries the JSON-RPC stream.
 #[tokio::main]
-pub async fn serve(state: McpState, allow_exec: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(
+    vault: VaultWatch,
+    allow_exec: bool,
+    allow_get: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     tracing::info!("murk mcp: serving over stdio");
 
-    let service = MurkMcp::new(Arc::new(state), allow_exec)
+    let service = MurkMcp::new(Arc::new(vault), allow_exec, allow_get)
         .serve(stdio())
         .await
         .inspect_err(|e| tracing::error!("murk mcp: failed to start: {e:?}"))?;

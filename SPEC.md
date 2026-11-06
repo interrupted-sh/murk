@@ -880,9 +880,9 @@ One-step onboarding. With `--allow-tag` (repeatable), it first sets the agent al
 
 ---
 
-### `murk agent connect [CLIENT] --only KEY [--allow-tag TAG] [--allow-exec] [--ttl DUR] [--name NAME] [--vault NAME]`
+### `murk agent connect [CLIENT] --only KEY [--allow-tag TAG] [--allow-exec] [--allow-get] [--ttl DUR] [--name NAME] [--vault NAME]`
 
-Adds a `murk mcp` server entry to an AI client's MCP config and mints a grant for it. `CLIENT` is one of `claude`, `cursor`, `vscode`, `zed`, `gemini`, `omp` or `codex`. Without it, connect configures every client that already has a config file or marker directory (such as `.cursor/`) next to the vault, and fails when it finds none. `--name` defaults to `mcp`. `--allow-tag` sets the allow-list before the grant is minted. `--allow-exec` writes `--allow-exec` into the server entry, which enables `murk_exec`. A non-default vault is passed to the server with `--vault`.
+Adds a `murk mcp` server entry to an AI client's MCP config and mints a grant for it. `CLIENT` is one of `claude`, `cursor`, `vscode`, `zed`, `gemini`, `omp` or `codex`. Without it, connect configures every client that already has a config file or marker directory (such as `.cursor/`) next to the vault, and fails when it finds none. `--name` defaults to `mcp`. `--allow-tag` sets the allow-list before the grant is minted. `--allow-exec` writes `--allow-exec` into the server entry, which enables `murk_exec`, and `--allow-get` writes `--allow-get`, which enables `murk_get`. A non-default vault is passed to the server with `--vault`.
 
 A second connect with the same `--name` reuses the grant when `--only` names the same keys, and refuses when the scope differs. It also refuses when the grant exists but its key file is gone. connect renders every config before it changes anything, so a config it cannot parse or that is a symlink fails before a grant is minted. If a write fails after that, connect restores the configs it already wrote and revokes the grant it minted in this run. A grant key cannot run connect. See `docs/ai-agents.md` for each client's config path.
 
@@ -894,14 +894,16 @@ Removes murk's server entry from an AI client's MCP config. Without `CLIENT`, it
 
 ---
 
-### `murk mcp [--allow-exec] [--vault NAME]`
+### `murk mcp [--allow-exec] [--allow-get] [--vault NAME]`
 
 Runs an in-process MCP (Model Context Protocol) stdio server so AI-agent harnesses can read murk secrets on the capability-not-credential model. It calls the murk-cli library directly, with no subprocess and no Node. It fails closed unless the loaded identity is a scoped agent grant with `MURK_AGENT=1`. It refuses to start with the operator's stored key, a plain recipient, or no grant. stdout is the JSON-RPC channel (never written to otherwise). All logs go to stderr.
+
+Before every tool call the server hashes the vault file (BLAKE3). When the bytes changed, it loads those bytes again through the full load path with the grant key it started with, and uses the new state only if that load passes; any failure fails the call. A revoke, a policy change or a tampered file therefore applies to the next call.
 
 Tools, all bounded to the grant:
 
 - `murk_plan`: the schema (key names, descriptions, examples, tags) of the secrets this grant may read, as JSON, with an optional `tags` filter. No values, and no keys outside the grant's scope or the agent policy.
-- `murk_get { key }`: one secret value, if the grant may read it. A forbidden or out-of-scope key returns an error result, never the value.
+- `murk_get { key }`: opt-in via `--allow-get` (off by default), because the value enters the model's context. One secret value, if the grant may read it. A forbidden or out-of-scope key returns an error result, never the value. Without the flag the tool is not listed, and a call returns an error that names `--allow-get`.
 - `murk_exec { only, command }`: opt-in via `--allow-exec` (off by default). Runs a command with the named secrets injected into its environment (no shell), returning captured stdout/stderr and the exit code. Every key must be in scope and policy-allowed, and output and runtime are bounded. `only` scopes the injected secrets, not the command, so it is not a sandbox.
 
 See `docs/ai-agents.md` for setup (`murk agent init`) and a verify snippet.

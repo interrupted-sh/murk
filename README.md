@@ -365,7 +365,7 @@ export MURK_KEY_FILE=~/.config/murk/restored.key
 | `murk agent disconnect [CLIENT] [--rotate]` | Remove murk from an AI editor's MCP config (`--rotate` also revokes the grant and rotates its keys) (experimental) |
 | `murk agent ls` | List active agent grants and their TTLs (experimental) |
 | `murk agent revoke NAME [--rotate]` | Revoke a grant (`--rotate` also rotates the secrets it could read) (experimental) |
-| `murk mcp [--allow-exec]` | Run a stdio MCP server exposing scoped secrets to AI agents (needs a grant + `MURK_AGENT`) (experimental) |
+| `murk mcp [--allow-exec] [--allow-get]` | Run a stdio MCP server exposing scoped secrets to AI agents (needs a grant + `MURK_AGENT`) (experimental) |
 | `murk policy show\|set\|clear` | Manage the agent allow-list (tags agents may receive) (experimental) |
 
 ### Recipients and groups

@@ -6,7 +6,7 @@ sidebar:
 ---
 
 :::caution[Experimental]
-Agent grants, `murk agent exec`, `murk mcp`, `murk agent connect`/`disconnect` and the agent policy are experimental. They are new, and their access rules changed in 0.14. A running `murk mcp` server does not see a revocation or a policy change until it restarts, so restart it after you revoke. Treat these features as a guardrail, not a security boundary.
+Agent grants, `murk agent exec`, `murk mcp`, `murk agent connect`/`disconnect` and the agent policy are experimental. They are new, and their access rules changed in 0.14. Treat these features as a guardrail, not a security boundary.
 :::
 
 AI coding agents need secrets to do real work: an API key to call a service, a database URL to run a migration. The usual way to hand them over is to paste a value into a prompt or point the agent at a `.env` file. Both can leak. Prompts are often logged, and sometimes sent to third-party APIs. `.env` files get committed by accident. Once a value is in a log or a prompt, you cannot pull it back.
@@ -138,7 +138,7 @@ murk agent grant --name codex --only STRIPE_SECRET_KEY --renew     # new key, ol
 murk agent revoke codex --rotate                                   # remove the grant, rotate its keys
 ```
 
-`agent revoke --rotate` asks for a new value for each secret the grant could read, or reads them from `--values-from FILE`. It stores the new values in the vault. It does not rotate them at the provider. A running `murk mcp` server keeps serving a revoked grant until it restarts, so restart it (restart the editor) after you revoke.
+`agent revoke --rotate` asks for a new value for each secret the grant could read, or reads them from `--values-from FILE`. It stores the new values in the vault. It does not rotate them at the provider. A running `murk mcp` server refuses the revoked grant from its next tool call.
 
 ### Four things to keep in mind
 
@@ -207,7 +207,7 @@ The policy lives in the vault header. The vault MAC covers it, and `murk policy 
 
 A granted agent is held to the policy however it reads: `murk get`, `murk agent exec`, or the Python and Node bindings (`murk-secrets`). The bindings' `get()` and `export()` refuse a forbidden key, as the CLI does.
 
-A tighter policy takes effect on the next murk process that reads the vault. Drop a tag, and the agent's next `murk get` (with `MURK_AGENT=1`) or `agent exec` refuses that key, even though its grant key still exists. A running `murk mcp` server and a loaded binding object keep the vault state from their last load. Restart the server (restart the editor) and reload the binding object after you change the policy or revoke a grant. Grant expiry is the exception: murk checks it again on every value read.
+A tighter policy takes effect on the next murk process that reads the vault. Drop a tag, and the agent's next `murk get` (with `MURK_AGENT=1`) or `agent exec` refuses that key, even though its grant key still exists. A running `murk mcp` server applies the change from its next tool call. A loaded binding object keeps the vault state from its last load, so reload it after you change the policy or revoke a grant. Grant expiry is the exception: murk checks it again on every value read.
 
 ## Serving secrets over MCP (`murk mcp`)
 
@@ -235,12 +235,12 @@ The editor launches `murk mcp` itself, from an entry in its MCP config. `murk ag
 
 The empty `MURK_KEY` hides a `MURK_KEY` the editor may pass down from your shell. murk refuses to run with both key variables set.
 
-The server loads the vault once, at startup. Restart it after you revoke a grant or change the policy. murk checks grant expiry on every `murk_get` and `murk_exec` call.
+On every tool call, the server checks whether the vault file changed. If it did, the server loads the file again with the same checks as at startup: MAC, signature, trust and grant expiry. So a revoke or a tighter policy takes effect from the next call, without a restart. If the changed file does not load (it was tampered with, or it is not a vault), the call fails. murk also checks grant expiry on every `murk_get` and `murk_exec` call. The reload does not reach old vault versions: the grant key still decrypts them from git history with raw age, so rotate after you revoke.
 
-The server speaks JSON-RPC over stdout and logs only to stderr. It offers two read tools, always on and limited to the grant, and one exec tool that is off by default:
+The server speaks JSON-RPC over stdout and logs only to stderr. It offers three tools, all limited to the grant. `murk_plan` is always on. `murk_get` and `murk_exec` are off by default:
 
 - **`murk_plan`** lists the key names, descriptions, examples and tags of the secrets this grant may read, as JSON. It returns no values, and it leaves out keys outside the grant or the agent policy. That limits the tool only. The schema is plaintext in `.murk`, so an agent that can read the file or run `murk agent plan` still sees every key name. It takes an optional `tags` filter.
-- **`murk_get { key }`** returns one secret value if the grant may read it. The value goes into the model's context, so it ends up in the agent's transcript. Prefer `murk_exec` or `murk agent exec` when the command can take the secret from its environment. A key outside the grant or forbidden by the policy returns an error result, never the value.
+- **`murk_get { key }`** is off unless you start the server with `murk mcp --allow-get`. Without the flag, a call returns an error that names it. It returns one secret value if the grant may read it. The value goes into the model's context, so it ends up in the agent's transcript. Prefer `murk_exec` or `murk agent exec` when the command can take the secret from its environment. A key outside the grant or forbidden by the policy returns an error result, never the value.
 - **`murk_exec { only, command }`** is off unless you start the server with `murk mcp --allow-exec`. It runs `command` (an argv array, no shell) with the secrets named in `only` in its environment. It returns `exit_code`, `stdout`, `stderr` and `truncated` as JSON, with the injected values masked (see [Output masking](#output-masking)). Every key in `only` must be in the grant's scope and allowed by the policy, or nothing runs.
 
 The `murk_exec` command gets a clean environment: `PATH`, `HOME` and `TERM` on Unix, plus `MURK_AGENT=1` and `MURK_STRICT=1`. It gets no stdin, a 120-second timeout and 1 MiB per output stream, and murk kills it past either limit. A non-zero exit or a truncated stream returns an error result. `only` limits the injected secrets, not the command. The command runs as your user, with your filesystem and network access, so `murk_exec` is not a sandbox. Turn it on only where the server already runs under OS-level isolation.
@@ -288,7 +288,7 @@ murk agent connect cursor --only STRIPE_SECRET_KEY
 | omp | `.omp/mcp.json` | JSON |
 | Codex | `.codex/config.toml` | TOML |
 
-`connect` writes only a key-file path, never key material. It keeps any other servers and comments in the file. Add `--allow-exec` to turn on the exec tool as well. These files are often committed, so murk warns and offers to add the path to `.gitignore`. `disconnect` removes only murk's entry and leaves other servers alone.
+`connect` writes only a key-file path, never key material. It keeps any other servers and comments in the file. Add `--allow-get` or `--allow-exec` to turn on `murk_get` or the exec tool as well. These files are often committed, so murk warns and offers to add the path to `.gitignore`. `disconnect` removes only murk's entry and leaves other servers alone.
 
 ![murk agent connect mints a scoped grant and writes the editor's MCP entry with a key-file path. A read outside the grant fails closed, and disconnect --rotate revokes and rotates](/demos/agent-connect.gif)
 
