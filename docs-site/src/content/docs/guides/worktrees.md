@@ -5,27 +5,27 @@ sidebar:
   order: 8
 ---
 
-A git worktree gives you a second working directory for the same repository —
-a branch checked out somewhere else, without stashing or cloning again. It's
-the natural fit for reviewing a PR while you keep working, and it's how most
-AI coding harnesses isolate a task: one throwaway checkout per job.
+A git worktree gives you a second working directory for the same
+repository. It is a branch checked out in another place, with no stash and
+no second clone. Use one to review a PR while you continue your work, or to
+give a task its own checkout.
 
-The catch is normally secrets. A fresh worktree contains tracked files and
-nothing else, so every gitignored dotenv you rely on is simply missing. The
-usual fix is to hand-copy or symlink `.env` into each new checkout, and to
-redo it every time a worktree is created — which is exactly the kind of
-manual step that is forgotten once and debugged for twenty minutes.
+Secrets are usually the problem. A new worktree contains only the tracked
+files, so each gitignored dotenv file is missing. The usual fix is to copy or
+symlink `.env` into each new checkout by hand, every time you create a
+worktree.
 
-murk doesn't have that problem, because the two halves of a murk setup travel
-differently:
+murk does not need that step, because the two parts of a murk setup reach a
+worktree in different ways:
 
 - **The vault is committed.** `.murk` is a tracked file, so a new worktree
-  checks it out like any other source file. All the secrets are already there,
-  encrypted.
-- **The key was never in the repo.** It lives in `~/.config/murk/keys/`, and
-  murk finds it by looking up the vault — including from a worktree.
+  checks it out like every other source file. All the secrets are already
+  there, encrypted.
+- **The key was never in the repository.** It is in `~/.config/murk/keys/`,
+  and murk finds it from the vault, also from a worktree.
 
-So there is nothing to provision.
+So when this machine already has a key stored for the vault in another
+checkout of the repository, there is nothing to set up.
 
 ## What this looks like
 
@@ -35,116 +35,95 @@ Create a worktree and use the vault immediately:
 git worktree add ../murk-feature-x
 cd ../murk-feature-x
 murk get API_KEY
-murk exec ./deploy.sh
+murk exec -- ./deploy.sh
 ```
 
 ![A fresh worktree has the committed .murk and no .env; murk get works via the sibling checkout, and the same read fails closed in agent context](/demos/worktree.gif)
 
-No `.env` to copy, no `murk env` to re-run, no key to export. The same holds
-for a worktree created by an agent harness, a `git worktree add` in a
-post-checkout hook, or a bare-repo layout where *every* checkout is a linked
-worktree and there is no "main" one.
+You do not copy a `.env`, run `murk env` again, or export a key. The same is
+true for a worktree that an agent harness creates, a `git worktree add` in a
+post-checkout hook, and a bare-repository layout. In that layout *every*
+checkout is a linked worktree, and there is no "main" one.
 
 You do not need `murk init` in a worktree. If you run it, it finds the key
-stored for the vault in a sibling checkout and reuses it. It never replaces
-a stored key.
+stored for the vault in a sibling checkout and uses it again. It never
+replaces a stored key.
 
 ## Which checkouts count
 
-murk stores your key under a hash of the vault's absolute path, which is what
-keeps a copy of someone else's vault from borrowing your key. A worktree puts
-the same vault at a different absolute path, so murk also accepts the key
-stored for that vault in a sibling checkout of the same repository.
+murk stores your key under a hash of the absolute path of the vault. So a
+copy of another person's vault cannot use your key. A worktree puts the same
+vault at a different absolute path. So murk also accepts the key stored for
+that vault in a sibling checkout of the same repository.
 
-"Sibling" here means what git says it means. murk reads git's own worktree
-metadata — never a `git` subprocess — and verifies the relationship in both
-directions: the vault's checkout has to be one the repository
-records, and the checkout whose key is used has to point back at the same
-repository. A `.git` entry is just a file that any local process can write, so
-a directory that merely *claims* to be a worktree resolves to no key at all
-and murk fails closed.
+"Sibling" means what git says it means. murk reads git's own worktree
+metadata. It never runs a `git` subprocess. It verifies the relationship in
+both directions. The repository must record the checkout of the vault. The
+checkout whose key murk uses must point back at the same repository. Any
+local process can write a `.git` entry, because it is only a file. So a
+directory that only *claims* to be a worktree resolves to no key, and murk
+fails closed.
 
-The practical version: real worktrees of your repo work, copies of the vault
-elsewhere on disk don't.
+In practice, real worktrees of your repository work. Copies of the vault in
+other places on disk do not.
 
 ## Trust follows the repository, not the checkout
 
 murk also records which signers it trusts for a vault (the [trust
-pin](/concepts/recipients-signatures/#trusting-a-signer)). That pin is keyed
-on the repository's common git directory and the vault's path in the
-checkout, so every worktree of a repo shares one. Run `murk trust` in any
-worktree, and the others already trust the vault. A fresh worktree of a
-repo you've already trusted needs nothing.
+pin](/concepts/recipients-signatures/#trusting-a-signer)). murk keys that
+pin on the common git directory of the repository and on the path of the
+vault in the checkout. So all worktrees of a repository share one pin. Run
+`murk trust` in one worktree, and the others trust the vault too. A new
+worktree of a repository that you already trust needs nothing.
 
-The save counter the pin keeps is tracked per branch. Checking out an older
-branch in another worktree isn't a rollback: murk compares the vault with the
-highest counter accepted on the branch that worktree has checked out. On a
-detached HEAD, or a branch this machine has never accepted (reviewing a PR
-branch, say), there is no counter check, so murk accepts a signed vault from
-a trusted signer whatever its counter.
+The pin keeps the save counter for each branch. So an older branch in
+another worktree is not a rollback. murk compares the vault with the highest
+counter accepted on the branch that the worktree has checked out. On a
+detached HEAD, or on a branch that this machine has never accepted (a PR
+branch that you review, for example), there is no counter check. murk then
+accepts a signed vault from a trusted signer, whatever its counter.
 
-The set of trusted signers is shared too. Apart from `murk trust` and your
-own saves, only loading a vault newer than everything this machine accepted,
-on a branch it accepted before (or outside git), changes it. Loading an older
-branch, a detached HEAD or a PR branch never adds a signer. So reviewing a PR that authorizes someone doesn't make this machine
-trust them: that happens only once the change reaches a branch this machine
-accepted, or you run `murk trust`.
+The set of trusted signers is shared too. Loading a PR branch never adds a
+signer to it. See [Trusting the vault on a new
+machine](/guides/teams/#trusting-the-vault-on-a-new-machine) for what does.
 
-Upgrading from 0.13 follows the same split. The pin is shared, but the
-refusal of a 0.13 vault is per branch. murk refuses one only on a branch
-where this machine has accepted or saved a 0.14 vault. A detached HEAD has
-no mark, so it never refuses one. The first 0.14 save in one worktree
-therefore doesn't make your other worktrees refuse their committed 0.13
-vaults. Make that first save on the default branch and commit it, then merge
-it into the other branches.
-
-A branch gets its 0.14 mark only when this machine saves there. Merging the
-upgrade into it does not give it one. Until this machine saves on that
-branch (a merge alone does not count), an older 0.13 revision checked out
-there still loads, as history, so it never adds trust. Once this machine has
-seen a 0.14 vault, that history is read-only. murk refuses every write over
-it and says the vault "is in the pre-0.14 format on a branch that hasn't
-taken the upgrade, and this machine hasn't accepted this copy, so it is
-read-only here". Merge the upgrade from the default branch, or review the
-file and run `murk trust --vault .murk` in that worktree to accept this copy.
-The next write upgrades the vault and gives the branch its 0.14 mark. On a
-detached HEAD, check out a branch first.
-
-If a branch that already has its mark then shows a 0.13 vault, murk says the
-vault "is in the pre-0.14 format, but this repository's vault has already
-been upgraded on this branch". The file is an older revision. Switch back to
-the newer one, or commit the upgrade on the default branch and merge it. See
-[upgrading to 0.14](/guides/teams/#upgrading-to-014).
+The pre-0.14 rules apply per branch, also in worktrees. The first 0.14 save
+in one worktree does not make your other worktrees refuse their committed
+0.13 vaults. Make that first save on the default branch and commit it, then
+merge it into the other branches. See [upgrading to
+0.14](/guides/teams/#upgrading-to-014) for the full rules and the refusal
+messages.
 
 ## Agents need their own key
 
-Discovery of a stored key is disabled entirely in strict mode and in agent
-context, worktree or not. Either is on when `MURK_STRICT` or `MURK_AGENT` is
-set to anything except empty, `0`, `false`, `no` or `off`, in any letter
-case. A typo or `on` also turns it on. An agent working in a fresh
-worktree has to present its own key, normally a scoped grant, or fail closed.
+Strict mode and agent context turn off the lookup of a stored key, in a
+worktree or not. Each one is on when `MURK_STRICT` or `MURK_AGENT` is set
+to any value except empty, `0`, `false`, `no` or `off`, in any letter case.
+So a typo or `on` also turns it on. An agent that works in a new worktree
+must present its own key, normally a scoped grant, or fail closed.
 
-This is a default, not a sandbox. A process running as you can still read
+This is a default, not a sandbox. A process that runs as you can still read
 `~/.config/murk/keys/` directly. To contain an agent, run it where it cannot
 read that directory.
 
-See [AI agents & MCP](/guides/ai-agents-mcp/) for issuing an agent a scoped
-grant to use in its worktree.
+See [AI agents & MCP](/guides/ai-agents-mcp/) for how to give an agent a
+scoped grant to use in its worktree.
 
 ## direnv in a worktree
 
-If you use [direnv](/guides/direnv/), the `.envrc` that `murk env` writes holds
-no secret material — just a `murk export` call — so committing it is safe, and
-then it arrives with every checkout like the vault does. direnv still requires
-an explicit opt-in per directory, so a new worktree needs one command:
+If you use [direnv](/guides/direnv/), the `.envrc` that `murk env` writes
+holds no secret material. It only calls `murk export`. So you can safely
+commit it, and then it arrives with every checkout, as the vault does. direnv
+still needs an explicit opt-in for each directory, so a new worktree needs
+one command:
 
 ```bash
 direnv allow
 ```
 
-That is direnv's safety model — it refuses to auto-execute an `.envrc` it
-hasn't been told to trust — and not something murk can or should skip on your
-behalf. If you'd rather not run it, `murk exec` needs no shell integration.
+That is the safety model of direnv. It refuses to run an `.envrc` that you
+have not told it to trust, and murk cannot skip that step for you. If you
+prefer not to run it, `murk exec` needs no shell integration.
 
 ## Related
 

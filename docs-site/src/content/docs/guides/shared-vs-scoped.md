@@ -1,45 +1,71 @@
 ---
-title: Shared vs scoped secrets
-description: When to use shared secrets versus per-user scoped overrides.
+title: Shared, group and private secrets
+description: When to use shared secrets, group secrets and private per-user values.
 sidebar:
   order: 1
 ---
 
-Every `.murk` vault has two layers of encryption for a given key. Picking the
-right one is the main decision you make when adding a secret.
+A secret in a `.murk` vault has one of three tiers. The tier decides who can
+decrypt it:
 
-## Shared secrets (the murk)
+- **Shared**: every recipient except agent grants.
+- **Group**: the members of one named group.
+- **Private** (`me`): only you. A private value overrides the shared or group
+  value of the same key for you.
 
-Shared secrets are encrypted to every recipient except agent grants (see
-[Grants](/concepts/grants/)). When you add a new key with `murk add KEY`,
-every authorized team member can decrypt it. Updating an existing key without
-`--group` keeps it in its tier. This is where
-production credentials, third-party API keys, and other team-wide secrets
-live.
+The tier is the main decision you make when you add a secret.
+
+## Shared secrets
+
+murk encrypts a shared secret to every recipient except agent grants (see
+[Grants](/concepts/grants/)). A new key that you add with `murk add KEY` is
+shared, so every authorized teammate can decrypt it. When you update an
+existing key without `--group`, it stays in its tier. Use the shared tier
+for production credentials, third-party API keys and other secrets for the
+whole team.
 
 ```bash
 # Everyone sees this (prompts for value, hidden input)
 murk add DATABASE_URL
 ```
 
-## Scoped secrets (motes)
+## Group secrets
 
-Scoped secrets are encrypted to only your key: they live in a reserved
-personal group named `me`. When you run `murk add KEY --group me`, the value
-is encrypted so that only you can decrypt
-it: no other recipient, even one with full vault access, can read it. During
-`murk export`, `murk exec`, and `murk get`, a scoped value overrides the
-shared value for the same key. That lets you point `DATABASE_URL` at a local
-database while the rest of the team uses the shared production value, without
-anyone's export clobbering anyone else's.
+A group secret is encrypted only to the members of one named group. Groups
+are experimental. Create the group, add its members, then add the secret to
+it:
+
+```bash
+murk group create ops
+murk group add ops --member bob@example.com
+murk add STRIPE_KEY --group ops
+```
+
+A key's value is either shared or in one group. `murk add KEY --group NAME`
+on a shared key moves it into the group. A recipient who is not a member
+cannot read it, and an agent grant cannot read it. See [working in
+teams](/guides/teams/#listing-and-managing-recipients) for how to list,
+change and sign group membership.
+
+## Private secrets
+
+A private secret is encrypted only to your key. It is in a reserved personal
+group named `me`. When you run `murk add KEY --group me`, murk encrypts the
+value so that only you can decrypt it. No other recipient can read it, even
+one with full vault access.
+
+During `murk export`, `murk exec` and `murk get`, your private value overrides
+the shared or group value of the same key. So you can point `DATABASE_URL`
+at a local database while the rest of the team uses the shared production
+value. Your export does not change the value that anyone else gets.
 
 ```bash
 # Only you see this; it overrides the shared value during export
 murk add DATABASE_URL --group me
 ```
 
-You can also pipe a value in for scripting. Just use a command that doesn't
-leak to shell history:
+You can also pipe a value in for scripting. Use a command that does not
+write the value to your shell history:
 
 ```bash
 pbpaste | murk add DATABASE_URL
@@ -47,20 +73,22 @@ pbpaste | murk add DATABASE_URL
 
 ## Choosing between them
 
-- **Shared**: anything the whole team (or CI) needs the same value for:
-  production API keys, shared database URLs, third-party service credentials.
-- **Scoped**: anything that should differ per developer or stay private to
-  you: a local database URL, a personal API token, a value you don't want
-  even other recipients to read.
+- **Shared**: a value that the whole team needs, such as production API
+  keys, shared database URLs and third-party service credentials.
+- **Group**: a value that only part of the team may read, such as a payment
+  provider key for the people who run operations.
+- **Private**: a value that is different for each developer or only for
+  you, such as a local database URL, a personal API token, or a value that no
+  other recipient may read.
 
-Scoped secrets don't affect who's authorized on the vault: that's the
-recipient list, managed with `murk circle` (see [working in
-teams](/guides/teams/)). They're a second layer of encryption *within* the
-vault, on top of the recipient list. See [how murk's vault format
-works](/concepts/vault-format/) for the on-disk details, and the [`murk
-add`](/reference/cli/#murk-add) reference for the full flag list.
+Tiers do not change who is authorized on the vault. That is the recipient
+list, which you manage with `murk circle` (see [working in
+teams](/guides/teams/)). Tiers add encryption *within* the vault, on top of
+the recipient list. See [how murk's vault format
+works](/concepts/vault-format/) for the details of the file, and the [`murk
+add`](/reference/cli/#murk-add) reference for all the flags.
 
-Every recipient except an agent grant can decrypt every shared secret. Tags
-and descriptions in the schema do not restrict anyone. To limit a secret to
-part of the team, put it in a group (`--group NAME`). To keep it to yourself,
-use `--group me`.
+Tags and descriptions in the schema do not restrict anyone. Every recipient
+except an agent grant can decrypt every shared secret. To limit a secret to
+part of the team, put it in a group (`--group NAME`). To keep it to
+yourself, use `--group me`.
