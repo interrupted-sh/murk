@@ -179,7 +179,7 @@ A command that wants to leak a value it was given can do so. Masking stops only 
 - The command's stdout and stderr are pipes, not your terminal. A program that checks for a terminal may drop color or progress bars, or buffer its output differently. stdin is still your terminal.
 - murk holds back only the end of a chunk that could be the start of a value: at most one byte less than your longest masked value. It writes everything else at once. murk matches each stream on its own.
 - murk exits with the command's exit code. If a signal killed the command, murk raises the same signal.
-- Ctrl-C reaches the command once, straight from the terminal. murk forwards SIGINT, SIGTERM, SIGHUP and SIGQUIT that another process sends to murk alone, for example a harness timeout. murk 0.14.1 does not forward a signal sent from outside a container, such as `docker stop`. In a container, use an init process: see [Containers](https://murk.interrupted.sh/guides/containers/).
+- On Linux, Ctrl-C reaches the command once, straight from the terminal. On macOS, a Ctrl-C or Ctrl-\ typed in the terminal can reach the command twice: once from the terminal and once forwarded by murk. A command that treats a second Ctrl-C as "quit now" can then skip its clean shutdown. murk forwards SIGINT, SIGTERM, SIGHUP and SIGQUIT that another process sends to murk alone, for example a harness timeout. As a container's PID 1, murk also forwards a signal sent from outside the container, such as the SIGTERM from `docker stop` (murk 0.14.1 did not). See [Containers](https://murk.interrupted.sh/guides/containers/).
 - murk waits until both streams close. A background process that inherits them keeps `agent exec` running.
 
 ## Restricting which secrets agents can touch

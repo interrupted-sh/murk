@@ -113,32 +113,38 @@ stop)
     make_vault
     # The app exits 3 on SIGTERM. If murk, as PID 1, does not pass on the
     # SIGTERM from docker stop, docker kills the container after the timeout
-    # instead (exit 137).
-    cid=$(docker run -d \
-        --user "$(id -u):$(id -g)" -e HOME=/tmp \
-        -v "$work/repo:/work:ro" \
-        -v "$work/grant.key:/run/murk/key:ro" \
-        --entrypoint murk "$image" agent exec --only API_KEY -- \
-        sh -c 'trap "exit 3" TERM; echo ready; while :; do sleep 0.1; done')
-    trap 'docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$work"' EXIT
-    tries=0
-    until docker logs "$cid" 2>&1 | grep -qx ready; do
-        tries=$((tries + 1))
-        if [ "$tries" -gt 100 ] || [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != true ]; then
-            echo "FAIL the app did not start under murk agent exec:"
-            docker logs "$cid"
+    # instead (exit 137). With -t, murk also has a terminal and holds its
+    # foreground, so it must still tell docker stop from a terminal key.
+    cids=
+    trap '[ -z "$cids" ] || docker rm -f $cids >/dev/null 2>&1; rm -rf "$work"' EXIT
+    for tty in "" -t; do
+        label="docker run${tty:+ $tty}"
+        cid=$(docker run -d $tty \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$work/repo:/work:ro" \
+            -v "$work/grant.key:/run/murk/key:ro" \
+            --entrypoint murk "$image" agent exec --only API_KEY -- \
+            sh -c 'trap "exit 3" TERM; echo ready; while :; do sleep 0.1; done')
+        cids="$cids $cid"
+        tries=0
+        until docker logs "$cid" 2>&1 | tr -d '\r' | grep -qx ready; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 100 ] || [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != true ]; then
+                echo "FAIL $label: the app did not start under murk agent exec:"
+                docker logs "$cid"
+                exit 1
+            fi
+            sleep 0.1
+        done
+        docker stop -t 10 "$cid" >/dev/null
+        status=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
+        if [ "$status" -eq 3 ]; then
+            echo "ok   $label: docker stop reached the app under murk agent exec as PID 1 (exit 3)"
+        else
+            echo "FAIL $label: docker stop ended the container with exit $status, not the app's exit 3"
             exit 1
         fi
-        sleep 0.1
     done
-    docker stop -t 10 "$cid" >/dev/null
-    status=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
-    if [ "$status" -eq 3 ]; then
-        echo "ok   docker stop reached the app under murk agent exec as PID 1 (exit 3)"
-    else
-        echo "FAIL docker stop ended the container with exit $status, not the app's exit 3"
-        exit 1
-    fi
     ;;
 *)
     echo "unknown mode: $mode (container, devcontainer, os-user or stop)" >&2
