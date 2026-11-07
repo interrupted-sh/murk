@@ -243,6 +243,81 @@ async fn mcp_reloads_only_when_the_vault_bytes_change() {
 }
 
 #[tokio::test]
+async fn mcp_reload_keeps_the_key_the_server_started_with() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (key, grant) = setup_grant(dir.path());
+    let other = dir.path().join("other.key");
+    murk(dir.path(), &key)
+        .args([
+            "agent",
+            "grant",
+            "--name",
+            "two",
+            "--only",
+            "OTHER_KEY",
+            "--out",
+        ])
+        .arg(&other)
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+
+    // The key file now holds another grant's key, and the vault changes so the
+    // next call reloads. The reload must still open the vault as the first
+    // grant, never as the key the file holds now.
+    std::fs::copy(&other, &grant).unwrap();
+    murk(dir.path(), &key)
+        .args(["add", "NEW_KEY", "--vault", "test.murk"])
+        .write_stdin("n\n")
+        .assert()
+        .success();
+
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+    let other_key = get(&client, "OTHER_KEY").await;
+    assert_eq!(other_key.is_error, Some(true), "{}", text(&other_key));
+    assert!(!text(&other_key).contains("other-secret"));
+    let log = stop_server(client, stderr).await;
+    assert_eq!(log.matches("reloaded it").count(), 1, "{log}");
+}
+
+async fn exec(client: &RunningService<RoleClient, ()>, key: &str) -> CallToolResult {
+    client
+        .call_tool(
+            CallToolRequestParams::new("murk_exec")
+                .with_arguments(object!({ "only": [key], "command": ["printenv", key] })),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn mcp_a_revoke_applies_to_murk_exec_on_the_next_call() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (key, grant) = setup_grant(dir.path());
+    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-exec"]).await;
+
+    let before = exec(&client, "API_KEY").await;
+    assert_ne!(before.is_error, Some(true), "{}", text(&before));
+    assert!(text(&before).contains("***API_KEY***"), "{}", text(&before));
+
+    murk(dir.path(), &key)
+        .args(["agent", "revoke", "probe", "--vault", "test.murk"])
+        .assert()
+        .success();
+
+    let after = exec(&client, "API_KEY").await;
+    assert_eq!(after.is_error, Some(true), "{}", text(&after));
+    assert!(
+        text(&after).contains("refusing this call"),
+        "{}",
+        text(&after)
+    );
+    stop_server(client, stderr).await;
+}
+
+#[tokio::test]
 async fn mcp_client_lists_and_calls_tools() {
     let dir = assert_fs::TempDir::new().unwrap();
     let (key, _) = init_vault(&dir);
