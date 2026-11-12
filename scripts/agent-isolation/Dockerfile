@@ -4,13 +4,25 @@
 # An agent image whose only murk credential is a grant key mounted at run time.
 # The image holds the murk binary and nothing secret. The operator's
 # ~/.config/murk is never mounted, so the grant key is the only key present.
+
+# A directory with a Linux murk binary to install instead of the release, for
+# testing a local build. It is empty unless you name one at build time:
+#   docker build --build-context murk-bin=DIR scripts/agent-isolation
+# where DIR holds only the `murk` binary.
+FROM scratch AS murk-bin
+
 FROM debian:bookworm-slim
 
 ARG MURK_VERSION=v0.14.1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*
-RUN set -eu; \
+RUN --mount=type=bind,from=murk-bin,target=/tmp/murk-bin \
+    set -eu; \
+    if [ -e /tmp/murk-bin/murk ]; then \
+        install -m 0755 /tmp/murk-bin/murk /usr/local/bin/murk; \
+        exit 0; \
+    fi; \
     archive="murk-${MURK_VERSION}-$(uname -m)-unknown-linux-gnu.tar.gz"; \
     base="https://github.com/interrupted-sh/murk/releases/download/${MURK_VERSION}"; \
     cd /tmp; \

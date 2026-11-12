@@ -9,9 +9,11 @@
 //! child's whole process group once [`set_group`] names one. A signal the
 //! child sends murk is not echoed back to it, even one sent before murk
 //! knows the child's pid. A child sharing murk's process group already got
-//! what the terminal sends that group, so terminal signals are not forwarded
-//! to it again. [`stop_forwarding`] restores the default actions and
-//! re-raises a signal caught while no child was running.
+//! what the terminal sends that group, so a signal the terminal generated
+//! while that group holds the terminal is not forwarded to it again. Any
+//! other signal with no sender pid, such as one `docker stop` sends to murk
+//! as a container's PID 1, is forwarded. [`stop_forwarding`] restores the
+//! default actions and re-raises a signal caught while no child was running.
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
@@ -43,6 +45,11 @@ static CHILD: AtomicI32 = AtomicI32::new(0);
 /// is claimed by the handler's own re-check, never left behind.
 static PENDING: AtomicU64 = AtomicU64::new(0);
 
+/// An fd on murk's controlling terminal, opened by [`set_child`] so the
+/// handler can ask which process group holds the terminal; -1 when murk has
+/// no controlling terminal.
+static TTY: AtomicI32 = AtomicI32::new(-1);
+
 /// One [`PENDING`] value: the sender's pid in the high half, the signal in
 /// the low half (never 0, so a packed value is never 0 either).
 fn pack(sig: libc::c_int, sender: libc::pid_t) -> u64 {
@@ -67,7 +74,57 @@ fn sender(info: *const libc::siginfo_t) -> libc::pid_t {
     unsafe { (*info).si_pid() }
 }
 
-/// Async-signal-safe handler: atomics and `kill(2)` only.
+/// Whether the kernel generated the signal `info` describes, as it does for a
+/// terminal key or hangup, rather than a process calling `kill(2)`.
+fn sent_by_kernel(info: *const libc::siginfo_t) -> bool {
+    if info.is_null() {
+        return false;
+    }
+    // A process outside murk's pid namespace has no pid in it, so its
+    // `kill(2)` arrives with sender 0 too, but with SI_USER (or SI_QUEUE,
+    // SI_TKILL): every code a process sets is <= 0. The kernel's own signals
+    // have a positive code (SI_KERNEL).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: as in `sender`.
+        unsafe { (*info).si_code > 0 }
+    }
+    // No pid namespaces: sender 0 is always the kernel.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        true
+    }
+}
+
+/// Whether murk's process group, and so a child in it, holds the terminal.
+/// Async-signal-safe: `tcgetpgrp` and `getpgrp` are on POSIX's list.
+fn in_foreground() -> bool {
+    let tty = TTY.load(Ordering::SeqCst);
+    // SAFETY: plain syscalls; a closed or stale fd makes tcgetpgrp fail.
+    tty >= 0 && unsafe { libc::tcgetpgrp(tty) == libc::getpgrp() }
+}
+
+/// Whether a signal `sender` sent murk is the child's already, so forwarding
+/// it to `target` would deliver it twice or echo it back: one the terminal
+/// sent the foreground group the child shares with murk, or one the child
+/// sent itself. `by_kernel` and `foreground` are only asked about a signal
+/// with no sender pid.
+fn child_has_it(
+    sender: libc::pid_t,
+    target: libc::pid_t,
+    by_kernel: impl FnOnce() -> bool,
+    foreground: impl FnOnce() -> bool,
+) -> bool {
+    if sender == 0 {
+        // Only a child in murk's group (a pid target) got the terminal's
+        // signal; a child leading its own group did not.
+        target > 0 && by_kernel() && foreground()
+    } else {
+        sender == target.abs()
+    }
+}
+
+/// Async-signal-safe handler: atomics, `kill(2)`, `tcgetpgrp` and `getpgrp`.
 extern "C" fn forward(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     let target = CHILD.load(Ordering::SeqCst);
     let sender = sender(info);
@@ -85,10 +142,7 @@ extern "C" fn forward(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut l
         }
         return;
     }
-    // Sender 0 is the kernel: a terminal key or hangup, delivered to the
-    // whole foreground process group, so a child in murk's group already has
-    // it. A signal from the child itself is not echoed back.
-    if (sender == 0 && target > 0) || sender == target.abs() {
+    if child_has_it(sender, target, || sent_by_kernel(info), in_foreground) {
         return;
     }
     // SAFETY: kill(2) is async-signal-safe.
@@ -137,9 +191,31 @@ pub(crate) fn install() {
     }
 }
 
-/// Record the child's pid, then forward any signal that arrived first.
+/// Record the child's pid, then forward any signal that arrived first. The
+/// child shares murk's process group, so the controlling terminal is opened
+/// here for the handler to see whether that group holds it.
 pub(crate) fn set_child(pid: u32) {
+    open_tty();
     set_target(pid as libc::pid_t);
+}
+
+/// Open murk's controlling terminal into [`TTY`], once. It stays open for the
+/// rest of the process: a handler may be using it at any time.
+fn open_tty() {
+    if TTY.load(Ordering::SeqCst) >= 0 {
+        return;
+    }
+    // SAFETY: a static NUL-terminated path; fails with ENXIO without a
+    // controlling terminal. O_NOCTTY: never acquire one.
+    let fd = unsafe {
+        libc::open(
+            c"/dev/tty".as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    if fd >= 0 {
+        TTY.store(fd, Ordering::SeqCst);
+    }
 }
 
 /// Forward to the whole process group `pgid` (a child that leads its own
@@ -211,5 +287,56 @@ pub(crate) fn raise_default(sig: libc::c_int) {
         libc::sigaddset(&raw mut set, sig);
         libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
         libc::raise(sig);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::child_has_it;
+
+    const CHILD_PID: libc::pid_t = 4242;
+    fn yes() -> bool {
+        true
+    }
+    fn no() -> bool {
+        false
+    }
+
+    #[test]
+    fn a_terminal_key_the_foreground_child_got_is_not_forwarded() {
+        assert!(child_has_it(0, CHILD_PID, yes, yes));
+    }
+
+    /// `docker stop` against murk as PID 1: sender 0, but sent by a process.
+    #[test]
+    fn a_kill_from_outside_the_pid_namespace_is_forwarded() {
+        assert!(!child_has_it(0, CHILD_PID, no, yes));
+        assert!(!child_has_it(0, CHILD_PID, no, no));
+    }
+
+    /// No controlling terminal, or murk's group runs in the background: the
+    /// terminal did not send the child this signal.
+    #[test]
+    fn a_kernel_signal_outside_the_foreground_is_forwarded() {
+        assert!(!child_has_it(0, CHILD_PID, yes, no));
+    }
+
+    /// A child leading its own group (the editor) is not in murk's group, so
+    /// it did not get what the terminal sent murk.
+    #[test]
+    fn a_kernel_signal_is_forwarded_to_a_child_group() {
+        assert!(!child_has_it(0, -CHILD_PID, yes, yes));
+    }
+
+    #[test]
+    fn the_childs_own_signal_is_not_echoed() {
+        assert!(child_has_it(CHILD_PID, CHILD_PID, no, no));
+        assert!(child_has_it(CHILD_PID, -CHILD_PID, no, no));
+    }
+
+    #[test]
+    fn another_process_signal_is_forwarded_whatever_holds_the_terminal() {
+        assert!(!child_has_it(77, CHILD_PID, yes, yes));
+        assert!(!child_has_it(77, -CHILD_PID, yes, yes));
     }
 }
