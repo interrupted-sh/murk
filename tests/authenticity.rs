@@ -1445,6 +1445,136 @@ fn reserved_names_are_refused_by_export_and_exec_unless_allowed() {
         .stdout("touch pwned");
 }
 
+/// Shell prompt and hook variables, package-manager sources, client configs
+/// and scratch directories: each runs code or redirects a tool for whoever
+/// loads the vault. Export (shell and JSON), exec and agent exec refuse every
+/// one of them, case-insensitively; `--allow-reserved` lets them through.
+/// Ordinary secrets that share a stem stay exportable.
+#[test]
+fn shell_hooks_and_tool_redirects_are_reserved() {
+    const RESERVED: &[&str] = &[
+        "PROMPT",
+        "RPROMPT",
+        "RPS1",
+        "SPROMPT",
+        "TIMEFMT",
+        "MAILPATH",
+        "NULLCMD",
+        "FPATH",
+        "INPUTRC",
+        "fish_function_path",
+        "CC",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "PHPRC",
+        "GOPROXY",
+        "GOTOOLCHAIN",
+        "UV_INDEX_URL",
+        "YARN_YARN_PATH",
+        "COREPACK_NPM_REGISTRY",
+        "HOMEBREW_BOTTLE_DOMAIN",
+        "KUBECONFIG",
+        "DOCKER_HOST",
+        "AWS_CONFIG_FILE",
+        "GNUPGHOME",
+        "SSH_AUTH_SOCK",
+        "CURL_HOME",
+        "TMPDIR",
+        "HISTFILE",
+        "TERMINFO",
+        "NLSPATH",
+        "LUA_INIT",
+        "XDG_RUNTIME_DIR",
+        "DIRENV_CONFIG",
+    ];
+    const ORDINARY: &[&str] = &[
+        "MAIL_PASSWORD",
+        "DOCKER_PASSWORD",
+        "SSH_PRIVATE_KEY",
+        "GOOGLE_API_KEY",
+        "YARN_NPM_AUTH_TOKEN",
+        "HOMEBREW_GITHUB_API_TOKEN",
+        "UV_THREADPOOL_SIZE",
+        "NODE_ENV",
+    ];
+    let base = TempDir::new().unwrap();
+    let (alice, repo) = alice_repo(base.path());
+    for name in RESERVED {
+        alice
+            .murk(&repo)
+            .args(["add", name])
+            .write_stdin("$(touch pwned)\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("reserved environment name"));
+    }
+
+    let mut agent_exec = vec!["agent", "exec", "--allow-operator-key"];
+    for name in RESERVED {
+        agent_exec.extend(["--only", name]);
+    }
+    agent_exec.extend(["--", "true"]);
+    for args in [
+        &["export"][..],
+        &["export", "--json"][..],
+        &["exec", "--", "true"][..],
+        &agent_exec[..],
+    ] {
+        let out = alice.murk(&repo).args(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?} accepted reserved names");
+        assert!(out.stdout.is_empty(), "{args:?} printed before refusing");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        for name in RESERVED {
+            assert!(
+                stderr.contains(name),
+                "{args:?} did not name {name}: {stderr}"
+            );
+        }
+    }
+
+    let out = alice
+        .murk(&repo)
+        .args(["export", "--allow-reserved"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for name in RESERVED {
+        assert!(stdout.contains(&format!("export {name}=")), "{stdout}");
+    }
+    alice
+        .murk(&repo)
+        .args([
+            "exec",
+            "--allow-reserved",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$KUBECONFIG\"",
+        ])
+        .assert()
+        .success()
+        .stdout("$(touch pwned)");
+
+    // Ordinary secrets with similar names load without the flag.
+    let base = TempDir::new().unwrap();
+    let (alice, repo) = alice_repo(base.path());
+    for name in ORDINARY {
+        alice
+            .murk(&repo)
+            .args(["add", name])
+            .write_stdin("value\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("reserved").not());
+    }
+    let out = alice.murk(&repo).arg("export").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for name in ORDINARY {
+        assert!(stdout.contains(&format!("export {name}=")), "{stdout}");
+    }
+}
+
 /// MURK_* names are reserved too: a vault must not switch off a nested
 /// murk's strict mode or choose its trusted signers.
 #[test]

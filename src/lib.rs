@@ -175,9 +175,103 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "PS4",
     "PROMPT_COMMAND",
     "CDPATH",
+    // bash runs `$(...)` in MAILPATH messages; zsh expands its prompts,
+    // TIMEFMT and WATCHFMT under PROMPT_SUBST (common with prompt themes),
+    // runs NULLCMD/READNULLCMD for a bare redirection, and autoloads functions
+    // and modules from FPATH/MODULE_PATH; INPUTRC key bindings can type
+    // commands; fish autoloads functions from fish_function_path.
+    "PROMPT",
+    "PROMPT2",
+    "PROMPT3",
+    "PROMPT4",
+    "RPROMPT",
+    "RPROMPT2",
+    "RPS1",
+    "RPS2",
+    "SPROMPT",
+    "TIMEFMT",
+    "WATCHFMT",
+    "MAILPATH",
+    "NULLCMD",
+    "READNULLCMD",
+    "FPATH",
+    "MODULE_PATH",
+    "INPUTRC",
+    "FISH_FUNCTION_PATH",
+    "FISH_COMPLETE_PATH",
+    "FISH_USER_PATHS",
+    // Interpreter and build hooks outside the prefix families: compilers that
+    // make and cargo build scripts run, Node's TLS switch and REPL module,
+    // irb/gem/PHP start-up files.
+    "CC",
+    "CXX",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "NODE_REPL_EXTERNAL_MODULE",
+    "IRBRC",
+    "GEMRC",
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    // Where package managers download code from, and which toolchain they
+    // fetch. Exact names: `GO`, `UV_`, `YARN_` and `HOMEBREW_` prefixes would
+    // catch application secrets such as GOOGLE_API_KEY, YARN_NPM_AUTH_TOKEN or
+    // HOMEBREW_GITHUB_API_TOKEN.
+    "GOPROXY",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GOINSECURE",
+    "GOTOOLCHAIN",
+    "GOENV",
+    "GOVCS",
+    "UV_INDEX",
+    "UV_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "UV_FIND_LINKS",
+    "UV_INSECURE_HOST",
+    "UV_CONFIG_FILE",
+    "UV_PYTHON_INSTALL_MIRROR",
+    "YARN_YARN_PATH",
+    "YARN_RC_FILENAME",
+    "YARN_NPM_REGISTRY_SERVER",
+    "YARN_REGISTRY",
+    "COREPACK_NPM_REGISTRY",
+    "HOMEBREW_API_DOMAIN",
+    "HOMEBREW_BOTTLE_DOMAIN",
+    "HOMEBREW_ARTIFACT_DOMAIN",
+    "HOMEBREW_BREW_GIT_REMOTE",
+    "HOMEBREW_CORE_GIT_REMOTE",
+    // Config files and daemons that clients trust: a kubeconfig, AWS config
+    // or docker config in the repo can run a credential command, a chosen
+    // DOCKER_HOST receives registry credentials, GNUPGHOME picks the keys
+    // signatures verify against, SSH_AUTH_SOCK the agent ssh signs with.
+    "KUBECONFIG",
+    "KUBE_EDITOR",
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "DOCKER_CERT_PATH",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CA_BUNDLE",
+    "GNUPGHOME",
+    "SSH_AUTH_SOCK",
+    "CURL_HOME",
+    "WGETRC",
+    // Where tools write scratch files and shell history, and where libc and
+    // curses read locale, message catalogs, host aliases and terminal
+    // descriptions.
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TMPPREFIX",
+    "HISTFILE",
+    "NLSPATH",
+    "LOCPATH",
+    "HOSTALIASES",
+    "TERMINFO",
+    "TERMINFO_DIRS",
     // Where tools read their configuration, and commands tools run.
     "HOME",
-    "XDG_CONFIG_HOME",
     "EDITOR",
     "VISUAL",
     "PAGER",
@@ -193,10 +287,15 @@ const RESERVED_ENV_NAMES: &[&str] = &[
 /// `GIT_*` variable, including `GIT_SSH_COMMAND` and `GIT_CONFIG_*`), bash
 /// exported functions, interpreter and build-tool families whose variables
 /// load code (`PYTHON*` includes `PYTHONPATH` and `PYTHONUSERBASE`), TLS trust
-/// (`SSL_CERT_FILE`), npm configuration (`npm_config_script_shell`), and
-/// murk's own settings (a vault must not switch off `MURK_STRICT` or pick the
-/// trusted signers of a nested murk). `NODE_` is not a prefix: `NODE_ENV` is
-/// an ordinary application setting.
+/// (`SSL_CERT_FILE`), npm configuration (`npm_config_script_shell`), Lua
+/// (`LUA_INIT` runs code, `LUA_PATH` picks modules), the XDG base directories
+/// (where tools read config and murk puts `murk edit`'s scratch file), direnv
+/// (`DIRENV_CONFIG` can allow `.envrc` files, `DIRENV_BASH` is the shell it
+/// runs), and murk's own settings (a vault must not switch off `MURK_STRICT`
+/// or pick the trusted signers of a nested murk). `NODE_` is not a prefix:
+/// `NODE_ENV` is an ordinary application setting. Nor are `MAIL`, `DOCKER_`
+/// or `SSH_`: `MAIL_PASSWORD`, `DOCKER_PASSWORD` and `SSH_PRIVATE_KEY` are
+/// ordinary secrets.
 const RESERVED_ENV_PREFIXES: &[&str] = &[
     "LD_",
     "DYLD_",
@@ -216,6 +315,9 @@ const RESERVED_ENV_PREFIXES: &[&str] = &[
     "GEM_",
     "BUNDLE_",
     "NPM_CONFIG_",
+    "LUA_",
+    "XDG_",
+    "DIRENV_",
     "MURK_",
 ];
 
