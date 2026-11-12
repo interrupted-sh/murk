@@ -32,7 +32,7 @@ MURK_KEY_FILE=~/.config/murk/agent-keys/<vault-hash>-codex MURK_AGENT=1 \
   murk agent exec --only STRIPE_SECRET_KEY -- python scripts/refund.py
 ```
 
-`MURK_AGENT=1` forces strict mode for that process, even if `MURK_STRICT` isn't set. murk then doesn't look up your stored key in `~/.config/murk/keys`: the process must present the grant key or fail closed. This holds only while `MURK_AGENT` and the key variables stay set. An agent running as your user can unset `MURK_AGENT`, `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE`, and its next `murk` command finds your stored key. A change to this lookup is planned for 0.16. Until then, run the agent as a separate OS user or in a container (see [Agent isolation](/guides/agent-isolation/)). `murk agent init` does the whole safe-path setup (optionally setting the allow-list, minting the grant, and printing the exact run command) in one step. See [Environment variables](/concepts/env-vars/) for what each variable does, and [AI agents & MCP](/guides/ai-agents-mcp/) for the full walkthrough, including serving a grant over MCP with `murk mcp`.
+`MURK_AGENT=1` forces strict mode for that process, even if `MURK_STRICT` isn't set. murk then doesn't look up your stored key in `~/.config/murk/keys`: the process must present the grant key or fail closed. This holds only while `MURK_AGENT` and the key variables stay set. An agent running as your user can unset `MURK_AGENT`, `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE`, and its next `murk` command finds your stored key. A change to this lookup is planned for 0.15. Until then, run the agent as a separate OS user or in a container (see [Agent isolation](/guides/agent-isolation/)). `murk agent init` does the whole safe-path setup (optionally setting the allow-list, minting the grant, and printing the exact run command) in one step. See [Environment variables](/concepts/env-vars/) for what each variable does, and [AI agents & MCP](/guides/ai-agents-mcp/) for the full walkthrough, including serving a grant over MCP with `murk mcp`.
 
 ## What constrains a grant
 
@@ -60,7 +60,7 @@ Do that. A copy murk can't reach still trusts the revoked key. Such a copy was w
 
 A key file stops working at the expiry written into it (`# murk-grant-expires:`), whatever the vault says. A key file without that line is bounded only by the grant record in the vault, and that signer can rewrite the record. That covers a file minted by an older murk and a bare key line.
 
-Revocation and policy changes apply when a process loads the vault. A running `murk mcp` server checks the vault file before every tool call and applies a change from the next call. A loaded binding object keeps the vault state from its last load, so it still serves a revoked grant: reload it after you change access. Grant expiry is checked again on every value read.
+Revocation and policy changes apply when a process loads the vault. A running `murk mcp` server checks the vault file before every tool call and reloads it when it changed, so a revoke or a tighter policy applies from its next call. It also refuses a vault older than the newest one it has seen, or a fork of it, so writing the pre-revoke file back does not revive the grant. A loaded binding object keeps the vault state from its last load, so reload it after you change access. Grant expiry is checked again on every value read. A grant key still decrypts older vault versions from git history with plain age, so rotate after you revoke.
 
 ## Grants never sign or trust
 
