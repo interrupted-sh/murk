@@ -407,4 +407,32 @@ describe("a revoke that fails at the vault step", () => {
     expect(vaultGrants()).not.toContain(murkName);
     expect(await status(id)).toBe("revoked");
   });
+
+  it("a vault replaced or removed: the revoke stays pending, and the retry after a restore removes the grant", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const damages: Array<[string, () => void]> = [
+      ["replaced with an empty object", () => writeFileSync(vaultFile, "{}\n")],
+      ["removed", () => rmSync(vaultFile)],
+    ];
+    for (const [label, damage] of damages) {
+      const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+      const murkName = `bb-${id}`;
+      const good = readFileSync(vaultFile);
+      damage();
+      try {
+        const failed = await runCli(["grant", "revoke", id], {});
+        expect(failed.exitCode, label).toBe(1);
+        expect(failed.stderr, label).toContain("still live in the vault");
+        expect(await status(id), label).toBe("REVOKE-PENDING");
+      } finally {
+        writeFileSync(vaultFile, good);
+      }
+      expect(vaultGrants(), label).toContain(murkName);
+      const retried = await runCli(["grant", "revoke", id], {});
+      expect(retried.exitCode, `${label}: ${retried.stderr}`).toBe(0);
+      expect(vaultGrants(), label).not.toContain(murkName);
+      expect(await status(id), label).toBe("revoked");
+    }
+  });
 });

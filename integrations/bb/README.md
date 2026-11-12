@@ -45,7 +45,7 @@ To upgrade the vault where it belongs, do it on the default branch: run `murk tr
 bb murk grant mint --keys API_KEY --upgrade
 ```
 
-`bb murk grant revoke` never calls murk on a pre-0.14 vault: that format cannot hold agent grants, so there is nothing in it to revoke. It deletes the grant's key file and marks the grant revoked.
+`bb murk grant revoke` never runs murk on a pre-0.14 vault, so it never upgrades one. That format cannot hold agent grants, so a grant's vault that now reads as pre-0.14 is not the vault the grant was minted into. The revoke then deletes the grant's key file and leaves the grant `REVOKE-PENDING` until the vault is restored and a retry removes the grant.
 
 ## Changelog
 

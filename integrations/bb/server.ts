@@ -670,10 +670,20 @@ export default async function plugin(bb: BbPluginApi) {
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
-    // A pre-0.14 vault cannot hold agent grants, so there is nothing in it to
-    // revoke, and calling murk would risk its first 0.14 save. Revoke locally.
+    // Only murk can say the grant is gone from the vault. A vault that now
+    // reads as pre-0.14 is not the one the grant was minted into (mint never
+    // writes a grant into that format), and murk must not save it, so the
+    // revoke stays pending until the vault is back.
     let vaultError: string | null = null;
-    if (!existsSync(grant.vaultPath) || !readVaultFormat(grant.vaultPath).legacy) {
+    let legacy = false;
+    try {
+      legacy = readVaultFormat(grant.vaultPath).legacy;
+    } catch {
+      // unreadable or missing: murk reports it below
+    }
+    if (legacy) {
+      vaultError = `${grant.vaultPath} is in the pre-0.14 format, which cannot hold this grant; restore the vault the grant was minted into`;
+    } else {
       try {
         await revokeGrant(grant.vaultPath, grant.murkName, resolveOperatorKey((await settings.get()).keyFile));
       } catch (error) {

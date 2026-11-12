@@ -183,15 +183,21 @@ export async function listGrants(vaultPath: string, operatorKey: string | null):
   return z.array(grantInfoSchema).parse(JSON.parse(result.stdout));
 }
 
-/** Revoke a grant by its murk name. Missing grants are treated as already revoked. */
+/**
+ * Revoke a grant by its murk name. Succeeds when murk removed it, or when murk
+ * loaded the vault (every check passed) and reports that it holds no grant of
+ * that name. Any other failure, a missing vault included, throws.
+ */
 export async function revokeGrant(vaultPath: string, name: string, operatorKey: string | null): Promise<void> {
   const result = await runMurk(["agent", "revoke", name, "--vault", vaultPath], {
     keyFile: operatorKey,
     cwd: path.dirname(vaultPath),
   });
-  if (result.code !== 0 && !/no grant named|not found/i.test(result.stderr + result.stdout)) {
-    throw murkError(`revoking grant ${name}`, result);
-  }
+  if (result.code === 0) return;
+  // Strip terminal colours, then match murk's exact message for this name.
+  const output = `${result.stderr}\n${result.stdout}`.replace(/\x1b\[[0-9;]*m/g, "");
+  const gone = new RegExp(`(^|\\s)grant not found: ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`, "m");
+  if (!gone.test(output)) throw murkError(`revoking grant ${name}`, result);
 }
 
 /**
