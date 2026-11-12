@@ -655,13 +655,13 @@ A grant load reads and writes no trust pin, so it has no rollback check. Every w
 
 This section states what each command does. [docs/cli-reference.md](docs/cli-reference.md), generated from the CLI, lists every flag with its help text.
 
-### `murk init [--vault NAME]`
+### `murk init [--vault NAME] [--reuse-key | --separate-key]`
 
 Interactive setup. Prompts for a display name. Then:
 
-1. Finds your key. It looks at `MURK_KEY` or `MURK_KEY_FILE` from the environment first. Then it looks at the key stored at `~/.config/murk/keys/<vault-hash>` for this checkout or for the same vault in a sibling worktree (the lookup under Discovery). Only when neither exists does it generate an age keypair via BIP39 (a 24-word mnemonic encodes the key directly) and write the secret key to `~/.config/murk/keys/<vault-hash>` with mode 0600. The key file is created exclusively, so init never overwrites one.
+1. Finds your key. It looks at `MURK_KEY` or `MURK_KEY_FILE` from the environment first. Then it looks at the key stored at `~/.config/murk/keys/<vault-hash>` for this checkout or for the same vault in a sibling worktree (the lookup under Discovery). Then it looks for keys stored for other vaults in the same directory (see Several vaults in one directory below). Only when none of these exists does it generate an age keypair via BIP39 (a 24-word mnemonic encodes the key directly) and write the secret key to `~/.config/murk/keys/<vault-hash>` with mode 0600. The key file is created exclusively, so init never overwrites one.
 2. For a newly generated key, prints the BIP39 24-word recovery phrase to stderr. A reused key prints none (use `murk recover`).
-3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes a `MURK_KEY_FILE` path from the environment. If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes.
+3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes a `MURK_KEY_FILE` path from the environment. If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes. A key for a second vault in the same directory never touches `.env`.
 4. Creates the `.murk` vault with your pubkey as the first recipient, a fresh `vault_id` and `generation` 1, signed by your key when that key can sign, and records it in the local trust pin with the creator as its trusted signer.
 
 If the vault already exists, init does not change it. It uses the same key lookup and writes `.env` by the same rules. Then it reports whether the key is a recipient:
@@ -669,7 +669,21 @@ If the vault already exists, init does not change it. It uses the same key looku
 - A recipient is told to run `murk trust` once per machine if this machine has no trust pin for the vault yet.
 - A key that is not a recipient prints its public key and, for an age or ssh-ed25519 key, its signing-key fingerprint, to send to someone who can authorize it.
 
-init never replaces a stored key file. To get a new identity, move the key file away first. In strict or agent mode, init neither uses nor replaces a stored key. With no key in the environment and a stored key present (here or in a sibling worktree), it refuses. Set `MURK_KEY_FILE` to that path to use it.
+init never replaces a stored key file. To get a new identity, move the key file away first. In strict or agent mode, init neither uses nor replaces a stored key. With no key in the environment and a stored key present (here or in a sibling worktree), it refuses without printing where the key is stored.
+
+#### Several vaults in one directory
+
+A repository can hold one vault for each environment (`.murk`, `staging.murk`, `prod.murk`). When the vault has no stored key of its own, init looks for keys stored for the other vaults in its directory: a regular file (not a symlink) of that name in this checkout, or at the same relative directory of a sibling worktree, for which the Discovery lookup finds a key. It reads no vault file. Keys with the same public key count as one offer.
+
+- On a terminal, with no flag, init asks once: reuse one of the offered keys (the default vault's key first, and it is the default answer), or make a separate key.
+- `--reuse-key` reuses the offered key without asking. It refuses when the offered keys differ, and when there is nothing to reuse (it never generates a key instead).
+- `--separate-key` generates a new key without asking.
+- Without a terminal and without a flag, init refuses and names the two flags.
+- In strict or agent mode init never reads an offered key and never asks. With no flag or with `--reuse-key` it refuses, and it prints no key-store path. `--separate-key` still generates a new key.
+
+Reuse stores the same secret key for the new vault, with the same exclusive 0600 write as a generated key. Both choices leave `.env` unchanged, and both print how commands find the key (`--vault` or `MURK_VAULT`). A `MURK_KEY` or `MURK_KEY_FILE` in the environment whose key is one of the offered keys (for example from the first vault's `.env`) narrows the offer to that key. It does not decide for the new vault, so the new vault still gets a stored key of its own.
+
+The recipients, trust pin, grants and policy of each vault stay separate.
 
 ---
 

@@ -154,6 +154,8 @@ murk add DATABASE_URL --group me
 pbpaste | murk add DATABASE_URL
 ```
 
+A vault holds one value for each key. For a different value in development, staging and production, use one vault for each environment (`murk init --vault prod.murk`). Each vault has its own recipients, so production can be for the operations team only. See [Environments](https://murk.interrupted.sh/guides/environments/).
+
 ## Teams
 
 ```bash
@@ -402,7 +404,7 @@ export MURK_KEY_FILE=~/.config/murk/restored.key
 |---------|-------------|
 | `murk completion generate\|install SHELL` | Generate or install shell completions |
 
-Every vault command accepts `--vault FILE` (or `MURK_VAULT`, default `.murk`). `ls`, `export`, `info`, `exec` and `agent plan` filter by `--tag`. `ls`, `export`, `info`, `diff` and `agent plan` support `--json`. See `murk <command> --help` for the full flag list, or [docs/cli-reference.md](docs/cli-reference.md) for the complete reference (generated from the binary, so it stays in sync).
+Every vault command accepts `--vault FILE` (or `MURK_VAULT`, default `.murk`), so one repository can hold a vault for each environment (see [Environments](https://murk.interrupted.sh/guides/environments/)). `ls`, `export`, `info`, `exec` and `agent plan` filter by `--tag`. `ls`, `export`, `info`, `diff` and `agent plan` support `--json`. See `murk <command> --help` for the full flag list, or [docs/cli-reference.md](docs/cli-reference.md) for the complete reference (generated from the binary, so it stays in sync).
 
 ## Pre-commit hooks
 

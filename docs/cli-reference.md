@@ -117,6 +117,8 @@ Initialize a vault or reuse its existing key
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
+* `--reuse-key` — When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking
+* `--separate-key` — When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking
 
 
 

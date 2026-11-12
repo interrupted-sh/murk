@@ -4,13 +4,19 @@
 .SH NAME
 murk\-init \- Initialize a vault or reuse its existing key
 .SH SYNOPSIS
-\fBmurk init\fR [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBmurk init\fR [\fB\-\-vault\fR] [\fB\-\-reuse\-key\fR] [\fB\-\-separate\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Initialize a vault or reuse its existing key
 .SH OPTIONS
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
+.TP
+\fB\-\-reuse\-key\fR
+When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking
+.TP
+\fB\-\-separate\-key\fR
+When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

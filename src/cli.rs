@@ -64,6 +64,14 @@ pub enum Command {
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
+        /// When another vault in this directory already has a key stored on
+        /// this machine, store that key for this vault too, without asking
+        #[arg(long, conflicts_with = "separate_key")]
+        reuse_key: bool,
+        /// When another vault in this directory already has a key stored on
+        /// this machine, make a new key for this vault, without asking
+        #[arg(long)]
+        separate_key: bool,
     },
 
     /// Write a .envrc for direnv integration

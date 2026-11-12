@@ -60,6 +60,8 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
         }
         'murk;init' {
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
+            [CompletionResult]::new('--reuse-key', '--reuse-key', [CompletionResultType]::ParameterName, 'When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking')
+            [CompletionResult]::new('--separate-key', '--separate-key', [CompletionResultType]::ParameterName, 'When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

@@ -87,8 +87,9 @@ pub use groups::{
 };
 pub use info::{InfoEntry, VaultInfo, format_info_lines, lifecycle_segment, vault_info};
 pub use init::{
-    DiscoveredKey, InitStatus, check_init_status, create_vault, discover_existing_key,
-    discover_stored_key, pin_created_vault,
+    DiscoveredKey, InitStatus, NeighbourKey, check_init_status, create_vault,
+    discover_existing_key, discover_neighbour_keys, discover_stored_key, has_stored_key,
+    neighbour_vaults_with_keys, pin_created_vault,
 };
 pub use merge::{MergeDriverOutput, run_merge_driver};
 pub use policy::{
