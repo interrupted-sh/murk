@@ -818,16 +818,12 @@ describe("operator key", () => {
     });
   });
 
-  it("rejects a relative or missing keyFile without echoing the path", async () => {
+  it("rejects a relative or missing keyFile, naming it to the operator", async () => {
     await host.harness.behavior.setSettings({ keyFile: "keys/me.key" });
-    const relative = await mint();
-    expect(relative.stderr).toContain("the keyFile setting must be an absolute path");
-    expect(relative.stderr).not.toContain("keys/me.key");
+    expect((await mint()).stderr).toContain("the keyFile setting must be an absolute path, got keys/me.key");
     const missing = path.join(tmpRoot, "no-such.key");
     await host.harness.behavior.setSettings({ keyFile: missing });
-    const gone = await mint();
-    expect(gone.stderr).toContain("the keyFile setting names a file that does not exist");
-    expect(gone.stderr).not.toContain(missing);
+    expect((await mint()).stderr).toContain(`the keyFile setting points at ${missing}, which does not exist`);
   });
 });
 
