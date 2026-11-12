@@ -116,6 +116,7 @@ mod signature;
 
 pub use load::{
     InspectedVault, RevisionTrust, decrypt_vault, decrypt_vault_revision, inspect_vault, load_vault,
+    load_parsed_vault,
 };
 /// Escape and truncate vault-supplied text for display (see `validate::show`).
 // Internal helpers surfaced at the crate root only for the split-out unit and

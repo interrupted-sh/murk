@@ -373,6 +373,13 @@ pub enum Command {
         /// not sandboxed.
         #[arg(long = "allow-exec")]
         allow_exec: bool,
+        /// Enable the murk_get tool, which returns a secret value to the agent
+        ///
+        /// Off by default. The value lands in the model's context and its
+        /// transcript. Prefer --allow-exec, which injects secrets without showing
+        /// them.
+        #[arg(long = "allow-get")]
+        allow_get: bool,
     },
 
     /// Manage the agent access policy (experimental)
@@ -710,6 +717,9 @@ pub enum AgentCommand {
         /// Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)
         #[arg(long)]
         allow_exec: bool,
+        /// Also enable the `murk_get` tool in the MCP server (writes `--allow-get` into the client config)
+        #[arg(long)]
+        allow_get: bool,
         /// Grant time to live, e.g. 30m, 2h or 7d, up to 365d. Reads fail closed after expiry
         #[arg(long, default_value = "2h")]
         ttl: String,

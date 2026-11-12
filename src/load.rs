@@ -746,17 +746,31 @@ impl InspectedVault {
 /// assess it against this machine's trust state without enforcing the verdict.
 pub fn inspect_vault(vault_path: &str) -> Result<InspectedVault, MurkError> {
     let secret_key = env::resolve_key_for_vault(vault_path).map_err(MurkError::Key)?;
+    let identity = parse_load_identity(secret_key.expose_secret())?;
+    let vault = read_vault(vault_path)?;
+    inspect_read(vault_path, vault, identity, secret_key.expose_secret())
+}
 
-    let identity = crypto::parse_identity(secret_key.expose_secret()).map_err(|e| {
+/// Parse the key a load uses, with the same message as a key that is not set.
+fn parse_load_identity(secret_key: &str) -> Result<crypto::MurkIdentity, MurkError> {
+    crypto::parse_identity(secret_key).map_err(|e| {
         // Same shape as the not-set error: summary first, one action per line.
         MurkError::Key(format!(
             "{e}\nfor an age key, set MURK_KEY\nfor an SSH key, set MURK_KEY_FILE=~/.ssh/id_ed25519"
         ))
-    })?;
+    })
+}
 
-    let vault = read_vault(vault_path)?;
+/// Decrypt `vault`, read from `vault_path`, as `identity` (whose key text is
+/// `secret_key`) and assess it, without enforcing the verdict.
+fn inspect_read(
+    vault_path: &str,
+    vault: types::Vault,
+    identity: crypto::MurkIdentity,
+    secret_key: &str,
+) -> Result<InspectedVault, MurkError> {
     if let Some(blob) = crate::agents::loader_blob(&vault, &identity) {
-        return inspect_as_grant(vault, identity, secret_key.expose_secret(), &blob);
+        return inspect_as_grant(vault, identity, secret_key, &blob);
     }
     let (murk, signer_vk) = decrypt_vault_with_signature(&vault, &identity)?;
     let mut inspected = InspectedVault {
@@ -789,6 +803,23 @@ pub fn load_vault(
     vault_path: &str,
 ) -> Result<(types::Vault, types::Murk, crypto::MurkIdentity), MurkError> {
     inspect_vault(vault_path)?.into_trusted(vault_path)
+}
+
+/// [`load_vault`] for a vault the caller already read from `vault_path` and
+/// parsed ([`crate::vault::parse`]), opened with `secret_key` (the key text a
+/// resolver returned) instead of a key resolved now. The MAC, signature, trust
+/// pin and grant expiry are checked exactly as in [`load_vault`].
+///
+/// For a long-running reader that must judge the bytes it hashed: `murk mcp`
+/// reloads a changed vault through here with the key it started with, so a
+/// reload can neither race a second read of the file nor pick up another key.
+pub fn load_parsed_vault(
+    vault_path: &str,
+    vault: types::Vault,
+    secret_key: &str,
+) -> Result<(types::Vault, types::Murk, crypto::MurkIdentity), MurkError> {
+    let identity = parse_load_identity(secret_key)?;
+    inspect_read(vault_path, vault, identity, secret_key)?.into_trusted(vault_path)
 }
 
 /// How far this machine trusts a git revision that [`decrypt_vault_revision`]
