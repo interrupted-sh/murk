@@ -23,13 +23,35 @@ pub(crate) fn cmd_merge_driver(
         read("ours", ours_path),
         read("theirs", theirs_path),
     ];
-    // `.murk.*` in .gitattributes also matches files that are not vaults
-    // (`.murk.bak`, `.murk.orig`, an editor swap file). Merge those as text,
-    // as git does without a driver: a clean merge, or a conflict with
-    // markers. Never fail with ours left in place and no markers, which a
-    // routine `git add` would commit as the resolution.
-    if !sides.iter().any(|side| parses_as_vault(side)) {
-        merge_as_text(base_path, ours_path, theirs_path, vault_path);
+    // Only three vaults are merged as vaults. Every other combination ends in
+    // a clean merge or a conflict whose file shows both sides, never a
+    // conflict that leaves ours in place with no markers, which a routine
+    // `git add` would commit as the resolution.
+    match sides.each_ref().map(|side| shape(side)) {
+        [Shape::Vault, Shape::Vault, Shape::Vault] => {}
+        // Both branches created the vault (`murk init --vault .murk.staging`
+        // on each): two separate vaults, which no merge can combine.
+        [Shape::Empty, Shape::Vault, Shape::Vault] => {
+            refuse_add_add(ours_path, &sides[1], &sides[2], vault_path)
+        }
+        // `.murk.*` also matches files that are not vaults (`.murk.bak`, an
+        // editor swap file): merge them as text, as git does without a driver.
+        shapes if !shapes.contains(&Shape::Vault) => merge_as_text(
+            base_path,
+            ours_path,
+            theirs_path,
+            vault_path,
+            "is not a murk vault",
+        ),
+        // A vault on one side and something else on another (a vault emptied
+        // or overwritten on one branch).
+        _ => merge_as_text(
+            base_path,
+            ours_path,
+            theirs_path,
+            vault_path,
+            "is a murk vault on one side only",
+        ),
     }
     let [base_contents, ours_contents, theirs_contents] = sides.map(|side| {
         String::from_utf8(side).unwrap_or_else(|_| die(&"a merge input is not UTF-8 text", 1))
@@ -126,18 +148,114 @@ pub(crate) fn cmd_merge_driver(
     }
 }
 
-/// Whether `bytes` is a murk vault file, by the same parser the driver uses.
-fn parses_as_vault(bytes: &[u8]) -> bool {
-    std::str::from_utf8(bytes).is_ok_and(|text| vault::parse(text).is_ok())
+/// What a merge input looks like.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// No content: git's base for a file both branches added.
+    Empty,
+    /// A JSON object with a `version` and `recipients` or `secrets`: a vault,
+    /// whether or not this murk can parse it (a newer format version is
+    /// still a vault, refused by the vault merge, never merged as text).
+    Vault,
+    /// Anything else: a backup, a swap file, text.
+    Other,
 }
 
-/// Merge a non-vault file as git would without a driver: `git merge-file`
-/// writes the result into ours (`%A`), with conflict markers where both sides
+fn shape(bytes: &[u8]) -> Shape {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Shape::Empty;
+    }
+    match serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(bytes) {
+        Ok(obj)
+            if obj.contains_key("version")
+                && (obj.contains_key("recipients") || obj.contains_key("secrets")) =>
+        {
+            Shape::Vault
+        }
+        _ => Shape::Other,
+    }
+}
+
+/// The secret names a vault file lists, sorted (not yet terminal-safe).
+fn secret_names(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("secrets")
+                .and_then(|s| s.as_object())
+                .map(|s| s.keys().cloned().collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Both branches created the same vault: two separate vaults, with their own
+/// ids, recipients and keys, which no merge can combine. Write both sides
+/// into ours between conflict markers, so the file cannot be committed as
+/// either side by accident, say how to keep one side and which secrets to
+/// redo, and exit 1.
+fn refuse_add_add(ours_path: &str, ours: &[u8], theirs: &[u8], name: Option<&str>) -> ! {
+    let name = name.unwrap_or(".murk");
+    let mut text = format!("<<<<<<< ours:{name}\n").into_bytes();
+    for (side, marker) in [
+        (ours, "=======\n".to_string()),
+        (theirs, format!(">>>>>>> theirs:{name}\n")),
+    ] {
+        text.extend_from_slice(side);
+        if !side.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(marker.as_bytes());
+    }
+    fs::write(ours_path, text)
+        .unwrap_or_else(|e| die(&format_args!("writing {ours_path}: {e}"), 1));
+
+    let (ours_names, theirs_names) = (secret_names(ours), secret_names(theirs));
+    let only = |a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>| {
+        let names: Vec<String> = a
+            .difference(b)
+            .map(|n| murk_cli::terminal_text(n, false).to_string())
+            .collect();
+        if names.is_empty() {
+            "no secret only on that side".to_string()
+        } else {
+            names.join(", ")
+        }
+    };
+    let shown = murk_cli::terminal_text(name, false).to_string();
+    eprintln!(
+        "{} both branches created {shown} as a new vault; murk cannot merge two separate vaults",
+        "✕".red()
+    );
+    eprintln!(
+        "  keep ours: git checkout --ours -- {shown}, then redo theirs' secrets with murk add --vault {shown}: {}",
+        only(&theirs_names, &ours_names)
+    );
+    eprintln!(
+        "  or keep theirs: git checkout --theirs -- {shown}, then redo ours' secrets: {}",
+        only(&ours_names, &theirs_names)
+    );
+    eprintln!(
+        "  {}",
+        "secrets on both sides may differ in value; recipients the other side authorized must be authorized again"
+            .dimmed()
+    );
+    process::exit(1);
+}
+
+/// Merge the inputs as git would without a driver: `git merge-file` writes
+/// the result into ours (`%A`), with conflict markers where both sides
 /// changed the same lines. Exits 0 for a clean merge and 1 for a conflict.
-/// A file git cannot merge as text (binary) is left as ours, as git leaves a
-/// conflicted binary file.
-fn merge_as_text(base_path: &str, ours_path: &str, theirs_path: &str, name: Option<&str>) -> ! {
-    let name = name.unwrap_or("file");
+/// A file git cannot merge as text (binary) is left as ours with exit 1, as
+/// git leaves a conflicted binary file. `why` says why it is not a vault
+/// merge.
+fn merge_as_text(
+    base_path: &str,
+    ours_path: &str,
+    theirs_path: &str,
+    name: Option<&str>,
+    why: &str,
+) -> ! {
+    let name = murk_cli::terminal_text(name.unwrap_or("file"), false).to_string();
     let status = murk_cli::git_command()
         .args(["merge-file", "-L"])
         .arg(format!("ours:{name}"))
@@ -154,14 +272,14 @@ fn merge_as_text(base_path: &str, ours_path: &str, theirs_path: &str, name: Opti
         Some(0) => process::exit(0),
         Some(n) if (1..=127).contains(&n) => {
             eprintln!(
-                "{} {name} is not a murk vault: merged as text, with conflict markers",
+                "{} {name} {why}: merged as text, with conflict markers",
                 "warn".yellow().bold()
             );
             process::exit(1);
         }
         _ => {
             eprintln!(
-                "{} {name} is not a murk vault and git cannot merge it as text; the working file is ours",
+                "{} {name} {why}, and git cannot merge it as text; the working file is ours",
                 "warn".yellow().bold()
             );
             process::exit(1);
@@ -170,21 +288,27 @@ fn merge_as_text(base_path: &str, ours_path: &str, theirs_path: &str, name: Opti
 }
 
 pub(crate) fn cmd_setup_merge_driver() {
-    let steps = try_or_die(murk_cli::setup_merge_driver());
+    let setup = try_or_die(murk_cli::setup_merge_driver());
+    let at = setup.gitattributes.display().to_string();
 
-    for step in &steps {
+    for step in &setup.steps {
         match step {
             MergeDriverSetupStep::GitattributesAlreadyExists => {
                 eprintln!(
-                    "{} .gitattributes already contains merge driver entry",
-                    "◆".magenta()
+                    "{} .gitattributes already contains merge driver entry  {}",
+                    "◆".magenta(),
+                    at.dimmed()
                 );
             }
             MergeDriverSetupStep::GitattributesAppended => {
-                eprintln!("{} appended to .gitattributes", "◆".magenta());
+                eprintln!(
+                    "{} appended to .gitattributes  {}",
+                    "◆".magenta(),
+                    at.dimmed()
+                );
             }
             MergeDriverSetupStep::GitattributesCreated => {
-                eprintln!("{} created .gitattributes", "◆".magenta());
+                eprintln!("{} created .gitattributes  {}", "◆".magenta(), at.dimmed());
             }
             MergeDriverSetupStep::GitConfigured => {
                 eprintln!("{} git merge driver configured", "◆".magenta());

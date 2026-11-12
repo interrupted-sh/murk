@@ -17,6 +17,9 @@ const GITATTRIBUTES_LINES: [&str; 2] = ["*.murk merge=murk", ".murk.* merge=murk
 const GIT_CONFIG_MERGE_NAME: &str = "merge.murk.name";
 const GIT_CONFIG_MERGE_DRIVER: &str = "merge.murk.driver";
 
+/// The `merge.murk.driver` command `setup-merge-driver` configures.
+const MERGE_DRIVER_COMMAND: &str = "murk merge-driver -- %O %A %B %P";
+
 /// A `git` command that runs no code from the repository it is pointed at, with
 /// murk's key variables removed from its environment.
 ///
@@ -60,30 +63,67 @@ pub enum MergeDriverSetupStep {
     GitConfigured,
 }
 
+/// What [`setup_merge_driver`] did: the `.gitattributes` it used and the
+/// steps it performed.
+#[derive(Debug)]
+pub struct MergeDriverSetup {
+    /// The `.gitattributes` at the root of the working tree.
+    pub gitattributes: PathBuf,
+    pub steps: Vec<MergeDriverSetupStep>,
+}
+
+/// The root of the working tree that contains the current directory, as git
+/// reports it. Fails, with git's own error, outside a working tree. Also
+/// fails when git's root does not contain the current directory, which
+/// happens when the repository's config sets `core.worktree` to another
+/// directory: setup then would write that directory's `.gitattributes`.
+fn working_tree_root() -> Result<PathBuf, String> {
+    let out = git_command()
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("running git rev-parse: {e}"))?;
+    let root = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
+    if !out.status.success() || root.is_empty() {
+        let git_said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let mut msg =
+            "not inside a git working tree; run murk setup-merge-driver in your repository"
+                .to_string();
+        if !git_said.is_empty() {
+            msg = format!("git rev-parse failed: {git_said}\n{msg}");
+        }
+        return Err(msg);
+    }
+    let root = real_dir(Path::new(&root)).unwrap_or_else(|| PathBuf::from(&root));
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|d| real_dir(&d))
+        .ok_or("cannot resolve the current directory")?;
+    if !cwd.starts_with(&root) {
+        return Err(format!(
+            "git's working tree for this repository is {}, which does not contain the current directory\n\
+             the repository's core.worktree points elsewhere; murk setup-merge-driver changes nothing",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
 /// Configure git to use murk's custom merge driver for vault files.
 ///
 /// 1. Ensures the `.gitattributes` at the root of the working tree contains
 ///    `*.murk merge=murk` and `.murk.* merge=murk`, appending whichever is
-///    missing. Outside a working tree it fails before writing anything.
-/// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`.
-///
-/// Returns the steps that were performed.
-pub fn setup_merge_driver() -> Result<Vec<MergeDriverSetupStep>, String> {
+///    missing. Outside a working tree, or when git's working tree does not
+///    contain the current directory, it fails before writing anything.
+/// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`,
+///    replacing a driver line an older murk wrote.
+pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
     let mut steps = Vec::new();
 
     // 1. Write .gitattributes entry, at the root of the working tree: a
     // `.gitattributes` in a subdirectory only covers that subdirectory.
-    let toplevel = git_command()
-        .args(["rev-parse", "--show-toplevel"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("running git rev-parse: {e}"))?;
-    let root = String::from_utf8(toplevel.stdout)
-        .ok()
-        .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
-        .filter(|s| toplevel.status.success() && !s.is_empty())
-        .ok_or("not inside a git working tree; run murk setup-merge-driver in your repository")?;
-    let gitattributes_path = Path::new(&root).join(".gitattributes");
+    let gitattributes_path = working_tree_root()?.join(".gitattributes");
     let gitattributes = gitattributes_path.as_path();
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
@@ -121,10 +161,12 @@ pub fn setup_merge_driver() -> Result<Vec<MergeDriverSetupStep>, String> {
         steps.push(MergeDriverSetupStep::GitattributesCreated);
     }
 
-    // 2. Configure git merge driver.
+    // 2. Configure git merge driver. `--` ends the options, so a vault named
+    // like a flag (`-h.murk`) reaches the driver as a path. Setting the key
+    // replaces a driver line an older murk wrote.
     let configs = [
         (GIT_CONFIG_MERGE_NAME, "murk vault merge"),
-        (GIT_CONFIG_MERGE_DRIVER, "murk merge-driver %O %A %B %P"),
+        (GIT_CONFIG_MERGE_DRIVER, MERGE_DRIVER_COMMAND),
     ];
     for (key, value) in &configs {
         let status = git_command()
@@ -137,7 +179,10 @@ pub fn setup_merge_driver() -> Result<Vec<MergeDriverSetupStep>, String> {
     }
     steps.push(MergeDriverSetupStep::GitConfigured);
 
-    Ok(steps)
+    Ok(MergeDriverSetup {
+        gitattributes: gitattributes_path,
+        steps,
+    })
 }
 
 /// Who signed a commit, as git reports it for the signature it checked.
@@ -902,7 +947,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
-        let steps = setup_merge_driver().unwrap();
+        let steps = setup_merge_driver().unwrap().steps;
         assert!(steps.contains(&MergeDriverSetupStep::GitattributesCreated));
         assert!(steps.contains(&MergeDriverSetupStep::GitConfigured));
 
@@ -933,7 +978,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
-        let steps = setup_merge_driver().unwrap();
+        let steps = setup_merge_driver().unwrap().steps;
         assert!(steps.contains(&MergeDriverSetupStep::GitattributesAppended));
 
         let contents = std::fs::read_to_string(dir.join(".gitattributes")).unwrap();
@@ -968,7 +1013,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
-        let steps = setup_merge_driver().unwrap();
+        let steps = setup_merge_driver().unwrap().steps;
         assert!(steps.contains(&MergeDriverSetupStep::GitattributesAlreadyExists));
 
         std::env::set_current_dir(original_dir).unwrap();

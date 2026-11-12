@@ -114,7 +114,7 @@ direnv allow
 
 `murk init` writes no `.gitignore`. Its `.env` points at your key, and every write creates an empty `.murk.lock` next to the vault. Neither belongs in git. `murk doctor` warns when `.env` is not ignored.
 
-murk stores your key in `~/.config/murk/keys/` with restricted permissions. murk finds it on its own from the vault's absolute path. That includes a git worktree of the same repo, so a fresh worktree needs no setup. `murk init` also writes a `.env` file with a `MURK_KEY_FILE` line that points at the key (the key itself is not in the repo). murk does not read `.env`. Use `source .env` if you want the variable in your shell.
+murk stores your key in `~/.config/murk/keys/` with restricted permissions. murk finds it on its own from the vault's absolute path. That includes a git worktree of the same repo, so a fresh worktree needs no setup. `murk init` also writes a `.env` file with a `MURK_KEY_FILE` line that points at the key (the key itself is not in the repo). Under `MURK_STRICT` or `MURK_AGENT`, `murk init` writes no `.env` and prints no key path. murk does not read `.env`. Use `source .env` if you want the variable in your shell.
 
 Without direnv, use `murk exec`:
 

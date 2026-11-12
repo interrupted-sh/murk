@@ -351,8 +351,9 @@ fn world_readable_key_file_rejected() {
 
 // ── Merge driver abuse ──
 
-/// Empty inputs next to a real vault are refused, and ours is left alone. (Only
-/// when no input is a vault does the driver merge the files as text.)
+/// Empty inputs next to a real vault are not a vault merge: they merge as
+/// text. Theirs did not change the (empty) base, so the result is ours,
+/// byte for byte, and nothing of the empty sides gets in.
 #[test]
 fn merge_driver_empty_files() {
     let dir = TempDir::new().unwrap();
@@ -369,8 +370,7 @@ fn merge_driver_empty_files() {
             dir.path().join("theirs.murk").to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("parsing base"));
+        .success();
     assert_eq!(fs::read(dir.path().join("test.murk")).unwrap(), ours);
 }
 

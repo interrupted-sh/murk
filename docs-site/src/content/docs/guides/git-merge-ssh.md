@@ -32,12 +32,13 @@ This command does two things:
   configuration, which does not go with the repository. Everyone who works
   on the vault runs `murk setup-merge-driver` once in their own clone.
 
-The definition is `murk merge-driver %O %A %B %P`, and git runs `murk` from
-your `PATH`. git runs the driver during a merge or rebase in which
+The definition is `murk merge-driver -- %O %A %B %P`, and git runs `murk`
+from your `PATH`. git runs the driver during a merge or rebase in which
 both branches changed `.murk`. Without it, git does a text three-way merge
 on the raw file. The driver's arguments are `BASE OURS THEIRS PATH`. `BASE`
-is the common ancestor. `PATH` is the path of the
-vault (git's `%P`), so the driver reads the correct trust pin.
+is the common ancestor. `PATH` is the path of the vault (git's `%P`), so the
+driver reads the correct trust pin and finds that vault's key. The `--`
+keeps a vault named like a flag a path.
 
 The driver merges secret changes that do not conflict, such as different
 keys added or changed on each side. It decrypts secret values only when both
@@ -51,8 +52,21 @@ Run the driver with your key available: `MURK_KEY`, `MURK_KEY_FILE`, or the
 stored key of the vault being merged. The driver finds the stored key of
 `.murk.prod` or `prod.murk` as `--vault` does, so a vault with its own key
 merges with no setup. A file that matches the pattern but is not a vault
-(`.murk.bak`) is merged as text, with conflict markers where both sides
-changed the same lines.
+(`.murk.bak`), or a vault on one branch and something else on the other, is
+merged as text, with conflict markers where both sides changed the same
+lines.
+
+When both branches created the same vault, for example `murk init --vault
+.murk.staging` on each, there are two separate vaults, and no merge can
+combine them. The driver puts both sides in the file between conflict
+markers and stops. It names the secrets that only one side has. Keep one
+side and add the other side's secrets again:
+
+```bash
+git checkout --ours -- .murk.staging
+murk add API_TOKEN --vault .murk.staging
+git add .murk.staging
+```
 
 With a key, the driver checks **both sides** as a load does:
 
@@ -144,8 +158,10 @@ the revision at `REF` before it shows anything from it.
 
 Before 0.14, `murk setup-merge-driver` wrote `murk merge-driver %O %A %B`
 with no path. A driver with that configuration still runs. But it uses
-`.murk` as the path, so it cannot find the pin for a vault with another name.
-Run `murk setup-merge-driver` again in each clone to add `%P`.
+`.murk` as the path, so for a vault with another name it reads neither that
+vault's trust pin nor its stored key. Such a vault then merges only with
+`MURK_KEY` or `MURK_KEY_FILE` set. Run `murk setup-merge-driver` again in
+each clone: it replaces the old line with `murk merge-driver -- %O %A %B %P`.
 
 ### Merges that never run the driver
 
