@@ -31,8 +31,8 @@ environment. In murk this is `murk agent exec --only KEY -- CMD`, or the MCP
   value to a file, send it over the network, or print it encoded.
 - Masking matches exact bytes only. A base64, hex, partial or split copy gets
   through. See [Output masking](/guides/ai-agents-mcp/#output-masking).
-- The MCP `murk_get` tool, off unless the server runs with `--allow-get`,
-  returns the value to the model itself. It ends up in the transcript.
+- The MCP `murk_get` tool returns the value to the model itself. It ends up
+  in the transcript.
 
 ## A credential broker
 

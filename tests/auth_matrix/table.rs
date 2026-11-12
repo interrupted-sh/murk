@@ -397,8 +397,8 @@ pub const ROWS: &[Row] = &[
         RECIPIENTS,
     ),
     row(
-        "mcp --allow-get (murk_get AGENT_OK)",
-        &["mcp", "--allow-get"],
+        "mcp (murk_get AGENT_OK)",
+        &["mcp"],
         reveals("AGENT_OK"),
         [
             dr(MCP_ONLY_AGENT),

@@ -17,7 +17,7 @@ use std::process;
 /// scope over MCP, defeating the point, so both the agent-context opt-in and a
 /// grant identity are required. stdout is the JSON-RPC channel; every diagnostic
 /// here goes to stderr.
-pub(crate) fn cmd_mcp(vault_path: &str, allow_exec: bool, allow_get: bool) {
+pub(crate) fn cmd_mcp(vault_path: &str, allow_exec: bool) {
     // Cheap gate first: the caller must have opted into agent context. No key or
     // vault load is needed to reject the obvious misuse.
     if !murk_cli::hardening::agent_context() {
@@ -43,7 +43,7 @@ pub(crate) fn cmd_mcp(vault_path: &str, allow_exec: bool, allow_get: bool) {
         eprintln!("{} {warning}", "warn".yellow().bold());
     }
 
-    try_or_die(crate::mcp::serve(vault, allow_exec, allow_get));
+    try_or_die(crate::mcp::serve(vault, allow_exec));
 }
 
 /// Write the rendered output of `skeleton -o` / `agent plan -o` to a *new* file.
@@ -537,7 +537,6 @@ pub(crate) fn cmd_agent_connect(
     only: &[String],
     allow_tag: &[String],
     allow_exec: bool,
-    allow_get: bool,
     ttl: &str,
     name: &str,
     vault_path: &str,
@@ -624,9 +623,6 @@ pub(crate) fn cmd_agent_connect(
     let mut extra_args = connect::vault_args(vault_path);
     if allow_exec {
         extra_args.push("--allow-exec".to_string());
-    }
-    if allow_get {
-        extra_args.push("--allow-get".to_string());
     }
 
     // Render every target before touching anything: a malformed or symlinked

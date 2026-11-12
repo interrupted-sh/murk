@@ -179,7 +179,6 @@ complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcomm
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from connect" -l name -d 'Grant name (used to disconnect/revoke it later)' -r
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from connect" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from connect" -l allow-exec -d 'Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)'
-complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from connect" -l allow-get -d 'Also enable the `murk_get` tool in the MCP server (writes `--allow-get` into the client config)'
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from connect" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from disconnect" -l name -d 'Grant name to revoke with --rotate' -r
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from disconnect" -l vault -d 'Vault filename' -r
@@ -196,7 +195,6 @@ complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcomm
 complete -c murk -n "__fish_murk_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c murk -n "__fish_murk_using_subcommand mcp" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand mcp" -l allow-exec -d 'Enable the murk_exec tool, which runs commands with the grant\'s secrets injected'
-complete -c murk -n "__fish_murk_using_subcommand mcp" -l allow-get -d 'Enable the murk_get tool, which returns a secret value to the agent'
 complete -c murk -n "__fish_murk_using_subcommand mcp" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c murk -n "__fish_murk_using_subcommand policy; and not __fish_seen_subcommand_from show set clear help" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand policy; and not __fish_seen_subcommand_from show set clear help" -f -a "show" -d 'Show the agent access policy (works without a key)'

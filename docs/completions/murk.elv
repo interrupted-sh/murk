@@ -250,7 +250,6 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --name 'Grant name (used to disconnect/revoke it later)'
             cand --vault 'Vault filename'
             cand --allow-exec 'Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)'
-            cand --allow-get 'Also enable the `murk_get` tool in the MCP server (writes `--allow-get` into the client config)'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -293,7 +292,6 @@ set edit:completion:arg-completer[murk] = {|@words|
         &'murk;mcp'= {
             cand --vault 'Vault filename'
             cand --allow-exec 'Enable the murk_exec tool, which runs commands with the grant''s secrets injected'
-            cand --allow-get 'Enable the murk_get tool, which returns a secret value to the agent'
             cand -h 'Print help (see more with ''--help'')'
             cand --help 'Print help (see more with ''--help'')'
         }

@@ -42,7 +42,9 @@ const MURK_TIMEOUT_MS = 30_000;
  *   (mint, list and revoke) or need no key (plan), never as an agent context.
  * - MURK_VAULT is stripped — every call passes --vault explicitly.
  * - With `keyFile`, MURK_KEY_FILE is that path and MURK_KEY is stripped, so
- *   the call uses exactly that identity.
+ *   the call uses exactly that identity. Without it, murk resolves the key
+ *   from the inherited MURK_KEY / MURK_KEY_FILE, else from the key it stored
+ *   for the vault in ~/.config/murk/keys.
  * - With `keyless: true`, MURK_KEY / MURK_KEY_FILE are stripped too, so the
  *   call can never depend on (or exercise) an identity.
  *
@@ -80,27 +82,19 @@ export function runMurk(
   return promise;
 }
 
-export const NO_OPERATOR_KEY =
-  "no operator key configured: set the plugin's keyFile setting to your murk key file " +
-  "(the MURK_KEY_FILE path that murk init wrote to the vault's .env)";
-
 /**
  * The operator identity for `murk agent grant`, `agent ls` and `agent revoke`.
- * murk 0.15 uses only an explicitly configured key, so the plugin never
- * relies on murk finding one itself. The keyFile setting wins. When it is
- * blank, the bb server's own MURK_KEY or MURK_KEY_FILE is used as it is
- * (returns null). With neither, this throws before any murk call. The vault's
- * .env is never read: it sits in a worktree that an agent can edit.
+ * The keyFile setting wins. When it is blank, this returns null and murk runs
+ * with the bb server's environment: its MURK_KEY or MURK_KEY_FILE, else the
+ * key murk stored for the vault (see `runMurk`). The vault's .env is never
+ * read: it sits in a worktree that an agent can edit.
  */
-export function resolveOperatorKey(setting: string, env: NodeJS.ProcessEnv = process.env): string | null {
+export function resolveOperatorKey(setting: string): string | null {
   const keyFile = setting.trim();
-  if (keyFile) {
-    if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
-    if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
-    return keyFile;
-  }
-  if (env.MURK_KEY || env.MURK_KEY_FILE) return null;
-  throw new Error(NO_OPERATOR_KEY);
+  if (!keyFile) return null;
+  if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
+  if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
+  return keyFile;
 }
 
 function murkError(what: string, result: MurkResult): Error {

@@ -4,7 +4,7 @@
 .SH NAME
 murk\-mcp \- Run an MCP (Model Context Protocol) stdio server for AI agents (experimental)
 .SH SYNOPSIS
-\fBmurk mcp\fR [\fB\-\-vault\fR] [\fB\-\-allow\-exec\fR] [\fB\-\-allow\-get\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBmurk mcp\fR [\fB\-\-vault\fR] [\fB\-\-allow\-exec\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Run an MCP (Model Context Protocol) stdio server for AI agents (experimental)
 .SH OPTIONS
@@ -16,11 +16,6 @@ Vault filename
 Enable the murk_exec tool, which runs commands with the grant\*(Aqs secrets injected
 
 Off by default. The tool runs arbitrary commands as this user. The injected secrets are limited to the grant, but the command itself is not sandboxed.
-.TP
-\fB\-\-allow\-get\fR
-Enable the murk_get tool, which returns a secret value to the agent
-
-Off by default. The value lands in the model\*(Aqs context and its transcript. Prefer \-\-allow\-exec, which injects secrets without showing them.
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

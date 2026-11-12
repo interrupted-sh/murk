@@ -270,32 +270,6 @@ fn connect_puts_the_vault_before_allow_exec() {
     );
 }
 
-#[test]
-fn connect_writes_allow_get_into_the_config() {
-    let dir = TempDir::new().unwrap();
-    let key = init_named_vault(&dir, ".murk");
-    add_secret(&dir, &key, ".murk");
-
-    murk(&dir, &key)
-        .args([
-            "agent",
-            "connect",
-            "claude",
-            "--only",
-            "API_KEY",
-            "--allow-get",
-        ])
-        .assert()
-        .success();
-
-    let v: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(dir.path().join(".mcp.json")).unwrap()).unwrap();
-    assert_eq!(
-        v["mcpServers"]["murk"]["args"],
-        serde_json::json!(["mcp", "--allow-get"])
-    );
-}
-
 // ── ordering: validate every config, then mint, then write ──
 
 #[test]

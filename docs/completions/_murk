@@ -282,7 +282,6 @@ _arguments "${_arguments_options[@]}" : \
 '--name=[Grant name (used to disconnect/revoke it later)]:NAME:_default' \
 '--vault=[Vault filename]:VAULT:_default' \
 '--allow-exec[Also enable the \`murk_exec\` tool in the MCP server (writes \`--allow-exec\` into the client config)]' \
-'--allow-get[Also enable the \`murk_get\` tool in the MCP server (writes \`--allow-get\` into the client config)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::client -- Client to configure\: claude, cursor, vscode, zed, gemini, omp or codex. Omit it to configure every client that already has a config file or marker directory (such as `.cursor/`) next to the vault:_default' \
@@ -358,7 +357,6 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
 '--allow-exec[Enable the murk_exec tool, which runs commands with the grant'\''s secrets injected]' \
-'--allow-get[Enable the murk_get tool, which returns a secret value to the agent]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0

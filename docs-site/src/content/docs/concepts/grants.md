@@ -42,7 +42,7 @@ The vault's optional **agent policy** (`murk policy set --allow-tag TAG`) is a b
 
 ## TTL and revocation
 
-`--ttl` takes a number and a unit: `s`, `m`, `h` or `d`. The default is `2h` and the maximum is `365d`. A bare number is an error. murk records the TTL in the grant's metadata alongside its scope and issuer. **murk enforces the expiry at read time.** Past `expires_at`, the murk binary refuses the grant on every read (CLI, MCP, the bindings). The MCP `murk_plan` tool still lists the schema of the grant's keys.
+`--ttl` takes a number and a unit: `s`, `m`, `h` or `d`. The default is `2h` and the maximum is `365d`. A bare number is an error. murk records the TTL in the grant's metadata alongside its scope and issuer. **murk enforces the expiry at read time.** Past `expires_at`, the murk binary refuses the grant on every read (CLI, MCP, the bindings). The MCP `murk_plan` tool refuses it too, so an expired grant lists no key names.
 
 Like the allow-tag policy, the expiry is a guardrail in the murk binary, not cryptographic access control. age keys can't self-destruct. Until the next vault write removes an expired grant, raw `age` still decrypts the current file with the grant's key. Old vault versions stay decryptable from git history with raw age. So revocation is still what closes the exposure. `murk agent ls` lists active grants with their scope and TTL status (time remaining, or how long expired) and works offline.
 

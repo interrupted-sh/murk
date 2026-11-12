@@ -220,7 +220,7 @@ The value is keeping production secrets out of agent reach by accident, or by a 
 **Agent MCP server.** `murk mcp` exposes secrets to AI-agent harnesses over the Model Context Protocol on a local stdio pipe, not a network listener. It uses the same checks as every other agent path:
 
 - It refuses to start unless the loaded identity is a scoped grant with `MURK_AGENT=1`, so it can never serve the operator's full read scope.
-- `murk_plan` and `murk_get` are limited to the secrets the grant may read and the agent policy allows. They fail closed on anything else. `murk_get` puts a value into the model's context, so it is off unless the server starts with `--allow-get`.
+- `murk_plan` and `murk_get` are limited to the secrets the grant may read and the agent policy allows. They fail closed on anything else.
 
 `murk_exec` (running a command with scoped secrets injected) is off by default and enabled only with `--allow-exec`. `only` bounds the injected *secrets*, but the command itself runs as the server's user with its filesystem and network access. So it is a guardrail, not a sandbox. As with `agent exec`, the real containment boundary is the OS: run the server (and the agent) under a separate user or container.
 
@@ -722,7 +722,7 @@ This section applies the eight design principles of Saltzer and Schroeder ("The 
 - `murk agent exec` refuses a key that is not an agent grant unless `--allow-operator-key` is passed.
   - It refuses an auto-discovered operator key before the vault loads (`cmd_agent_exec` in `src/commands/grants.rs`).
   - It refuses any other full-recipient key once the vault is open and before a secret is resolved (`cmd_exec` in `src/commands/exec.rs`).
-- The MCP server's `murk_exec` tool is removed unless `--allow-exec` is passed, and its `murk_get` tool unless `--allow-get` is passed (`MurkMcp::new` in `src/mcp.rs`).
+- The MCP server's `murk_exec` tool is removed unless `--allow-exec` is passed (`MurkMcp::new` in `src/mcp.rs`).
 - `ssh-rsa` recipients are refused unless `--allow-ssh-rsa` is passed (see [SECURITY.md](SECURITY.md)).
 - Under an agent policy, a secret without an allowed tag is refused, and an empty allow-list refuses every secret (`check_agent_keys` in `src/policy.rs`).
 
@@ -737,7 +737,7 @@ An unsigned vault, a stripped signature, a signer this machine does not trust, a
 - Either way the expiry of every grant bound to the loading key is checked.
 - `load_vault` then applies the trust check (`src/load.rs`, `src/trust.rs`), and write commands load through it too.
 
-`murk agent exec` always checks the agent policy before any value reaches the child process. Plain `murk exec` checks it only under self-scope (`MURK_SELF_SCOPE`, or an agent context) (`cmd_exec` in `src/commands/exec.rs`, `self_scope` in `src/hardening.rs`). The MCP server calls `enforce_agent_policy` (`src/policy.rs`) on every `murk_get` and `murk_exec` call (`src/mcp.rs`). That call re-checks grant expiry against the current time and the policy's tag allow-list. Before every tool call, the server reads the vault file and compares its BLAKE3 hash with the loaded one. On a change it loads those same bytes through the full load path, with the grant key it started with, and keeps the new state only if that load passes. Otherwise the call fails (`VaultWatch::current` in `src/mcp.rs`, `load_parsed_vault` in `src/load.rs`). So a revocation, a policy change or tampering on disk applies to the next call.
+`murk agent exec` always checks the agent policy before any value reaches the child process. Plain `murk exec` checks it only under self-scope (`MURK_SELF_SCOPE`, or an agent context) (`cmd_exec` in `src/commands/exec.rs`, `self_scope` in `src/hardening.rs`). The MCP server calls `enforce_agent_policy` (`src/policy.rs`) on every `murk_plan`, `murk_get` and `murk_exec` call (`src/mcp.rs`). That call re-checks grant expiry against the current time, and for `murk_get` and `murk_exec` also the policy's tag allow-list. Before every tool call, the server reads the vault file and compares its BLAKE3 hash with the loaded one. On a change it loads those same bytes through the full load path, with the grant key it started with, and keeps the new state only if that load passes. Otherwise the call fails (`VaultWatch::current` in `src/mcp.rs`, `load_parsed_vault` in `src/load.rs`). So a revocation, a policy change or tampering on disk applies to the next call.
 
 *Partly met:*
 

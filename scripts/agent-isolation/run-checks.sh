@@ -51,9 +51,6 @@ make_vault() {
         unset MURK_AGENT MURK_STRICT MURK_KEY MURK_KEY_FILE MURK_TRUSTED_SIGNERS
         git init -q
         echo operator | "$murk" init >/dev/null 2>&1
-        # Load the key pointer init wrote: murk reads only MURK_KEY and
-        # MURK_KEY_FILE, not a key it stored by itself.
-        . ./.env
         echo in-scope-value | "$murk" add API_KEY >/dev/null 2>&1
         echo out-of-scope-value | "$murk" add OTHER >/dev/null 2>&1
         "$murk" agent grant --name agent --only API_KEY --ttl 1h \
@@ -99,7 +96,6 @@ os-user)
         cd /srv/repo
         runuser -u alice -- env -u MURK_KEY_FILE -u MURK_AGENT HOME=/home/alice sh -eu -c "
             echo operator | murk init >/dev/null 2>&1
-            . ./.env
             echo in-scope-value | murk add API_KEY >/dev/null 2>&1
             echo out-of-scope-value | murk add OTHER >/dev/null 2>&1
             murk agent grant --name agent --only API_KEY --ttl 1h --out /tmp/grant.key >/dev/null 2>&1

@@ -8088,51 +8088,20 @@ fn mcp_serves_initialize_and_tools_list_over_stdio() {
         "\n",
     );
 
-    let tools_list = |extra: &[&str]| {
-        murk_bin(dir.path())
-            .current_dir(dir.path())
-            .env("MURK_KEY_FILE", grant.to_str().unwrap())
-            .env("MURK_AGENT", "1")
-            .args(["mcp", "--vault", "test.murk"])
-            .args(extra)
-            .write_stdin(handshake)
-            .assert()
-            .success()
-    };
-
-    // murk_get puts a value into the model's context, so it is opt-in.
-    tools_list(&[]).stdout(
-        predicate::str::contains("murk-mcp")
-            .and(predicate::str::contains("\"id\":2"))
-            .and(predicate::str::contains("murk_plan"))
-            .and(predicate::str::contains("murk_get").not())
-            .and(predicate::str::contains("murk_exec").not()),
-    );
-    tools_list(&["--allow-get"]).stdout(
-        predicate::str::contains("\"id\":2")
-            .and(predicate::str::contains("murk_plan"))
-            .and(predicate::str::contains("murk_get"))
-            .and(predicate::str::contains("murk_exec").not()),
-    );
-}
-
-#[test]
-fn mcp_get_without_allow_get_names_the_flag() {
-    let dir = TempDir::new().unwrap();
-    let grant = setup_mcp_grant(&dir);
-
     murk_bin(dir.path())
         .current_dir(dir.path())
         .env("MURK_KEY_FILE", grant.to_str().unwrap())
         .env("MURK_AGENT", "1")
         .args(["mcp", "--vault", "test.murk"])
-        .write_stdin(mcp_handshake_and_call("murk_get", r#"{"key":"DB_URL"}"#))
+        .write_stdin(handshake)
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("\"isError\":true")
-                .and(predicate::str::contains("--allow-get"))
-                .and(predicate::str::contains("db-val").not()),
+            predicate::str::contains("murk-mcp")
+                .and(predicate::str::contains("\"id\":2"))
+                .and(predicate::str::contains("murk_plan"))
+                .and(predicate::str::contains("murk_get"))
+                .and(predicate::str::contains("murk_exec").not()),
         );
 }
 
@@ -8265,7 +8234,7 @@ fn mcp_get_returns_in_scope_value() {
         .current_dir(dir.path())
         .env("MURK_KEY_FILE", grant.to_str().unwrap())
         .env("MURK_AGENT", "1")
-        .args(["mcp", "--vault", "test.murk", "--allow-get"])
+        .args(["mcp", "--vault", "test.murk"])
         .write_stdin(mcp_handshake_and_call("murk_get", r#"{"key":"DB_URL"}"#))
         .assert()
         .success()
@@ -8283,7 +8252,7 @@ fn mcp_get_out_of_scope_key_fails_closed() {
         .current_dir(dir.path())
         .env("MURK_KEY_FILE", grant.to_str().unwrap())
         .env("MURK_AGENT", "1")
-        .args(["mcp", "--vault", "test.murk", "--allow-get"])
+        .args(["mcp", "--vault", "test.murk"])
         .write_stdin(mcp_handshake_and_call(
             "murk_get",
             r#"{"key":"SHARED_KEY"}"#,
@@ -8305,7 +8274,7 @@ fn mcp_get_policy_forbidden_key_fails_closed() {
         .current_dir(dir.path())
         .env("MURK_KEY_FILE", grant.to_str().unwrap())
         .env("MURK_AGENT", "1")
-        .args(["mcp", "--vault", "test.murk", "--allow-get"])
+        .args(["mcp", "--vault", "test.murk"])
         .write_stdin(mcp_handshake_and_call(
             "murk_get",
             r#"{"key":"SECRET_KEY"}"#,
@@ -8362,7 +8331,7 @@ fn mcp_get_missing_key_arg_is_rejected() {
         .current_dir(dir.path())
         .env("MURK_KEY_FILE", grant.to_str().unwrap())
         .env("MURK_AGENT", "1")
-        .args(["mcp", "--vault", "test.murk", "--allow-get"])
+        .args(["mcp", "--vault", "test.murk"])
         .write_stdin(mcp_handshake_and_call("murk_get", "{}"))
         .assert()
         .success()

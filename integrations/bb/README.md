@@ -6,11 +6,13 @@ Grant-scoped murk secrets for [bb](https://getbb.app) agent threads. Agents see 
 
 ## Set the operator key
 
-`bb murk grant mint` and `bb murk grant revoke` run murk on the bb server with your key: they add or remove a grant in the vault and sign the result. From murk 0.15, murk uses only a key you configure (`MURK_KEY_FILE` or `MURK_KEY`). It no longer looks for your key in `~/.config/murk/keys` by itself.
+`bb murk grant mint` and `bb murk grant revoke` run murk on the bb server with your key: they add or remove a grant in the vault and sign the result. The plugin picks the key in this order:
 
-Set the plugin's **Operator key file** setting (`keyFile`) to the absolute path of your murk key file. That is the `MURK_KEY_FILE` path that `murk init` wrote to the vault's `.env`. The plugin passes it only to the murk commands it runs on the bb server, never to an agent thread's environment.
+1. The plugin's **Operator key file** setting (`keyFile`), if you set it. Use the absolute path of your murk key file: the `MURK_KEY_FILE` path that `murk init` wrote to the vault's `.env`. The plugin passes it only to the murk commands it runs on the bb server, never to an agent thread's environment.
+2. `MURK_KEY_FILE` or `MURK_KEY` from the bb server's own environment.
+3. If neither is set, murk finds the key it stored for the vault in `~/.config/murk/keys`, as it does in your terminal.
 
-If the setting is blank, the plugin uses `MURK_KEY_FILE` or `MURK_KEY` from the bb server's own environment. If neither is set, mint and revoke fail with `no operator key configured`. The plugin never reads the vault's `.env` itself: that file sits in the thread's worktree, where an agent can change it.
+Set `keyFile` when the bb server cannot find your key by itself, for example when the key is not in `~/.config/murk/keys`. The plugin never reads the vault's `.env` itself: that file sits in the thread's worktree, where an agent can change it.
 
 ## Only you grant access
 
@@ -44,7 +46,7 @@ bb murk grant mint --keys API_KEY --upgrade
 ### Unreleased (draft)
 
 - `bb murk grant mint` and `bb murk grant revoke` refuse a call from a bb thread. Run them in your own terminal, outside bb threads. The agent skill now tells agents never to run `bb murk grant`.
-- New **Operator key file** setting (`keyFile`). Mint and revoke pass it to murk as `MURK_KEY_FILE`. With the setting blank, the plugin uses `MURK_KEY_FILE` or `MURK_KEY` from the bb server's environment, and fails with `no operator key configured` if neither is set. The plugin no longer relies on murk finding your stored key, which murk 0.15 stops doing. After you upgrade the plugin, set `keyFile` before your next mint.
+- New optional **Operator key file** setting (`keyFile`). Mint and revoke pass it to murk as `MURK_KEY_FILE`. With the setting blank, mint and revoke work as before: murk uses `MURK_KEY_FILE` or `MURK_KEY` from the bb server's environment, else the key it stored for the vault in `~/.config/murk/keys`.
 - Removed the **Default grant scope** setting. It applied only to mints from inside a thread, which the plugin now refuses. Pass `--thread <threadId>` to limit a grant to one thread.
 - The agent skill loads the delivered env file in a subshell, states the default TTL and what `--thread` changes, and says when idle cleanup leaves a file in place.
 

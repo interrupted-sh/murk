@@ -117,7 +117,7 @@ fn setup_grant(dir: &Path) -> (String, std::path::PathBuf) {
 async fn mcp_a_revoke_applies_to_the_next_call() {
     let dir = assert_fs::TempDir::new().unwrap();
     let (key, grant) = setup_grant(dir.path());
-    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
 
     assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
 
@@ -139,7 +139,7 @@ async fn mcp_a_revoke_applies_to_the_next_call() {
 async fn mcp_a_tightened_policy_applies_to_the_next_call() {
     let dir = assert_fs::TempDir::new().unwrap();
     let (key, grant) = setup_grant(dir.path());
-    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
 
     assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
 
@@ -174,7 +174,7 @@ async fn mcp_a_tampered_or_unloadable_vault_fails_closed() {
         .success();
     let path = dir.path().join("test.murk");
     let original = std::fs::read_to_string(&path).unwrap();
-    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
     assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
 
     // Signed bytes edited by hand: the reload refuses them.
@@ -222,7 +222,7 @@ async fn mcp_reloads_only_when_the_vault_bytes_change() {
     let dir = assert_fs::TempDir::new().unwrap();
     let (key, grant) = setup_grant(dir.path());
     let path = dir.path().join("test.murk");
-    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
     assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
 
     // The same bytes written again (a new mtime) are not a change.
@@ -261,7 +261,7 @@ async fn mcp_reload_keeps_the_key_the_server_started_with() {
         .args(["--vault", "test.murk"])
         .assert()
         .success();
-    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-get"]).await;
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
     assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
 
     // The key file now holds another grant's key, and the vault changes so the
@@ -318,6 +318,45 @@ async fn mcp_a_revoke_applies_to_murk_exec_on_the_next_call() {
 }
 
 #[tokio::test]
+async fn mcp_plan_fails_closed_once_the_grant_expires() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (key, _) = init_vault(dir.path());
+    murk(dir.path(), &key)
+        .args(["add", "API_KEY", "--vault", "test.murk"])
+        .write_stdin("expiry-secret\n")
+        .assert()
+        .success();
+    let grant = dir.path().join("grant.key");
+    murk(dir.path(), &key)
+        .args(["agent", "grant", "--name", "probe", "--only", "API_KEY"])
+        .args(["--ttl", "2s", "--out"])
+        .arg(&grant)
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
+
+    let before = plan(&client).await;
+    assert_ne!(before.is_error, Some(true), "{}", text(&before));
+    assert!(text(&before).contains("API_KEY"), "{}", text(&before));
+
+    // The vault file does not change, so no reload runs: the per-call expiry
+    // check alone must refuse.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let after = plan(&client).await;
+    assert_eq!(after.is_error, Some(true), "{}", text(&after));
+    assert!(
+        text(&after).contains("grant probe expired"),
+        "{}",
+        text(&after)
+    );
+    assert!(!text(&after).contains("API_KEY"), "{}", text(&after));
+
+    let log = stop_server(client, stderr).await;
+    assert!(!log.contains("reloaded it"), "{log}");
+}
+
+#[tokio::test]
 async fn mcp_client_lists_and_calls_tools() {
     let dir = assert_fs::TempDir::new().unwrap();
     let (key, _) = init_vault(&dir);
@@ -367,7 +406,6 @@ async fn mcp_client_lists_and_calls_tools() {
             cmd.arg("mcp")
                 .arg("--vault")
                 .arg("test.murk")
-                .arg("--allow-get")
                 .current_dir(dir.path())
                 .env("HOME", dir.path())
                 .env("XDG_RUNTIME_DIR", dir.path())

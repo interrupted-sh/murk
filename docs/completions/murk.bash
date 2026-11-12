@@ -484,7 +484,7 @@ _murk() {
             return 0
             ;;
         murk__subcmd__agent__subcmd__connect)
-            opts="-h --only --allow-tag --allow-exec --allow-get --ttl --name --vault --help"
+            opts="-h --only --allow-tag --allow-exec --ttl --name --vault --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2308,7 +2308,7 @@ _murk() {
             return 0
             ;;
         murk__subcmd__mcp)
-            opts="-h --vault --allow-exec --allow-get --help"
+            opts="-h --vault --allow-exec --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

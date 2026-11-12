@@ -4,11 +4,12 @@
 // Integration-style tests: this repo's murk CLI (npm test builds it and puts it
 // first on PATH), real murk Node binding, real temp vault, fake bb plugin
 // host. HOME is redirected to a temp dir so murk's stored operator key never
-// touches the developer's real key directory. The plugin gets the operator key
-// only through its keyFile setting, as murk 0.15 requires.
+// touches the developer's real key directory. Most tests hand the plugin the
+// operator key through its keyFile setting; the "operator key" tests cover
+// the server environment and murk's own stored-key lookup.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { PluginAgentConfigurationContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
@@ -211,9 +212,8 @@ describe("agent context env", () => {
     const inheritedKeyFile = { ...process.env, MURK_KEY_FILE: operatorKeyFile };
     const inheritedKey = { ...process.env, MURK_KEY: operatorKey };
     // Every operator path decrypts without the contribution: an inherited
-    // MURK_KEY_FILE or MURK_KEY. (Before 0.15, so does murk's stored-key
-    // lookup with nothing set; the loops below cover that base too.)
-    for (const base of [inheritedKeyFile, inheritedKey]) {
+    // MURK_KEY_FILE or MURK_KEY, and murk's stored-key lookup with nothing set.
+    for (const base of [inheritedKeyFile, inheritedKey, process.env]) {
       expect(murkGet(base).stdout).toContain(SECRET_VALUE);
     }
 
@@ -734,11 +734,8 @@ describe("grant changes from a thread", () => {
 });
 
 describe("operator key", () => {
-  // murk 0.15 uses only an explicitly configured key. The fake HOME still
-  // holds the key murk init stored for this vault, so on an older murk these
-  // tests also prove the plugin no longer relies on murk finding it.
-  const vaultFile = () => path.join(worktree, ".murk");
-
+  // The fake HOME holds the key murk init stored for this vault, which murk
+  // finds by itself when neither the setting nor the server env names a key.
   function mint() {
     return host.harness.behavior.runCli(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], {
       cwd: worktree,
@@ -763,34 +760,52 @@ describe("operator key", () => {
     await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
   });
 
-  it("refuses to mint or revoke with no key configured, before calling murk", async () => {
+  function murkGrantNames(): string[] {
+    const result = spawnSync("murk", ["agent", "ls", "--json"], {
+      cwd: worktree,
+      encoding: "utf8",
+      env: { ...process.env, MURK_KEY_FILE: operatorKeyFile },
+    });
+    if (result.status !== 0) throw new Error(`murk agent ls failed: ${result.stderr}`);
+    return (JSON.parse(result.stdout) as Array<{ name: string }>).map((grant) => grant.name);
+  }
+
+  it("mints and revokes through murk's own key lookup when neither the setting nor the server env names a key", async () => {
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    expect(process.env.MURK_KEY).toBeUndefined();
+    expect(process.env.MURK_KEY_FILE).toBeUndefined();
+
     const minted = await mint();
     expect(minted.exitCode, minted.stderr).toBe(0);
-    const grantId = minted.stdout.match(/minted grant (g[0-9a-f]{8})/)![1];
+    const [, grantId, murkName] = minted.stdout.match(/minted grant (g[0-9a-f]{8}) \((bb-g[0-9a-f]{8})\)/)!;
+    expect(murkGrantNames()).toContain(murkName);
 
-    await host.harness.behavior.setSettings({ keyFile: "" });
-    const before = readFileSync(vaultFile());
-    const refused = await mint();
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toContain("no operator key configured: set the plugin's keyFile setting");
-    expect(refused.stderr).not.toContain(".config/murk/keys");
-    expect(readFileSync(vaultFile()).equals(before)).toBe(true);
-
-    const revoke = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
-    expect(revoke.exitCode).toBe(1);
-    expect(revoke.stderr).toContain("no operator key configured");
-    expect((await host.harness.behavior.runCli(["grant", "list"], {})).stdout).toMatch(new RegExp(`${grantId}  active`));
-
-    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
-    expect((await host.harness.behavior.runCli(["grant", "revoke", grantId], {})).exitCode).toBe(0);
+    const revoked = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+    expect(murkGrantNames()).not.toContain(murkName);
   });
 
-  it("uses the bb server's own MURK_KEY_FILE when the setting is blank", async () => {
+  it("uses the bb server's own MURK_KEY_FILE or MURK_KEY when the setting is blank", async () => {
     await host.harness.behavior.setSettings({ keyFile: "" });
-    await withServerEnv({ MURK_KEY_FILE: operatorKeyFile }, async () => {
-      const result = await mint();
-      expect(result.exitCode, result.stderr).toBe(0);
-    });
+    const operatorKey = readFileSync(operatorKeyFile, "utf8").trim();
+    // Hide the key murk stored for the vault, so its own lookup cannot be
+    // what signs: only the server env's key can.
+    const serverKeyFile = path.join(tmpRoot, "server-env.key");
+    writeFileSync(serverKeyFile, readFileSync(operatorKeyFile), { mode: 0o600 });
+    const hidden = `${operatorKeyFile}.hidden`;
+    renameSync(operatorKeyFile, hidden);
+    try {
+      const serverEnvs: Array<Record<string, string>> = [{ MURK_KEY_FILE: serverKeyFile }, { MURK_KEY: operatorKey }];
+      for (const env of serverEnvs) {
+        await withServerEnv(env, async () => {
+          const result = await mint();
+          expect(result.exitCode, result.stderr).toBe(0);
+        });
+      }
+      expect((await mint()).exitCode).toBe(1);
+    } finally {
+      renameSync(hidden, operatorKeyFile);
+    }
   });
 
   it("the setting wins over a key in the bb server's environment", async () => {

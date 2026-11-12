@@ -278,7 +278,6 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Grant name (used to disconnect/revoke it later)')
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('--allow-exec', '--allow-exec', [CompletionResultType]::ParameterName, 'Also enable the `murk_exec` tool in the MCP server (writes `--allow-exec` into the client config)')
-            [CompletionResult]::new('--allow-get', '--allow-get', [CompletionResultType]::ParameterName, 'Also enable the `murk_get` tool in the MCP server (writes `--allow-get` into the client config)')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -333,7 +332,6 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
         'murk;mcp' {
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('--allow-exec', '--allow-exec', [CompletionResultType]::ParameterName, 'Enable the murk_exec tool, which runs commands with the grant''s secrets injected')
-            [CompletionResult]::new('--allow-get', '--allow-get', [CompletionResultType]::ParameterName, 'Enable the murk_get tool, which returns a secret value to the agent')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break

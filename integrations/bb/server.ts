@@ -64,10 +64,10 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Operator key file",
       description:
-        "Absolute path to your murk key file: the MURK_KEY_FILE path that murk init wrote to the vault's .env. " +
+        "Optional. Absolute path to your murk key file: the MURK_KEY_FILE path that murk init wrote to the vault's .env. " +
         "bb murk grant mint and grant revoke sign the vault with it. The plugin passes it only to the murk commands " +
-        "it runs on the bb server, never to agent threads. Leave blank only if the bb server's own environment " +
-        "sets MURK_KEY_FILE or MURK_KEY.",
+        "it runs on the bb server, never to agent threads. Leave blank to use MURK_KEY_FILE or MURK_KEY from the " +
+        "bb server's environment, or, if neither is set, the key murk stored for the vault in ~/.config/murk/keys.",
       default: "",
     },
     vaultPath: {
@@ -362,7 +362,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ---- agent context for every provider ------------------------------------
   // murk_get is the sanctioned path to secrets, but an agent's shell can still
-  // run `murk` itself. Before 0.15, murk outside an agent context falls back to
+  // run `murk` itself. Outside an agent context, murk falls back to
   // the operator's stored key (~/.config/murk/keys, sibling git worktrees
   // included), and an inherited MURK_KEY / MURK_KEY_FILE is the operator's
   // identity outright. Every provider process therefore starts as an agent

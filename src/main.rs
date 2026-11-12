@@ -393,7 +393,6 @@ fn run() {
                 only,
                 allow_tag,
                 allow_exec,
-                allow_get,
                 ttl,
                 name,
                 vault,
@@ -402,7 +401,6 @@ fn run() {
                 &only,
                 &allow_tag,
                 allow_exec,
-                allow_get,
                 &ttl,
                 &name,
                 &murk_cli::resolve_vault_path(&vault),
@@ -422,11 +420,9 @@ fn run() {
         Command::Scan { paths, vault } => {
             cmd_scan(&paths, &murk_cli::resolve_vault_path(&vault));
         }
-        Command::Mcp {
-            vault,
-            allow_exec,
-            allow_get,
-        } => cmd_mcp(&murk_cli::resolve_vault_path(&vault), allow_exec, allow_get),
+        Command::Mcp { vault, allow_exec } => {
+            cmd_mcp(&murk_cli::resolve_vault_path(&vault), allow_exec)
+        }
         Command::Completion { action } => match action {
             CompletionAction::Generate { shell } => cmd_completion_generate(shell),
             CompletionAction::Install { shell } => cmd_completion_install(shell),
