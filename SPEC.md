@@ -1124,7 +1124,7 @@ Then you abort the merge and redo it with a key. A clean keyless merge keeps OUR
 
 ### `murk setup-merge-driver`
 
-Configures git to use `murk merge-driver %O %A %B %P` for `.murk` files via `.gitattributes` and `.git/config`.
+Configures git to use `murk merge-driver %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing.
 
 ---
 

@@ -3867,6 +3867,55 @@ fn setup_merge_driver_idempotent() {
         1,
         "should not duplicate the gitattributes entry"
     );
+    assert_eq!(gitattributes.matches(".murk.* merge=murk").count(), 1);
+}
+
+/// Both vault naming styles get the driver: `.murk` and `prod.murk` through
+/// `*.murk`, and `.murk.prod` through `.murk.*`. A repo set up by an older
+/// murk (only `*.murk`) gains the second line on the next run.
+#[test]
+fn setup_merge_driver_covers_both_vault_naming_styles() {
+    let dir = TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    fs::write(dir.path().join(".gitattributes"), "*.murk merge=murk").unwrap();
+
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("appended to .gitattributes"));
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+        "*.murk merge=murk\n.murk.* merge=murk\n"
+    );
+    for path in [".murk", ".murk.prod", "prod.murk", "sub/.murk.staging"] {
+        let out = std::process::Command::new("git")
+            .args(["check-attr", "merge", "--", path])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{path}: merge: murk\n"),
+            "{path}"
+        );
+    }
+    let out = std::process::Command::new("git")
+        .args(["check-attr", "merge", "--", ".murkignore", "notes.txt"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("merge: murk"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 // ── codename + repo ──

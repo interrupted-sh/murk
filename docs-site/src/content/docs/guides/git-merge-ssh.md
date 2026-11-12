@@ -25,8 +25,9 @@ murk setup-merge-driver
 
 This command does two things:
 
-- It adds `*.murk merge=murk` to `.gitattributes`. Commit that file. It goes
-  to every clone with the repository.
+- It adds `*.murk merge=murk` and `.murk.* merge=murk` to `.gitattributes`,
+  so the driver covers `.murk`, `prod.murk` and `.murk.prod`. Commit that
+  file. It goes to every clone with the repository.
 - It writes the driver definition to `.git/config`. That is local git
   configuration, which does not go with the repository. Everyone who works
   on the vault runs `murk setup-merge-driver` once in their own clone.

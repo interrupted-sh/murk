@@ -19,7 +19,7 @@ murk is a public beta (the 0.x line) for developer and team secrets. It has not 
 
 - Secret versioning (`murk history`, `murk rollback`)
 - Access logging
-- First-class environment separation (dev/staging/prod)
+- An `--env NAME` shortcut for environments. Environments are one vault per environment, chosen with `--vault` or `MURK_VAULT` (see the [Environments guide](https://murk.interrupted.sh/guides/environments/)). A shortcut would only pick the vault file and would not change the vault format.
 - Nix flake, Debian packages
 
 ## Non-goals

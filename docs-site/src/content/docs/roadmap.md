@@ -44,7 +44,10 @@ BIP39 recovery. 1.0 ships when all of these hold:
 
 - Secret versioning (`murk history`, `murk rollback`)
 - Access logging
-- First-class environment separation (dev/staging/prod)
+- An `--env NAME` shortcut for environments. Environments are one vault per
+  environment, chosen with `--vault` or `MURK_VAULT` (see
+  [Environments](/guides/environments/)). A shortcut would only pick the
+  vault file and would not change the vault format.
 - Nix flake, Debian packages
 
 ## Non-goals

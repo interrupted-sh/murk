@@ -12,11 +12,14 @@ each environment its own vault file in the repository:
 | File | Environment | Recipients |
 |---|---|---|
 | `.murk` | development | every developer |
-| `staging.murk` | staging | developers and CI |
-| `prod.murk` | production | the operations team and the production deploy |
+| `.murk.staging` | staging | developers and CI |
+| `.murk.prod` | production | the operations team and the production deploy |
 
 Every command takes `--vault FILE`, or reads the file name from
 `MURK_VAULT`. Without either, murk uses `.murk`.
+
+Names in the style `prod.murk` and `staging.murk` work the same way. This
+guide uses `.murk.prod` and `.murk.staging`.
 
 ## One vault per environment, tags, or groups
 
@@ -37,16 +40,14 @@ the vault can still read every shared key. A group limits who can decrypt a
 key, but the key still has one value. See [Shared, group and private
 secrets](/guides/shared-vs-scoped/) for groups.
 
-## Name the files so the merge driver covers them
+## The merge driver covers both naming styles
 
-The [merge driver](/guides/git-merge-ssh/) applies to files that match
-`*.murk`. That pattern covers `.murk`, `staging.murk` and `prod.murk`. It
-does not cover a name such as `.murk.prod`. If you use such a name, add a
-line for it to `.gitattributes`:
-
-```text
-.murk.* merge=murk
-```
+`murk setup-merge-driver` adds two lines to `.gitattributes`: `*.murk
+merge=murk` and `.murk.* merge=murk`. So the [merge
+driver](/guides/git-merge-ssh/) applies to `.murk`, `.murk.prod` and
+`prod.murk`. If you set up the driver with murk 0.14 or older, run `murk
+setup-merge-driver` again to add the second line, and commit
+`.gitattributes`.
 
 ## Create the vaults
 
@@ -55,8 +56,8 @@ environment:
 
 ```bash
 murk init
-murk init --vault staging.murk
-murk init --vault prod.murk
+murk init --vault .murk.staging
+murk init --vault .murk.prod
 ```
 
 When you create the second vault, murk already has a key for `.murk` on this
@@ -64,8 +65,8 @@ machine. So `murk init` asks once:
 
 ```text
 another vault in this directory has a key stored on this machine
-  1) use the key of .murk for staging.murk too (default)
-  2) make a separate key for staging.murk
+  1) use the key of .murk for .murk.staging too (default)
+  2) make a separate key for .murk.staging
 choose [1]:
 ```
 
@@ -84,9 +85,9 @@ After either choice, every command finds the key of the new vault from
 git worktree, as for `.murk` (see [Git worktrees](/guides/worktrees/)).
 
 ```bash
-murk add DATABASE_URL --vault prod.murk
-murk get DATABASE_URL --vault prod.murk
-MURK_VAULT=staging.murk murk ls
+murk add DATABASE_URL --vault .murk.prod
+murk get DATABASE_URL --vault .murk.prod
+MURK_VAULT=.murk.staging murk ls
 ```
 
 ### Scripts and agents
@@ -96,7 +97,7 @@ flags. `--reuse-key` uses the stored key, and `--separate-key` makes a new
 one:
 
 ```bash
-murk init --vault staging.murk --reuse-key
+murk init --vault .murk.staging --reuse-key
 ```
 
 If the vaults in the directory use different keys, `--reuse-key` does not
@@ -114,21 +115,21 @@ environments that they work on:
 
 ```bash
 murk circle authorize age1... --name bob --vault .murk
-murk circle authorize age1... --name bob --vault staging.murk
-murk circle authorize age1... --name ops-alice --vault prod.murk
+murk circle authorize age1... --name bob --vault .murk.staging
+murk circle authorize age1... --name ops-alice --vault .murk.prod
 ```
 
 Here bob can read development and staging but not production. To take a
 person off one environment, revoke them from that vault only:
 
 ```bash
-murk circle revoke bob --vault staging.murk
+murk circle revoke bob --vault .murk.staging
 ```
 
 The other parts of trust are also separate for each vault: the [trust
 pin](/concepts/recipients-signatures/#trusting-a-signer) (`murk trust --vault
-prod.murk`), the [agent grants](/concepts/grants/) and the agent policy.
-Trusting the signer of `.murk` does not trust `prod.murk`.
+.murk.prod`), the [agent grants](/concepts/grants/) and the agent policy.
+Trusting the signer of `.murk` does not trust `.murk.prod`.
 
 ## One key, or one key for each environment
 
@@ -150,7 +151,7 @@ when your shell loads it (`source .env`, or a `dotenv` line in `.envrc`).
 Unset the variable before you use a vault that has a separate key:
 
 ```bash
-env -u MURK_KEY_FILE murk get DATABASE_URL --vault prod.murk
+env -u MURK_KEY_FILE murk get DATABASE_URL --vault .murk.prod
 ```
 
 ## direnv for each environment
@@ -158,17 +159,17 @@ env -u MURK_KEY_FILE murk get DATABASE_URL --vault prod.murk
 `murk env` writes a `.envrc` that exports the secrets of one vault:
 
 ```bash
-murk env --vault staging.murk
+murk env --vault .murk.staging
 direnv allow
 ```
 
-The `.envrc` then runs `murk export --vault staging.murk`. `murk env`
+The `.envrc` then runs `murk export --vault .murk.staging`. `murk env`
 changes nothing when `.envrc` already has a `murk export` line, so a
 directory loads one environment. To load another environment, edit the
 `--vault` in `.envrc`, or run one command with that environment:
 
 ```bash
-murk exec --vault prod.murk -- ./deploy.sh
+murk exec --vault .murk.prod -- ./deploy.sh
 ```
 
 See [direnv integration](/guides/direnv/) for the rest of the setup.
@@ -176,13 +177,13 @@ See [direnv integration](/guides/direnv/) for the rest of the setup.
 ## CI: one grant for each environment
 
 Give each environment its own [scoped grant](/guides/cicd/#prefer-a-scoped-grant-over-a-full-key).
-A grant belongs to one vault, so the staging key cannot read `prod.murk`.
+A grant belongs to one vault, so the staging key cannot read `.murk.prod`.
 With GitHub environments, store each key in the secrets of its environment:
 
 ```bash
-murk agent grant --name ci-staging --only DATABASE_URL --vault staging.murk --out - | gh secret set MURK_KEY --env staging
-murk agent grant --name ci-prod --only DATABASE_URL --vault prod.murk --out - | gh secret set MURK_KEY --env production
-git add staging.murk prod.murk && git commit -m "grant CI per environment" && git push
+murk agent grant --name ci-staging --only DATABASE_URL --vault .murk.staging --out - | gh secret set MURK_KEY --env staging
+murk agent grant --name ci-prod --only DATABASE_URL --vault .murk.prod --out - | gh secret set MURK_KEY --env production
+git add .murk.staging .murk.prod && git commit -m "grant CI per environment" && git push
 ```
 
 Give murk-action the vault of each job with its `vault` input:
@@ -197,7 +198,7 @@ jobs:
       - uses: interrupted-sh/murk-action@v1
         with:
           murk-key: ${{ secrets.MURK_KEY }}
-          vault: staging.murk
+          vault: .murk.staging
       - run: ./deploy.sh
   deploy-prod:
     environment: production
@@ -207,7 +208,7 @@ jobs:
       - uses: interrupted-sh/murk-action@v1
         with:
           murk-key: ${{ secrets.MURK_KEY }}
-          vault: prod.murk
+          vault: .murk.prod
       - run: ./deploy.sh
 ```
 
@@ -220,13 +221,13 @@ The whole grant key file names the signers of its vault, so neither job needs
 Each environment is its own file, so git keeps a separate history for each:
 
 ```bash
-git log -p -- prod.murk
-murk diff --vault prod.murk
-murk diff main --vault staging.murk
+git log -p -- .murk.prod
+murk diff --vault .murk.prod
+murk diff main --vault .murk.staging
 ```
 
 `git log` shows only the commits that changed production. `murk diff` shows
 what changed in one vault since a git ref (`HEAD` by default): recipients,
 signer, signing keys, policy, grants, group members and secret names. It
-shows values only with `--show-values`. A change to `staging.murk` never
-appears in the diff of `prod.murk`.
+shows values only with `--show-values`. A change to `.murk.staging` never
+appears in the diff of `.murk.prod`.

@@ -9,8 +9,9 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// The `.gitattributes` line that enables the merge driver.
-const GITATTRIBUTES_LINE: &str = "*.murk merge=murk";
+/// The `.gitattributes` lines that enable the merge driver: one for vaults
+/// named `*.murk` (`.murk`, `prod.murk`) and one for `.murk.*` (`.murk.prod`).
+const GITATTRIBUTES_LINES: [&str; 2] = ["*.murk merge=murk", ".murk.* merge=murk"];
 
 /// Git config keys for the merge driver.
 const GIT_CONFIG_MERGE_NAME: &str = "merge.murk.name";
@@ -61,7 +62,8 @@ pub enum MergeDriverSetupStep {
 
 /// Configure git to use murk's custom merge driver for `.murk` files.
 ///
-/// 1. Ensures `.gitattributes` contains `*.murk merge=murk`.
+/// 1. Ensures `.gitattributes` contains `*.murk merge=murk` and
+///    `.murk.* merge=murk`, appending whichever is missing.
 /// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`.
 ///
 /// Returns the steps that were performed.
@@ -70,25 +72,38 @@ pub fn setup_merge_driver() -> Result<Vec<MergeDriverSetupStep>, String> {
 
     // 1. Write .gitattributes entry.
     let gitattributes = Path::new(".gitattributes");
-    let merge_line = GITATTRIBUTES_LINE;
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
 
     if gitattributes.exists() {
         let contents = fs::read_to_string(gitattributes)
             .map_err(|e| format!("reading .gitattributes: {e}"))?;
-        if contents.contains(merge_line) {
+        let missing: Vec<&str> = GITATTRIBUTES_LINES
+            .into_iter()
+            .filter(|line| !contents.lines().any(|l| l.trim() == *line))
+            .collect();
+        if missing.is_empty() {
             steps.push(MergeDriverSetupStep::GitattributesAlreadyExists);
         } else {
             let mut file = fs::OpenOptions::new()
                 .append(true)
                 .open(gitattributes)
                 .map_err(|e| format!("writing .gitattributes: {e}"))?;
-            writeln!(file, "{merge_line}").map_err(|e| format!("writing .gitattributes: {e}"))?;
+            // Never glue the first new line onto an unterminated last line.
+            let mut text = String::new();
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                text.push('\n');
+            }
+            for line in missing {
+                text.push_str(line);
+                text.push('\n');
+            }
+            file.write_all(text.as_bytes())
+                .map_err(|e| format!("writing .gitattributes: {e}"))?;
             steps.push(MergeDriverSetupStep::GitattributesAppended);
         }
     } else {
-        fs::write(gitattributes, format!("{merge_line}\n"))
+        fs::write(gitattributes, GITATTRIBUTES_LINES.join("\n") + "\n")
             .map_err(|e| format!("writing .gitattributes: {e}"))?;
         steps.push(MergeDriverSetupStep::GitattributesCreated);
     }
@@ -931,7 +946,11 @@ mod tests {
             .output()
             .unwrap();
 
-        std::fs::write(dir.join(".gitattributes"), "*.murk merge=murk\n").unwrap();
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "*.murk merge=murk\n.murk.* merge=murk\n",
+        )
+        .unwrap();
 
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
