@@ -60,7 +60,7 @@ Do that. A copy murk can't reach still trusts the revoked key. Such a copy was w
 
 A key file stops working at the expiry written into it (`# murk-grant-expires:`), whatever the vault says. A key file without that line is bounded only by the grant record in the vault, and that signer can rewrite the record. That covers a file minted by an older murk and a bare key line.
 
-Revocation and policy changes apply when a process loads the vault. A running `murk mcp` server and a loaded binding object keep the vault state from their last load, so they still serve a revoked grant. Restart the server and reload the binding object after you change access. Grant expiry is checked again on every value read.
+Revocation and policy changes apply when a process loads the vault. A running `murk mcp` server checks the vault file before every tool call and reloads it when it changed, so a revoke or a tighter policy applies from its next call. It also refuses a vault older than the newest one it has seen, or a fork of it, so writing the pre-revoke file back does not revive the grant. A loaded binding object keeps the vault state from its last load, so reload it after you change access. Grant expiry is checked again on every value read. A grant key still decrypts older vault versions from git history with plain age, so rotate after you revoke.
 
 ## Grants never sign or trust
 
