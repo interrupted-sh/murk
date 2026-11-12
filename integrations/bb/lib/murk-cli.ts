@@ -6,7 +6,7 @@
 // (`murk agent plan`). All of these run server-side against a server-local
 // vault file — the plugin's v1 contract is local-host-only.
 import { execFile } from "node:child_process";
-import { chmodSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
 
@@ -38,18 +38,20 @@ const MURK_TIMEOUT_MS = 30_000;
 
 /**
  * Run `murk <args>`. Never a shell. The environment is inherited except:
- * - MURK_AGENT / MURK_STRICT are stripped — these are operator-context
- *   invocations (mint/revoke need the operator identity; plan needs no key),
- *   and a stray agent flag would force strict mode and break the stored-key
- *   fallback.
+ * - MURK_AGENT / MURK_STRICT are stripped: these calls run as the operator
+ *   (mint, list and revoke) or need no key (plan), never as an agent context.
  * - MURK_VAULT is stripped — every call passes --vault explicitly.
+ * - With `keyFile`, MURK_KEY_FILE is that path and MURK_KEY is stripped, so
+ *   the call uses exactly that identity.
  * - With `keyless: true`, MURK_KEY / MURK_KEY_FILE are stripped too, so the
  *   call can never depend on (or exercise) an identity.
  *
- * `cwd` should be the directory holding the vault: murk resolves the
- * operator's stored-key fallback relative to the vault's project directory.
+ * `cwd` should be the directory holding the vault.
  */
-export function runMurk(args: string[], options?: { keyless?: boolean; cwd?: string }): Promise<MurkResult> {
+export function runMurk(
+  args: string[],
+  options?: { keyless?: boolean; keyFile?: string | null; cwd?: string },
+): Promise<MurkResult> {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.MURK_AGENT;
   delete env.MURK_STRICT;
@@ -57,6 +59,9 @@ export function runMurk(args: string[], options?: { keyless?: boolean; cwd?: str
   if (options?.keyless) {
     delete env.MURK_KEY;
     delete env.MURK_KEY_FILE;
+  } else if (options?.keyFile) {
+    delete env.MURK_KEY;
+    env.MURK_KEY_FILE = options.keyFile;
   }
   const { promise, resolve, reject } = Promise.withResolvers<MurkResult>();
   execFile(
@@ -75,6 +80,29 @@ export function runMurk(args: string[], options?: { keyless?: boolean; cwd?: str
   return promise;
 }
 
+export const NO_OPERATOR_KEY =
+  "no operator key configured: set the plugin's keyFile setting to your murk key file " +
+  "(the MURK_KEY_FILE path that murk init wrote to the vault's .env)";
+
+/**
+ * The operator identity for `murk agent grant`, `agent ls` and `agent revoke`.
+ * murk 0.15 uses only an explicitly configured key, so the plugin never
+ * relies on murk finding one itself. The keyFile setting wins. When it is
+ * blank, the bb server's own MURK_KEY or MURK_KEY_FILE is used as it is
+ * (returns null). With neither, this throws before any murk call. The vault's
+ * .env is never read: it sits in a worktree that an agent can edit.
+ */
+export function resolveOperatorKey(setting: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const keyFile = setting.trim();
+  if (keyFile) {
+    if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
+    if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
+    return keyFile;
+  }
+  if (env.MURK_KEY || env.MURK_KEY_FILE) return null;
+  throw new Error(NO_OPERATOR_KEY);
+}
+
 function murkError(what: string, result: MurkResult): Error {
   const detail = (result.stderr.trim() || result.stdout.trim()).replace(/\s+/g, " ");
   return new Error(`${what} failed: ${detail || `murk exited ${result.code}`}`);
@@ -82,8 +110,8 @@ function murkError(what: string, result: MurkResult): Error {
 
 /**
  * Mint a scoped grant in the vault and write its ephemeral identity to
- * `keyFilePath` (0600). Uses the operator identity the server process holds
- * (environment key or murk's stored key). Returns the grant's expiry.
+ * `keyFilePath` (0600). Signs as the operator identity from
+ * `resolveOperatorKey`. Returns the grant's expiry.
  */
 export async function mintGrant(options: {
   vaultPath: string;
@@ -91,29 +119,36 @@ export async function mintGrant(options: {
   keys: string[];
   ttl: string;
   keyFilePath: string;
+  operatorKey: string | null;
 }): Promise<{ expiresAt: string }> {
   const args = ["agent", "grant", "--name", options.name, "--ttl", options.ttl, "--out", options.keyFilePath, "--vault", options.vaultPath];
   for (const key of options.keys) args.push("--only", key);
-  const result = await runMurk(args, { cwd: path.dirname(options.vaultPath) });
+  const result = await runMurk(args, { keyFile: options.operatorKey, cwd: path.dirname(options.vaultPath) });
   if (result.code !== 0) throw murkError(`minting grant for ${options.keys.join(", ")}`, result);
   // murk writes the key file itself; clamp to 0600 regardless.
   chmodSync(options.keyFilePath, 0o600);
 
-  const grants = await listGrants(options.vaultPath);
+  const grants = await listGrants(options.vaultPath, options.operatorKey);
   const minted = grants.find((grant) => grant.name === options.name);
   if (!minted) throw new Error(`grant ${options.name} was minted but is missing from 'murk agent ls'`);
   return { expiresAt: minted.expires_at };
 }
 
-export async function listGrants(vaultPath: string): Promise<MurkGrantInfo[]> {
-  const result = await runMurk(["agent", "ls", "--json", "--vault", vaultPath], { cwd: path.dirname(vaultPath) });
+export async function listGrants(vaultPath: string, operatorKey: string | null): Promise<MurkGrantInfo[]> {
+  const result = await runMurk(["agent", "ls", "--json", "--vault", vaultPath], {
+    keyFile: operatorKey,
+    cwd: path.dirname(vaultPath),
+  });
   if (result.code !== 0) throw murkError("listing grants", result);
   return z.array(grantInfoSchema).parse(JSON.parse(result.stdout));
 }
 
 /** Revoke a grant by its murk name. Missing grants are treated as already revoked. */
-export async function revokeGrant(vaultPath: string, name: string): Promise<void> {
-  const result = await runMurk(["agent", "revoke", name, "--vault", vaultPath], { cwd: path.dirname(vaultPath) });
+export async function revokeGrant(vaultPath: string, name: string, operatorKey: string | null): Promise<void> {
+  const result = await runMurk(["agent", "revoke", name, "--vault", vaultPath], {
+    keyFile: operatorKey,
+    cwd: path.dirname(vaultPath),
+  });
   if (result.code !== 0 && !/no grant named|not found/i.test(result.stderr + result.stdout)) {
     throw murkError(`revoking grant ${name}`, result);
   }
