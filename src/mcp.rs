@@ -53,22 +53,93 @@ struct McpState {
     pubkey: String,
 }
 
-/// The vault the server reads, the grant key it was opened with, and the state
-/// of the last load that passed.
+/// The vault the server reads, the grant key it was opened with, the state of
+/// the last load that passed, and the newest signed vault it has seen.
 ///
 /// The key is resolved once, at startup, and kept: a reload opens the vault as
 /// the same grant identity, never as a key found later. The state is replaced
-/// only by a reload that passes every check a startup load does.
+/// only by a reload that passes every check a startup load does, and only by
+/// a vault at or above the floor ([`Floor`]).
 pub struct VaultWatch {
     path: String,
     key: SecretString,
-    loaded: Mutex<Loaded>,
+    watched: Mutex<Watched>,
+}
+
+struct Watched {
+    loaded: Loaded,
+    floor: Floor,
+    /// The hash of the bytes the previous check read, or `None` when it could
+    /// not read the file. The cached state serves only while the file has not
+    /// changed since a check that accepted it: once any other bytes were seen
+    /// (a refused reload included), the file goes through the full reload
+    /// again, even if it returns to the loaded bytes.
+    seen: Option<blake3::Hash>,
 }
 
 /// A trusted load and the BLAKE3 hash of the exact file bytes it came from.
 struct Loaded {
     state: Arc<McpState>,
     digest: blake3::Hash,
+}
+
+/// The newest version of the vault this process has seen with a signature
+/// the grant's key file trusts, whether or not the grant could still read it.
+///
+/// A revoke writes a signed vault the grant can no longer load. Recording its
+/// save counter here, before the load fails, is what stops the pre-revoke
+/// bytes from being accepted again when someone writes them back. In memory
+/// only: a restarted server starts from the vault it then finds.
+struct Floor {
+    vault_id: String,
+    generation: u64,
+    /// The signature of the vault at `generation`. Signing is deterministic,
+    /// so the same signed content always carries the same signature: a vault
+    /// at this counter with another signature is a fork, while the same vault
+    /// with other bytes outside the signed content (whitespace) is not.
+    signature: String,
+}
+
+/// A vault's signer and signature, which identify its signed content.
+fn signature_of(vault: &Vault) -> String {
+    vault
+        .sig
+        .as_ref()
+        .map(|s| format!("{} {}", s.signer, s.sig))
+        .unwrap_or_default()
+}
+
+impl Floor {
+    /// Refuse a signed `vault` that is another vault, older than the floor,
+    /// or a different vault at the floor's counter.
+    fn check(&self, vault: &Vault) -> Result<(), String> {
+        if vault.vault_id != self.vault_id {
+            return Err(format!(
+                "the file is another vault (id {:?}; this server started with {:?})",
+                vault.vault_id, self.vault_id
+            ));
+        }
+        if vault.generation < self.generation {
+            return Err(format!(
+                "the vault is older than one this server already saw (save counter {}, seen {}): \
+                 an older copy was written back",
+                vault.generation, self.generation
+            ));
+        }
+        if vault.generation == self.generation && signature_of(vault) != self.signature {
+            return Err(format!(
+                "the vault has the save counter of one this server already saw ({}) but other \
+                 signed contents: a forked copy",
+                vault.generation
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `vault` is the vault at the floor.
+    fn holds(&self, vault: &Vault) -> bool {
+        vault.generation == self.generation && signature_of(vault) == self.signature
+    }
 }
 
 impl VaultWatch {
@@ -79,16 +150,32 @@ impl VaultWatch {
     pub fn open(path: &str, key: SecretString) -> Result<(Self, Vec<String>), String> {
         let contents = murk_cli::vault::read_contents(std::path::Path::new(path))
             .map_err(|e| e.to_string())?;
-        let (state, warnings) = load_state(path, &key, &contents)?;
-        let loaded = Loaded {
-            state: Arc::new(state),
-            digest: blake3::hash(contents.as_bytes()),
+        let digest = blake3::hash(contents.as_bytes());
+        let vault = murk_cli::vault::parse(&contents).map_err(|e| e.to_string())?;
+        let floor = Floor {
+            vault_id: vault.vault_id.clone(),
+            generation: vault.generation,
+            signature: signature_of(&vault),
+        };
+        let (state, warnings) = load_state(path, &key, vault)?;
+        // The load verified the signature already when it loaded as a grant;
+        // this also holds a vault loaded any other way to the grant's signers,
+        // so the floor only ever comes from a trusted header.
+        murk_cli::verify_grant_signature(&state.vault, key.expose_secret())
+            .map_err(|e| e.to_string())?;
+        let watched = Watched {
+            loaded: Loaded {
+                state: Arc::new(state),
+                digest,
+            },
+            floor,
+            seen: Some(digest),
         };
         Ok((
             Self {
                 path: path.to_string(),
                 key,
-                loaded: Mutex::new(loaded),
+                watched: Mutex::new(watched),
             },
             warnings,
         ))
@@ -97,46 +184,61 @@ impl VaultWatch {
     /// The state a tool call must use: the loaded one if the vault file's
     /// bytes are unchanged, else a fresh load of the new bytes.
     ///
-    /// The file is read once, and the hash and the reload both use those
-    /// bytes, so a write between the check and the load cannot slip in. Any
-    /// failure (an unreadable, tampered or untrusted file, a revoked or
-    /// expired grant) fails the call and keeps the previous state, which
-    /// serves again only if the file returns to the bytes it was loaded from.
-    /// Calls check one at a time.
+    /// The file is read once, and the hash, the signature check and the reload
+    /// all use those bytes, so a write between the check and the load cannot
+    /// slip in. Changed bytes must be signed by a signer the grant trusts and
+    /// must not fall below the floor ([`Floor::check`]); a newer signed vault
+    /// raises the floor even if the grant can't load it (a revoke). Any
+    /// failure (an unreadable, tampered, untrusted, older or forked file, a
+    /// revoked or expired grant) fails the call. The cached state serves only
+    /// while the file has stayed at the bytes it was loaded from since then;
+    /// after other bytes were seen, the file reloads in full again, so the
+    /// floor applies to it. Calls check one at a time.
     fn current(&self) -> Result<Arc<McpState>, String> {
-        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         let refuse = |e: &dyn std::fmt::Display| {
             tracing::warn!("murk mcp: the vault could not be checked or reloaded: {e}");
             format!("refusing this call: the vault could not be checked or reloaded: {e}")
         };
-        let contents = murk_cli::vault::read_contents(std::path::Path::new(&self.path))
-            .map_err(|e| refuse(&e))?;
-        let digest = blake3::hash(contents.as_bytes());
-        if digest == loaded.digest {
-            return Ok(Arc::clone(&loaded.state));
+        let read = murk_cli::vault::read_contents(std::path::Path::new(&self.path)).map(|c| {
+            let digest = blake3::hash(c.as_bytes());
+            (c, digest)
+        });
+        let seen = read.as_ref().ok().map(|(_, digest)| *digest);
+        let unchanged = seen.is_some() && seen == w.seen;
+        w.seen = seen;
+        let (contents, digest) = read.map_err(|e| refuse(&e))?;
+        if unchanged && digest == w.loaded.digest && w.floor.holds(&w.loaded.state.vault) {
+            return Ok(Arc::clone(&w.loaded.state));
         }
-        let (state, warnings) =
-            load_state(&self.path, &self.key, &contents).map_err(|e| refuse(&e))?;
+        let vault = murk_cli::vault::parse(&contents).map_err(|e| refuse(&e))?;
+        murk_cli::verify_grant_signature(&vault, self.key.expose_secret())
+            .map_err(|e| refuse(&e))?;
+        w.floor.check(&vault).map_err(|e| refuse(&e))?;
+        if vault.generation > w.floor.generation {
+            w.floor.generation = vault.generation;
+            w.floor.signature = signature_of(&vault);
+        }
+        let (state, warnings) = load_state(&self.path, &self.key, vault).map_err(|e| refuse(&e))?;
         for warning in warnings {
             tracing::warn!("murk mcp: {warning}");
         }
         tracing::info!("murk mcp: the vault changed on disk; reloaded it");
-        *loaded = Loaded {
+        w.loaded = Loaded {
             state: Arc::new(state),
             digest,
         };
-        Ok(Arc::clone(&loaded.state))
+        Ok(Arc::clone(&w.loaded.state))
     }
 }
 
-/// Parse and load `contents`, read from `path`, as the grant whose key text is
+/// Load the parsed `vault`, read from `path`, as the grant whose key text is
 /// `key`, and refuse any identity that is not one of the vault's grants.
 fn load_state(
     path: &str,
     key: &SecretString,
-    contents: &str,
+    vault: Vault,
 ) -> Result<(McpState, Vec<String>), String> {
-    let vault = murk_cli::vault::parse(contents).map_err(|e| e.to_string())?;
     let (vault, mut murk, identity) =
         murk_cli::load_parsed_vault(path, vault, key.expose_secret()).map_err(|e| e.to_string())?;
     let pubkey = identity.pubkey_string().map_err(|e| e.to_string())?;

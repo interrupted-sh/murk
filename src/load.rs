@@ -438,6 +438,61 @@ fn own_private(
     private
 }
 
+/// The signers a grant key trusts: the trusted-signer lines of its key file
+/// (`key_text`) plus `MURK_TRUSTED_SIGNERS`. Refused when there are none.
+fn grant_anchor(key_text: &str) -> Result<trust::TrustedSigners, MurkError> {
+    let mut anchor = crate::agents::anchor_from_key_text(key_text).map_err(MurkError::Key)?;
+    if let Some(env) = trust::env_trusted_signers().map_err(MurkError::Key)? {
+        anchor.extend(env);
+    }
+    if anchor.is_empty() {
+        return Err(MurkError::Trust(
+            "this grant key names no trusted signers, so murk can't check the vault it reads: \
+             ask the operator to re-mint the grant (`murk agent grant --renew`), or set \
+             MURK_TRUSTED_SIGNERS"
+                .into(),
+        ));
+    }
+    Ok(anchor)
+}
+
+/// Verify `vault`'s signature under `anchor`; the signer on success.
+fn verify_under_anchor(
+    vault: &types::Vault,
+    anchor: &trust::TrustedSigners,
+) -> Result<String, MurkError> {
+    trust::verify_anchored(vault, anchor).map_err(|r| {
+        MurkError::Trust(match r {
+            trust::Refusal::Unsigned => {
+                "refusing to read: the vault is unsigned, and an agent grant trusts only a vault \
+                 signed by one of the signers in its key file"
+                    .into()
+            }
+            trust::Refusal::UntrustedSigner { signer } => format!(
+                "refusing to read: the vault is signed by {}, which is not a trusted signer in this \
+                 grant's key file. If the operator's signer changed, ask them to re-mint the grant",
+                crate::truncate_pubkey(&signer)
+            ),
+            other => format!(
+                "refusing to read: the vault signature does not verify under the trusted signer \
+                 in this grant's key file ({other:?}) — it may have been tampered with"
+            ),
+        })
+    })
+}
+
+/// Check that `vault` is signed by a signer the grant key `key_text` trusts,
+/// the check a grant load starts with, without decrypting anything. This
+/// works for a vault the grant can no longer read (revoked or expired), so
+/// its signed `vault_id` and `generation` can be trusted from the header.
+///
+/// `murk mcp` uses it to learn how far the vault has moved, even through a
+/// version that removed the grant, and to refuse an older or forked copy
+/// written back later.
+pub fn verify_grant_signature(vault: &types::Vault, key_text: &str) -> Result<(), MurkError> {
+    verify_under_anchor(vault, &grant_anchor(key_text)?).map(drop)
+}
+
 /// Load `vault` as the agent grant `identity`, whose `agents` blob is `blob`.
 ///
 /// The grant can't read the meta, so nothing inside the vault is trusted
@@ -458,37 +513,9 @@ fn inspect_as_grant(
     blob: &str,
 ) -> Result<InspectedVault, MurkError> {
     let pubkey = identity.pubkey_string()?;
-    let mut anchor = crate::agents::anchor_from_key_text(key_text).map_err(MurkError::Key)?;
+    let anchor = grant_anchor(key_text)?;
     let bound = crate::agents::grant_from_key_text(key_text).map_err(MurkError::Key)?;
-    if let Some(env) = trust::env_trusted_signers().map_err(MurkError::Key)? {
-        anchor.extend(env);
-    }
-    if anchor.is_empty() {
-        return Err(MurkError::Trust(
-            "this grant key names no trusted signers, so murk can't check the vault it reads: \
-             ask the operator to re-mint the grant (`murk agent grant --renew`), or set \
-             MURK_TRUSTED_SIGNERS"
-                .into(),
-        ));
-    }
-    let signer = trust::verify_anchored(&vault, &anchor).map_err(|r| {
-        MurkError::Trust(match r {
-            trust::Refusal::Unsigned => {
-                "refusing to read: the vault is unsigned, and an agent grant trusts only a vault \
-                 signed by one of the signers in its key file"
-                    .into()
-            }
-            trust::Refusal::UntrustedSigner { signer } => format!(
-                "refusing to read: the vault is signed by {}, which is not a trusted signer in this \
-                 grant's key file. If the operator's signer changed, ask them to re-mint the grant",
-                crate::truncate_pubkey(&signer)
-            ),
-            other => format!(
-                "refusing to read: the vault signature does not verify under the trusted signer \
-                 in this grant's key file ({other:?}) — it may have been tampered with"
-            ),
-        })
-    })?;
+    let signer = verify_under_anchor(&vault, &anchor)?;
     let mut record = crate::agents::open_blob(blob, &identity, &pubkey)?;
     if let Some(id) = &bound.id
         && *id != record.name
