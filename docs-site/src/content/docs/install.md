@@ -52,7 +52,7 @@ install stops.
 
 If `gh` is missing or not logged in, the script asks whether to install anyway
 (default no). Without a terminal, as in CI or a docker build, it stops unless
-`MURK_SKIP_ATTESTATION=1` is set for `sh`. Set `MURK_TAG=v0.14.1` to install a
+`MURK_SKIP_ATTESTATION=1` is set for `sh`. Set `MURK_TAG=v0.15.0` to install a
 specific release.
 
 The script installs to `/usr/local/bin/murk` by default. It uses `sudo` only
@@ -82,13 +82,13 @@ murk provides pre-built binaries for Linux (x86_64, aarch64, armhf), macOS
 
 Download the archive for your platform. Each one is named
 `murk-v<version>-<target>`, for example
-`murk-v0.14.1-aarch64-apple-darwin.tar.gz`. Linux and macOS archives are
+`murk-v0.15.0-aarch64-apple-darwin.tar.gz`. Linux and macOS archives are
 `.tar.gz` files. The Windows archive (`x86_64-pc-windows-msvc`) is a `.zip`.
 [Verify the download](#verify-your-download), then extract it and put the
 binary in a directory on your `PATH`:
 
 ```bash
-tar xzf murk-v0.14.1-aarch64-apple-darwin.tar.gz
+tar xzf murk-v0.15.0-aarch64-apple-darwin.tar.gz
 sudo mv murk /usr/local/bin/
 ```
 
@@ -109,10 +109,10 @@ Binary releases carry signed build provenance
 backed by Sigstore/Fulcio). Verify a downloaded artifact with the GitHub CLI:
 
 ```bash
-gh attestation verify murk-v0.14.1-aarch64-apple-darwin.tar.gz \
+gh attestation verify murk-v0.15.0-aarch64-apple-darwin.tar.gz \
   --repo interrupted-sh/murk \
   --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml \
-  --source-ref refs/tags/v0.14.1
+  --source-ref refs/tags/v0.15.0
 ```
 
 File names include the tag with its `v`. The Windows file is a `.zip`. This

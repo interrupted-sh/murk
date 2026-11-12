@@ -13,7 +13,7 @@ FROM scratch AS local-binary
 
 FROM debian:bookworm-slim
 
-ARG MURK_VERSION=v0.14.1
+ARG MURK_VERSION=v0.15.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*

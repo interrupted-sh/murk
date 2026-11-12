@@ -43,7 +43,7 @@ bb murk grant mint --keys API_KEY --upgrade
 
 ## Changelog
 
-### Unreleased (draft)
+### 0.2.0
 
 - `bb murk grant mint` and `bb murk grant revoke` refuse a call from a bb thread. Run them in your own terminal, outside bb threads. The agent skill now tells agents never to run `bb murk grant`.
 - New optional **Operator key file** setting (`keyFile`). Mint and revoke pass it to murk as `MURK_KEY_FILE`. With the setting blank, mint and revoke work as before: murk uses `MURK_KEY_FILE` or `MURK_KEY` from the bb server's environment, else the key it stored for the vault in `~/.config/murk/keys`.

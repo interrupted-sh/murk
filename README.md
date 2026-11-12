@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/interrupted-sh/murk/main/install.sh
 
 The script checks the archive against the release's `SHA256SUMS`. That catches a corrupt download but not a tampered release. The script then checks the release's build provenance with the [GitHub CLI](https://cli.github.com) (`gh`, logged in with `gh auth login` or `GH_TOKEN`). If a check fails, the install stops.
 
-If `gh` is missing or not logged in, the script asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.14.1` to install a specific release.
+If `gh` is missing or not logged in, the script asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.15.0` to install a specific release.
 
 The script installs to `/usr/local/bin` by default. To change that, set one of these variables on the `sh` side of the pipe, for example `... | PREFIX="$HOME/.local" sh`. A variable set before `curl` reaches only `curl`, not the script.
 
@@ -84,9 +84,9 @@ Pre-built binaries for Linux (x86_64, aarch64, armhf), macOS (x86_64, Apple Sili
 Binary releases carry [attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). Verify one downloaded file at a time (this needs `gh auth login`):
 
 ```bash
-gh attestation verify murk-v0.14.1-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk \
+gh attestation verify murk-v0.15.0-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk \
   --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml \
-  --source-ref refs/tags/v0.14.1
+  --source-ref refs/tags/v0.15.0
 ```
 
 This works for 0.12.0 and later. Releases 0.10.2 to 0.11.0 were signed as `interrupted-inc/murk`, and 0.3.1 to 0.10.1 as `iicky/murk`. See [VERIFYING.md](VERIFYING.md) to verify older releases and the npm, PyPI and crates.io packages.
@@ -413,7 +413,7 @@ murk provides a [pre-commit](https://pre-commit.com/) hook to scan staged files 
 ```yaml
 repos:
   - repo: https://github.com/interrupted-sh/murk
-    rev: v0.14.1  # run 'pre-commit autoupdate' to move to a newer tag
+    rev: v0.15.0  # run 'pre-commit autoupdate' to move to a newer tag
     hooks:
       - id: murk-scan
 ```

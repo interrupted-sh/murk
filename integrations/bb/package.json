@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-murk",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Scoped murk secrets for bb agent threads: value-free schema, grant-gated reads, dotenv delivery.",
   "license": "MIT OR Apache-2.0",
@@ -23,7 +23,7 @@
     "test": "cargo build --quiet --bin murk && PATH=\"$PWD/../../target/debug:$PATH\" vitest run"
   },
   "dependencies": {
-    "@interrupted/murk-secrets": "^0.14.0",
+    "@interrupted/murk-secrets": "^0.14.0 || ^0.15.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
