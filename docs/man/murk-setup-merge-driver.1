@@ -2,12 +2,14 @@
 .el .ds Aq '
 .TH murk-setup-merge-driver 1  "setup-merge-driver " 
 .SH NAME
-murk\-setup\-merge\-driver \- Configure git to use murk\*(Aqs merge driver for .murk files (experimental)
+murk\-setup\-merge\-driver \- Configure git to use murk\*(Aqs merge driver for vault files named `*.murk` or `.murk.*` (experimental)
 .SH SYNOPSIS
 \fBmurk setup\-merge\-driver\fR [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Configure git to use murk\*(Aqs merge driver for .murk files (experimental)
+Configure git to use murk\*(Aqs merge driver for vault files named `*.murk` or `.murk.*` (experimental)
+.PP
+Adds `*.murk merge=murk` and `.murk.* merge=murk` to the `.gitattributes` at the root of the working tree, and sets `merge.murk.*` in git config. A file that matches but is not a vault is merged as text.
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)

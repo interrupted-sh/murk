@@ -856,7 +856,7 @@ pub fn run_merge_driver(
     let ours_vault = vault::parse(ours).map_err(|e| format!("parsing ours: {e}"))?;
     let theirs_vault = vault::parse(theirs).map_err(|e| format!("parsing theirs: {e}"))?;
 
-    if merge_key_is_grant(&[&base_vault, &ours_vault, &theirs_vault]) {
+    if merge_key_is_grant(&[&base_vault, &ours_vault, &theirs_vault], vault_path) {
         return Err("agent grants are read-only; ask the operator to make this change".into());
     }
 
@@ -917,13 +917,13 @@ pub fn run_merge_driver(
 
 /// Group membership in the meta: group name → member pubkeys.
 type Groups = BTreeMap<String, Vec<String>>;
-/// Whether the key in the environment is an agent grant on any of `sides`, per
-/// that side's decrypted meta. No key, or a key that can't read a side's meta,
-/// is not a grant there.
-fn merge_key_is_grant(sides: &[&Vault]) -> bool {
+/// Whether the key for `vault_path` (see [`crate::resolve_key_for_vault`]) is
+/// an agent grant on any of `sides`, per that side's decrypted meta. No key,
+/// or a key that can't read a side's meta, is not a grant there.
+fn merge_key_is_grant(sides: &[&Vault], vault_path: &str) -> bool {
     use age::secrecy::ExposeSecret;
 
-    let Ok(secret_key) = crate::resolve_key() else {
+    let Ok(secret_key) = crate::resolve_key_for_vault(vault_path) else {
         return false;
     };
     let Ok(identity) = crate::crypto::parse_identity(secret_key.expose_secret()) else {
@@ -976,10 +976,14 @@ pub fn regenerate_meta(
     conflicts: &mut Vec<MergeConflict>,
     rekeyed: &mut BTreeSet<String>,
 ) -> Result<Option<String>, String> {
-    use crate::{compute_mac, crypto, decrypt_meta, encrypt_value, parse_recipients, resolve_key};
+    use crate::{
+        compute_mac, crypto, decrypt_meta, encrypt_value, parse_recipients, resolve_key_for_vault,
+    };
     use age::secrecy::ExposeSecret;
 
-    let Ok(secret_key) = resolve_key() else {
+    // The key of the vault being merged (git's %P), found like every other
+    // command finds it: `.murk.prod` with its own key merges with that key.
+    let Ok(secret_key) = resolve_key_for_vault(vault_path) else {
         return Ok(None);
     };
     let Ok(identity) = crypto::parse_identity(secret_key.expose_secret()) else {
@@ -3212,9 +3216,9 @@ mod tests {
         side.agents = crate::agents::blobs_for(&meta.grants, &[]).unwrap();
 
         unsafe { std::env::set_var("MURK_KEY", &op_sk) };
-        let operator_refused = merge_key_is_grant(&[&side]);
+        let operator_refused = merge_key_is_grant(&[&side], ".murk");
         unsafe { std::env::set_var("MURK_KEY", &agent_sk) };
-        let grant_refused = merge_key_is_grant(&[&side]);
+        let grant_refused = merge_key_is_grant(&[&side], ".murk");
         unsafe { std::env::remove_var("MURK_KEY") };
 
         assert!(

@@ -661,7 +661,7 @@ Interactive setup. Prompts for a display name. Then:
 
 1. Finds your key. It looks at `MURK_KEY` or `MURK_KEY_FILE` from the environment first. Then it looks at the key stored at `~/.config/murk/keys/<vault-hash>` for this checkout or for the same vault in a sibling worktree (the lookup under Discovery). Then it looks for keys stored for other vaults in the same directory (see Several vaults in one directory below). Only when none of these exists does it generate an age keypair via BIP39 (a 24-word mnemonic encodes the key directly) and write the secret key to `~/.config/murk/keys/<vault-hash>` with mode 0600. The key file is created exclusively, so init never overwrites one.
 2. For a newly generated key, prints the BIP39 24-word recovery phrase to stderr. A reused key prints none (use `murk recover`).
-3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes a `MURK_KEY_FILE` path from the environment. If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes. A key for a second vault in the same directory never touches `.env`.
+3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes `.env` at all and prints no key-store path (not even the `MURK_KEY_FILE` it uses). If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes. A key for a second vault in the same directory never touches `.env`.
 4. Creates the `.murk` vault with your pubkey as the first recipient, a fresh `vault_id` and `generation` 1, signed by your key when that key can sign, and records it in the local trust pin with the creator as its trusted signer.
 
 If the vault already exists, init does not change it. It uses the same key lookup and writes `.env` by the same rules. Then it reports whether the key is a recipient:
@@ -1107,9 +1107,11 @@ Under `MURK_STRICT` the "not trusted on this machine" case is refused instead, a
 
 ### `murk merge-driver BASE OURS THEIRS [PATH]`
 
-Git merge driver for `.murk` files, called by git (the command is hidden from help). git supplies the three paths (`%O`, `%A`, `%B`) and the vault's path `%P`. The result replaces OURS. It merges non-conflicting secret changes automatically.
+Git merge driver for vault files, called by git (the command is hidden from help). git supplies the three paths (`%O`, `%A`, `%B`) and the vault's path `%P`. The result replaces OURS. It merges non-conflicting secret changes automatically.
 
-**With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key for a vault named `.murk`, which strict and agent mode do not look up), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`). It refuses an untrusted side as a conflict, regenerates the meta and signs the merged result. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (Trust, rule 9).
+When none of the three inputs is a vault (the `.murk.*` pattern also matches files such as `.murk.bak` or an editor swap file), the driver merges them as text with `git merge-file`, as git would without a driver: it exits 0 for a clean merge, and 1 with conflict markers in OURS for a conflict. A file `git merge-file` cannot merge (binary) is left as OURS with exit 1.
+
+**With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key of the vault at `%P`, found as every other command finds it and not looked up in strict and agent mode), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`). It refuses an untrusted side as a conflict, regenerates the meta and signs the merged result. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (Trust, rule 9).
 
 **Without a key**, the driver merges cleanly only when the merge changed nothing the meta covers. In each of these cases it exits 1 and writes nothing (when there are no merge conflicts):
 
@@ -1124,7 +1126,7 @@ Then you abort the merge and redo it with a key. A clean keyless merge keeps OUR
 
 ### `murk setup-merge-driver`
 
-Configures git to use `murk merge-driver %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing.
+Configures git to use `murk merge-driver %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing, to the `.gitattributes` at the root of the working tree, also when run from a subdirectory. Outside a git working tree it fails and writes nothing.
 
 ---
 

@@ -60,18 +60,31 @@ pub enum MergeDriverSetupStep {
     GitConfigured,
 }
 
-/// Configure git to use murk's custom merge driver for `.murk` files.
+/// Configure git to use murk's custom merge driver for vault files.
 ///
-/// 1. Ensures `.gitattributes` contains `*.murk merge=murk` and
-///    `.murk.* merge=murk`, appending whichever is missing.
+/// 1. Ensures the `.gitattributes` at the root of the working tree contains
+///    `*.murk merge=murk` and `.murk.* merge=murk`, appending whichever is
+///    missing. Outside a working tree it fails before writing anything.
 /// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`.
 ///
 /// Returns the steps that were performed.
 pub fn setup_merge_driver() -> Result<Vec<MergeDriverSetupStep>, String> {
     let mut steps = Vec::new();
 
-    // 1. Write .gitattributes entry.
-    let gitattributes = Path::new(".gitattributes");
+    // 1. Write .gitattributes entry, at the root of the working tree: a
+    // `.gitattributes` in a subdirectory only covers that subdirectory.
+    let toplevel = git_command()
+        .args(["rev-parse", "--show-toplevel"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("running git rev-parse: {e}"))?;
+    let root = String::from_utf8(toplevel.stdout)
+        .ok()
+        .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+        .filter(|s| toplevel.status.success() && !s.is_empty())
+        .ok_or("not inside a git working tree; run murk setup-merge-driver in your repository")?;
+    let gitattributes_path = Path::new(&root).join(".gitattributes");
+    let gitattributes = gitattributes_path.as_path();
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
 
@@ -1145,9 +1158,9 @@ mod tests {
         let _lock = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // No `git init`: `git config` has no repo to write to and must fail,
-        // surfacing the "are you in a git repo?" guidance rather than silently
-        // claiming the merge driver was configured.
+        // No `git init`: there is no working tree to configure, so setup must
+        // fail before writing anything, rather than leave a stray
+        // .gitattributes or claim the merge driver was configured.
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path();
 
@@ -1158,9 +1171,10 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            err.contains("git config") && err.contains("failed"),
-            "expected git-config failure guidance, got: {err}"
+            err.contains("not inside a git working tree"),
+            "expected not-a-repo guidance, got: {err}"
         );
+        assert!(!dir.join(".gitattributes").exists());
     }
 
     // ── worktree layout ──

@@ -59,6 +59,10 @@ fn store_key(vault_name: &str, secret_key: &str) -> std::path::PathBuf {
 /// Callers check for a stored key first, so the key file this writes never
 /// already exists: generation never replaces a stored identity.
 fn generate_and_write_key(vault_name: &str, point_dotenv: bool) -> zeroize::Zeroizing<String> {
+    // Under MURK_STRICT or MURK_AGENT, .env is not written: it would put the
+    // key-store path in a file the agent can read.
+    let strict = murk_cli::hardening::strict_mode();
+    let point_dotenv = point_dotenv && !strict;
     // A key line in .env here names a key murk could not find in the
     // environment or ~/.config/murk/keys: an inline MURK_KEY, or a MURK_KEY_FILE
     // somewhere else. Replacing the line drops that reference, so ask first.
@@ -97,6 +101,12 @@ fn generate_and_write_key(vault_name: &str, point_dotenv: bool) -> zeroize::Zero
             "  {}",
             ".env holds only the path to your key file; keep both out of git".dimmed()
         );
+    } else if strict {
+        eprintln!(
+            "  {}",
+            "strict mode (MURK_STRICT or MURK_AGENT): .env not written; outside strict mode murk finds this key by itself"
+                .dimmed()
+        );
     }
 
     secret_key
@@ -115,11 +125,17 @@ fn reuse_key(source: &KeySource) {
         }
         KeySource::EnvFile(path) | KeySource::Auto(path) => path,
     };
-    eprintln!(
-        "{} using existing key {}",
-        "◆".magenta(),
-        key_path.display().to_string().dimmed()
-    );
+    // A key-store path is never printed under MURK_STRICT or MURK_AGENT, even
+    // the one MURK_KEY_FILE names.
+    if murk_cli::hardening::strict_mode() {
+        eprintln!("{} using existing key from MURK_KEY_FILE", "◆".magenta());
+    } else {
+        eprintln!(
+            "{} using existing key {}",
+            "◆".magenta(),
+            key_path.display().to_string().dimmed()
+        );
+    }
     let strict_env_key =
         matches!(source, KeySource::EnvFile(_)) && murk_cli::hardening::strict_mode();
     if !strict_env_key && !murk_cli::dotenv_has_murk_key() {

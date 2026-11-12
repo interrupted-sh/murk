@@ -523,7 +523,11 @@ pub enum Command {
         vault: String,
     },
 
-    /// Configure git to use murk's merge driver for .murk files (experimental)
+    /// Configure git to use murk's merge driver for vault files named `*.murk` or `.murk.*` (experimental)
+    ///
+    /// Adds `*.murk merge=murk` and `.murk.* merge=murk` to the `.gitattributes`
+    /// at the root of the working tree, and sets `merge.murk.*` in git config.
+    /// A file that matches but is not a vault is merged as text.
     #[command(name = "setup-merge-driver")]
     SetupMergeDriver,
 

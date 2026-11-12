@@ -48,8 +48,11 @@ secret.
 ### What the driver checks
 
 Run the driver with your key available: `MURK_KEY`, `MURK_KEY_FILE`, or the
-stored key for a vault named `.murk`. For a vault with another name, set
-`MURK_KEY_FILE`.
+stored key of the vault being merged. The driver finds the stored key of
+`.murk.prod` or `prod.murk` as `--vault` does, so a vault with its own key
+merges with no setup. A file that matches the pattern but is not a vault
+(`.murk.bak`) is merged as text, with conflict markers where both sides
+changed the same lines.
 
 With a key, the driver checks **both sides** as a load does:
 
