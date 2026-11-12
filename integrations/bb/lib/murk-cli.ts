@@ -100,12 +100,15 @@ export function resolveOperatorKey(setting: string): string | null {
 
 /**
  * `text` with key file paths replaced by `<key file>`: the configured
- * `keyFile`, and any path into murk's key store (`~/.config/murk/keys`). murk
- * names the key file in some errors, such as its `chmod 600 <path>` hint for
- * a key file that others can read.
+ * `keyFile`, the bb server's own `MURK_KEY_FILE`, and any path into murk's key
+ * store (`~/.config/murk/keys`). murk names the key file in some errors, such
+ * as its `chmod 600 <path>` hint for a key file that others can read.
  */
-export function redactKeyPaths(text: string, keyFile?: string | null): string {
-  let out = keyFile ? text.split(keyFile).join("<key file>") : text;
+export function redactKeyPaths(text: string, keyFile?: string | null, env: NodeJS.ProcessEnv = process.env): string {
+  let out = text;
+  for (const file of [keyFile, env.MURK_KEY_FILE]) {
+    if (file) out = out.split(file).join("<key file>");
+  }
   out = out.replace(/[^\s'"`]*[\\/]\.config[\\/]murk[\\/]keys[^\s'"`]*/g, "<key file>");
   return out;
 }

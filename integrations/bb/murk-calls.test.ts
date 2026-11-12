@@ -303,7 +303,17 @@ describe("errors name no key path", () => {
     await host.harness.behavior.setSettings({ keyFile: loose });
     const minted = await runCli(mintArgs, { cwd: worktree, projectId: PROJECT });
     expect(minted.exitCode).toBe(1);
+    expect(minted.stderr).toContain("<key file>");
     expect(minted.stderr).not.toContain(loose);
+
+    // Blank keyFile: the bb server's own MURK_KEY_FILE names the loose file.
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    await withServerEnv({ MURK_KEY_FILE: loose }, async () => {
+      const fromEnv = await runCli(mintArgs, { cwd: worktree, projectId: PROJECT });
+      expect(fromEnv.exitCode).toBe(1);
+      expect(fromEnv.stderr).toContain("<key file>");
+      expect(fromEnv.stderr).not.toContain(loose);
+    });
     await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
   });
 });
