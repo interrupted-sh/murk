@@ -149,6 +149,9 @@ pub fn neighbour_vaults_with_keys(vault_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Stored keys that failed to load, as `(vault name, reason)`.
+pub type SkippedKeys = Vec<(String, String)>;
+
 /// The keys stored for other vaults next to `vault_path`, one entry per
 /// identity, for `murk init` to offer when a repository gets a second vault.
 ///
@@ -158,7 +161,7 @@ pub fn neighbour_vaults_with_keys(vault_path: &str) -> Vec<String> {
 /// read a stored key, so there this is an error.
 pub fn discover_neighbour_keys(
     vault_path: &str,
-) -> Result<(Vec<NeighbourKey>, Vec<(String, String)>), String> {
+) -> Result<(Vec<NeighbourKey>, SkippedKeys), String> {
     if crate::hardening::strict_mode() {
         return Err("strict mode (MURK_STRICT or MURK_AGENT) never reads stored keys".into());
     }

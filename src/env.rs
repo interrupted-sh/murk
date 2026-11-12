@@ -525,7 +525,7 @@ pub fn stored_keys_for_neighbour_vaults(vault_path: &str) -> Vec<(String, std::p
     let names: std::collections::BTreeSet<String> = dirs
         .iter()
         .filter_map(|d| fs::read_dir(d).ok())
-        .flat_map(|entries| entries.flatten())
+        .flat_map(Iterator::flatten)
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| std::ffi::OsStr::new(name) != own_name)
