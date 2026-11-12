@@ -49,7 +49,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand doctor 'Check the surrounding repo for hygiene issues'
             cand scan 'Scan files for leaked secret values'
             cand diff 'Show secret and access changes vs a git ref (experimental)'
-            cand setup-merge-driver 'Configure git to use murk''s merge driver for .murk files (experimental)'
+            cand setup-merge-driver 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)'
             cand merge-driver 'Git merge driver for .murk vault files (called by git, experimental)'
             cand completion 'Generate or install shell completions'
             cand help 'Print this message or the help of the given subcommand(s)'
@@ -469,8 +469,8 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;setup-merge-driver'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;merge-driver'= {
             cand -h 'Print help'
@@ -532,7 +532,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand doctor 'Check the surrounding repo for hygiene issues'
             cand scan 'Scan files for leaked secret values'
             cand diff 'Show secret and access changes vs a git ref (experimental)'
-            cand setup-merge-driver 'Configure git to use murk''s merge driver for .murk files (experimental)'
+            cand setup-merge-driver 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)'
             cand merge-driver 'Git merge driver for .murk vault files (called by git, experimental)'
             cand completion 'Generate or install shell completions'
             cand help 'Print this message or the help of the given subcommand(s)'

@@ -870,6 +870,152 @@ fn reuse_key_with_nothing_to_reuse_does_not_make_a_new_key() {
     assert!(!dir.path().join("prod.murk").exists());
 }
 
+/// The key-store path `murk init --vault <vault>` (outside strict mode)
+/// reports on its "key saved to" line.
+fn saved_key_path(stderr: &[u8]) -> std::path::PathBuf {
+    let stderr = String::from_utf8_lossy(stderr);
+    let line = stderr
+        .lines()
+        .find_map(|l| {
+            l.split_once("key saved to ")
+                .map(|(_, p)| p.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("no key path in: {stderr}"));
+    std::path::PathBuf::from(line)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_vault_is_not_offered_as_a_neighbour() {
+    // prod.murk has a stored key, but the file in this directory is now a
+    // symlink: only regular files count, so there is nothing to reuse.
+    let dir = TempDir::new().unwrap();
+    init_second(&dir, "prod.murk", &[]).assert().success();
+    fs::rename(dir.path().join("prod.murk"), dir.path().join("vault.json")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("vault.json"), dir.path().join("prod.murk"))
+        .unwrap();
+
+    init_second(&dir, "staging.murk", &["--reuse-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no other vault next to"));
+    assert!(!dir.path().join("staging.murk").exists());
+    assert_eq!(stored_keys(dir.path()).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_separate_key_over_a_symlink_prints_no_key_store_path() {
+    let dir = TempDir::new().unwrap();
+    vault_with_stored_key(&dir);
+    // Learn where staging.murk's key goes, then plant a dangling symlink there.
+    let out = init_second(&dir, "staging.murk", &["--separate-key"])
+        .assert()
+        .success();
+    let key_path = saved_key_path(&out.get_output().stderr);
+    fs::remove_file(&key_path).unwrap();
+    fs::remove_file(dir.path().join("staging.murk")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("nowhere"), &key_path).unwrap();
+
+    let out = init_second(&dir, "staging.murk", &["--separate-key"])
+        .env("MURK_AGENT", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlink"));
+    assert_no_key_store_path(
+        &String::from_utf8_lossy(&out.get_output().stderr),
+        dir.path(),
+    );
+    assert!(key_path.is_symlink(), "the symlink was replaced");
+    assert!(!dir.path().join("nowhere").exists());
+}
+
+#[test]
+fn init_never_replaces_a_key_stored_while_it_waits_for_the_name() {
+    // Another init stores a key for this vault while this one waits at the
+    // name prompt: the exclusive create refuses, and that key survives.
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    let dir = TempDir::new().unwrap();
+    let out = init_second(&dir, "prod.murk", &[]).assert().success();
+    let key_path = saved_key_path(&out.get_output().stderr);
+    for file in [
+        &key_path,
+        &dir.path().join("prod.murk"),
+        &dir.path().join(".env"),
+    ] {
+        fs::remove_file(file).unwrap();
+    }
+
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    for var in MURK_CONTEXT_VARS {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd
+        .args(["init", "--vault", "prod.murk"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut seen = Vec::new();
+    let mut byte = [0u8; 1];
+    while !String::from_utf8_lossy(&seen).contains("Enter your name") {
+        assert_eq!(stderr.read(&mut byte).unwrap(), 1, "init exited early");
+        seen.push(byte[0]);
+    }
+    fs::write(&key_path, "planted\n").unwrap();
+    child.stdin.take().unwrap().write_all(b"alice\n").unwrap();
+    stderr.read_to_end(&mut seen).unwrap();
+    let status = child.wait().unwrap();
+    let stderr = String::from_utf8_lossy(&seen);
+
+    assert!(!status.success(), "init replaced the key: {stderr}");
+    assert!(stderr.contains("already stored"), "{stderr}");
+    assert_eq!(fs::read(&key_path).unwrap(), b"planted\n");
+    assert!(!dir.path().join("prod.murk").exists());
+}
+
+#[test]
+fn strict_init_writes_no_key_store_path_to_dotenv_or_stderr() {
+    // A new key under MURK_AGENT: stored, but .env is not written.
+    let dir = TempDir::new().unwrap();
+    let out = init_second(&dir, "test.murk", &[])
+        .env("MURK_AGENT", "1")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(".env not written"));
+    assert_no_key_store_path(
+        &String::from_utf8_lossy(&out.get_output().stderr),
+        dir.path(),
+    );
+    assert!(!dir.path().join(".env").exists(), "strict init wrote .env");
+    let keys = stored_keys(dir.path());
+    assert_eq!(keys.len(), 1);
+
+    // MURK_KEY_FILE pointing into the key store: used, its path not printed.
+    for var in ["MURK_AGENT", "MURK_STRICT"] {
+        let out = murk_bin(dir.path())
+            .args(["init", "--vault", "test.murk"])
+            .current_dir(dir.path())
+            .env(var, "1")
+            .env("MURK_KEY_FILE", &keys[0])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(
+                "using existing key from MURK_KEY_FILE",
+            ));
+        assert_no_key_store_path(
+            &String::from_utf8_lossy(&out.get_output().stderr),
+            dir.path(),
+        );
+        assert!(!dir.path().join(".env").exists(), "{var}: .env written");
+    }
+}
+
 // ── add / get ──
 
 #[test]
@@ -3920,6 +4066,160 @@ fn setup_merge_driver_covers_both_vault_naming_styles() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+#[test]
+fn setup_merge_driver_writes_the_root_gitattributes_from_a_subdirectory() {
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let sub = dir.path().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(&sub)
+        .assert()
+        .success();
+
+    assert!(!sub.join(".gitattributes").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+        "*.murk merge=murk\n.murk.* merge=murk\n"
+    );
+}
+
+#[test]
+fn setup_merge_driver_outside_a_repository_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not inside a git working tree"));
+    assert!(!dir.path().join(".gitattributes").exists());
+}
+
+/// A repository in `repo` whose `.gitattributes` and git config use the murk
+/// merge driver (the test binary) for both vault naming styles.
+fn repo_with_merge_driver(repo: &std::path::Path) {
+    git_ok(repo, &["init", "-q", "-b", "main"]);
+    let driver = assert_cmd::cargo::cargo_bin("murk");
+    git_ok(
+        repo,
+        &[
+            "config",
+            "merge.murk.driver",
+            &format!("'{}' merge-driver %O %A %B %P", driver.display()),
+        ],
+    );
+    fs::write(
+        repo.join(".gitattributes"),
+        "*.murk merge=murk\n.murk.* merge=murk\n",
+    )
+    .unwrap();
+}
+
+/// `git merge <branch>` in `repo` with `home` as HOME and no murk variables,
+/// as a user's shell runs it. Returns whether the merge succeeded.
+fn git_merge_as(home: &std::path::Path, repo: &std::path::Path, branch: &str) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    for var in MURK_CONTEXT_VARS {
+        cmd.env_remove(var);
+    }
+    let out = cmd
+        .args(["merge", "--no-edit", branch])
+        .current_dir(repo)
+        .env("HOME", home)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .unwrap();
+    out.status.success()
+}
+
+#[test]
+fn merge_driver_merges_a_non_vault_file_as_text() {
+    // `.murk.*` also matches backups and swap files. Both sides change them:
+    // a clean text merge where the changes do not overlap, conflict markers
+    // where they do, never ours alone with no markers.
+    let dir = TempDir::new().unwrap();
+    let repo = real_path(dir.path());
+    repo_with_merge_driver(&repo);
+    fs::write(repo.join(".murk.bak"), "one\ntwo\nthree\n").unwrap();
+    fs::write(repo.join(".murk.orig"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    git_ok(&repo, &["add", "."]);
+    git_ok(&repo, &["commit", "-qm", "base"]);
+
+    git_ok(&repo, &["checkout", "-qb", "theirs"]);
+    fs::write(repo.join(".murk.bak"), "THEIRS\ntwo\nthree\n").unwrap();
+    fs::write(repo.join(".murk.orig"), "one\ntwo\nthree\nfour\nFIVE\n").unwrap();
+    git_ok(&repo, &["commit", "-qam", "theirs"]);
+    git_ok(&repo, &["checkout", "-q", "main"]);
+    fs::write(repo.join(".murk.bak"), "OURS\ntwo\nthree\n").unwrap();
+    fs::write(repo.join(".murk.orig"), "ONE\ntwo\nthree\nfour\nfive\n").unwrap();
+    git_ok(&repo, &["commit", "-qam", "ours"]);
+
+    assert!(
+        !git_merge_as(dir.path(), &repo, "theirs"),
+        "merge succeeded"
+    );
+    let bak = fs::read_to_string(repo.join(".murk.bak")).unwrap();
+    assert!(
+        bak.contains("<<<<<<<") && bak.contains("OURS") && bak.contains("THEIRS"),
+        "{bak}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(".murk.orig")).unwrap(),
+        "ONE\ntwo\nthree\nfour\nFIVE\n"
+    );
+}
+
+#[test]
+fn merge_driver_uses_the_key_of_the_vault_it_merges() {
+    // .murk.prod has its own key, and no key is in the environment: the
+    // driver finds that vault's key, as every other command does.
+    let dir = TempDir::new().unwrap();
+    let base = real_path(dir.path());
+    let (home, repo) = (base.join("home"), base.join("repo"));
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    repo_with_merge_driver(&repo);
+    for args in [
+        &["init"][..],
+        &["init", "--vault", ".murk.prod", "--separate-key"][..],
+    ] {
+        murk_bin(&home)
+            .args(args)
+            .current_dir(&repo)
+            .write_stdin("alice\n")
+            .assert()
+            .success();
+    }
+    let add = |key: &str| {
+        murk_bin(&home)
+            .args(["add", key, "--vault", ".murk.prod"])
+            .current_dir(&repo)
+            .write_stdin("v\n")
+            .assert()
+            .success();
+    };
+    git_ok(&repo, &["add", ".gitattributes", ".murk", ".murk.prod"]);
+    git_ok(&repo, &["commit", "-qm", "vaults"]);
+    git_ok(&repo, &["checkout", "-qb", "theirs"]);
+    add("THEIRS");
+    git_ok(&repo, &["commit", "-qam", "theirs"]);
+    git_ok(&repo, &["checkout", "-q", "main"]);
+    add("OURS");
+    git_ok(&repo, &["commit", "-qam", "ours"]);
+
+    assert!(git_merge_as(&home, &repo, "theirs"), "merge failed");
+    for key in ["OURS", "THEIRS"] {
+        get_ok(&home, &repo, ".murk.prod", key, "v");
+    }
 }
 
 // ── codename + repo ──

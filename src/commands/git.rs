@@ -15,12 +15,25 @@ pub(crate) fn cmd_merge_driver(
     theirs_path: &str,
     vault_path: Option<&str>,
 ) {
-    let base_contents = fs::read_to_string(base_path)
-        .unwrap_or_else(|e| die(&format_args!("reading base {base_path}: {e}"), 1));
-    let ours_contents = fs::read_to_string(ours_path)
-        .unwrap_or_else(|e| die(&format_args!("reading ours {ours_path}: {e}"), 1));
-    let theirs_contents = fs::read_to_string(theirs_path)
-        .unwrap_or_else(|e| die(&format_args!("reading theirs {theirs_path}: {e}"), 1));
+    let read = |what: &str, path: &str| {
+        fs::read(path).unwrap_or_else(|e| die(&format_args!("reading {what} {path}: {e}"), 1))
+    };
+    let sides = [
+        read("base", base_path),
+        read("ours", ours_path),
+        read("theirs", theirs_path),
+    ];
+    // `.murk.*` in .gitattributes also matches files that are not vaults
+    // (`.murk.bak`, `.murk.orig`, an editor swap file). Merge those as text,
+    // as git does without a driver: a clean merge, or a conflict with
+    // markers. Never fail with ours left in place and no markers, which a
+    // routine `git add` would commit as the resolution.
+    if !sides.iter().any(|side| parses_as_vault(side)) {
+        merge_as_text(base_path, ours_path, theirs_path, vault_path);
+    }
+    let [base_contents, ours_contents, theirs_contents] = sides.map(|side| {
+        String::from_utf8(side).unwrap_or_else(|_| die(&"a merge input is not UTF-8 text", 1))
+    });
 
     // git runs the driver from the work-tree root and passes the vault's path
     // as %P; a driver configured before 0.14 has no %P, so fall back to the
@@ -110,6 +123,49 @@ pub(crate) fn cmd_merge_driver(
                 .dimmed()
         );
         process::exit(1);
+    }
+}
+
+/// Whether `bytes` is a murk vault file, by the same parser the driver uses.
+fn parses_as_vault(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| vault::parse(text).is_ok())
+}
+
+/// Merge a non-vault file as git would without a driver: `git merge-file`
+/// writes the result into ours (`%A`), with conflict markers where both sides
+/// changed the same lines. Exits 0 for a clean merge and 1 for a conflict.
+/// A file git cannot merge as text (binary) is left as ours, as git leaves a
+/// conflicted binary file.
+fn merge_as_text(base_path: &str, ours_path: &str, theirs_path: &str, name: Option<&str>) -> ! {
+    let name = name.unwrap_or("file");
+    let status = murk_cli::git_command()
+        .args(["merge-file", "-L"])
+        .arg(format!("ours:{name}"))
+        .arg("-L")
+        .arg(format!("base:{name}"))
+        .arg("-L")
+        .arg(format!("theirs:{name}"))
+        .args([ours_path, base_path, theirs_path])
+        .status()
+        .unwrap_or_else(|e| die(&format_args!("running git merge-file: {e}"), 1));
+    // git merge-file exits with the number of conflicts (capped at 127), or
+    // with a negative status (255) when it cannot merge, e.g. a binary file.
+    match status.code() {
+        Some(0) => process::exit(0),
+        Some(n) if (1..=127).contains(&n) => {
+            eprintln!(
+                "{} {name} is not a murk vault: merged as text, with conflict markers",
+                "warn".yellow().bold()
+            );
+            process::exit(1);
+        }
+        _ => {
+            eprintln!(
+                "{} {name} is not a murk vault and git cannot merge it as text; the working file is ours",
+                "warn".yellow().bold()
+            );
+            process::exit(1);
+        }
     }
 }
 

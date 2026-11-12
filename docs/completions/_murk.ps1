@@ -52,7 +52,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Check the surrounding repo for hygiene issues')
             [CompletionResult]::new('scan', 'scan', [CompletionResultType]::ParameterValue, 'Scan files for leaked secret values')
             [CompletionResult]::new('diff', 'diff', [CompletionResultType]::ParameterValue, 'Show secret and access changes vs a git ref (experimental)')
-            [CompletionResult]::new('setup-merge-driver', 'setup-merge-driver', [CompletionResultType]::ParameterValue, 'Configure git to use murk''s merge driver for .murk files (experimental)')
+            [CompletionResult]::new('setup-merge-driver', 'setup-merge-driver', [CompletionResultType]::ParameterValue, 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)')
             [CompletionResult]::new('merge-driver', 'merge-driver', [CompletionResultType]::ParameterValue, 'Git merge driver for .murk vault files (called by git, experimental)')
             [CompletionResult]::new('completion', 'completion', [CompletionResultType]::ParameterValue, 'Generate or install shell completions')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
@@ -544,8 +544,8 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             break
         }
         'murk;setup-merge-driver' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
         'murk;merge-driver' {
@@ -616,7 +616,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Check the surrounding repo for hygiene issues')
             [CompletionResult]::new('scan', 'scan', [CompletionResultType]::ParameterValue, 'Scan files for leaked secret values')
             [CompletionResult]::new('diff', 'diff', [CompletionResultType]::ParameterValue, 'Show secret and access changes vs a git ref (experimental)')
-            [CompletionResult]::new('setup-merge-driver', 'setup-merge-driver', [CompletionResultType]::ParameterValue, 'Configure git to use murk''s merge driver for .murk files (experimental)')
+            [CompletionResult]::new('setup-merge-driver', 'setup-merge-driver', [CompletionResultType]::ParameterValue, 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)')
             [CompletionResult]::new('merge-driver', 'merge-driver', [CompletionResultType]::ParameterValue, 'Git merge driver for .murk vault files (called by git, experimental)')
             [CompletionResult]::new('completion', 'completion', [CompletionResultType]::ParameterValue, 'Generate or install shell completions')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
