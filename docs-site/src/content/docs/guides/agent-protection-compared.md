@@ -93,7 +93,7 @@ These hold whichever approach you use with murk:
 - **Same-user agents can reach your key.** In murk 0.14, an agent that runs as
   your user can read `~/.config/murk/keys`. It can also unset `MURK_AGENT`,
   `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE` so that murk finds your stored
-  key. A change to that lookup is planned for 0.15. Until then, a separate user
+  key. A change to that lookup is planned for 0.16. Until then, a separate user
   or a container is the boundary.
 
 ## Summary

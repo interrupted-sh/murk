@@ -656,11 +656,28 @@ export default async function plugin(bb: BbPluginApi) {
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
     // A pre-0.14 vault cannot hold agent grants, so there is nothing in it to
     // revoke, and calling murk would risk its first 0.14 save. Revoke locally.
+    let vaultError: string | null = null;
     if (!existsSync(grant.vaultPath) || !readVaultFormat(grant.vaultPath).legacy) {
-      await revokeGrant(grant.vaultPath, grant.murkName, resolveOperatorKey((await settings.get()).keyFile));
+      try {
+        await revokeGrant(grant.vaultPath, grant.murkName, resolveOperatorKey((await settings.get()).keyFile));
+      } catch (error) {
+        vaultError = error instanceof Error ? error.message : String(error);
+      }
     }
+    // Delete the key file and mark the grant revoked even when the vault
+    // write failed (a stale keyFile setting, a moved key): no thread can use
+    // the grant through the plugin after this.
     rmSync(grant.keyPath, { force: true });
     store.markRevoked(id);
+    if (vaultError) {
+      return {
+        exitCode: 1,
+        stderr:
+          `murk: deleted the key file of grant ${id} and marked it revoked here, but could not remove ` +
+          `${grant.murkName} from the vault: ${vaultError}\n` +
+          `run this in your terminal to finish: murk agent revoke ${grant.murkName} --vault ${grant.vaultPath}`,
+      };
+    }
     return {
       exitCode: 0,
       stdout:

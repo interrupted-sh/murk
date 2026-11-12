@@ -16,7 +16,7 @@ on some channels, and each section says which.
 | npm: `@interrupted/murk-secrets` | npm registry signatures and Sigstore provenance | `node.yaml` in `interrupted-sh/murk` | [`npm audit signatures`](#npm-interruptedmurk-secrets) shows that attestations exist. [Read the attestation](#npm-interruptedmurk-secrets) to see whose they are |
 | PyPI: `murk-secrets` | PEP 740 Sigstore attestations per wheel and sdist | `python.yaml` in `interrupted-sh/murk` | [`pypi-attestations verify`](#pypi-murk-secrets) |
 
-In this page, `vX.Y.Z` is a release tag, such as `v0.14.1`. `X.Y.Z` is the same
+In this page, `vX.Y.Z` is a release tag, such as `v0.15.0`. `X.Y.Z` is the same
 version without the `v`, as it appears in package names. Replace both with the
 release you check.
 

@@ -13,7 +13,7 @@ On your own laptop, under your own user, it is not. An agent that runs as you
 can read `~/.config/murk/keys`. It can also unset `MURK_AGENT`, `MURK_STRICT`,
 `MURK_KEY` and `MURK_KEY_FILE` in its own shell. Its next `murk` command then
 finds your stored key from the vault's path, and the grant no longer limits
-it. A change to this lookup is planned for murk 0.15. Until then, run the
+it. A change to this lookup is planned for murk 0.16. Until then, run the
 agent where your key directory does not exist or cannot be read:
 
 - [in a container](#recipe-a-container),
