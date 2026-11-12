@@ -413,7 +413,7 @@ A merge that would change a group's membership relative to ours is a conflict wh
 - Once the pin holds a `vault_id` or a counter, a 0.13 side that this machine has not accepted on that branch is refused too, because it is read-only. Trust, rule 6, Read-only copy, says what the refused merge writes and covers the 0.13 ancestor case.
 - Before the pin holds either, and for a copy the user accepted with `murk trust`, the driver cannot tell an older 0.13 revision from a newer one. A branch that commits an older 0.13 file then merges cleanly and sets values back.
 
-**Merge driver in git.** git passes the vault's path as `%P` (`murk merge-driver %O %A %B %P`) so the driver reads the right trust pin. A driver configured before 0.14 has no `%P` and falls back to `.murk`. A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart.
+**Merge driver in git.** git passes the vault's path as `%P` (`murk merge-driver -- %O %A %B %P`) so the driver reads the right trust pin and finds that vault's stored key. A driver configured before 0.14 has no `%P` and falls back to `.murk`: its trust pin and its stored key, so a vault with another name and its own key merges without a key unless `MURK_KEY` or `MURK_KEY_FILE` is set. A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart.
 
 **Merge driver and removed keys.** A merge judges removals on every branch, whichever branch it merges into (rule 8 below).
 
@@ -1109,7 +1109,10 @@ Under `MURK_STRICT` the "not trusted on this machine" case is refused instead, a
 
 Git merge driver for vault files, called by git (the command is hidden from help). git supplies the three paths (`%O`, `%A`, `%B`) and the vault's path `%P`. The result replaces OURS. It merges non-conflicting secret changes automatically.
 
-When none of the three inputs is a vault (the `.murk.*` pattern also matches files such as `.murk.bak` or an editor swap file), the driver merges them as text with `git merge-file`, as git would without a driver: it exits 0 for a clean merge, and 1 with conflict markers in OURS for a conflict. A file `git merge-file` cannot merge (binary) is left as OURS with exit 1.
+The driver merges as vaults only when all three inputs are vault-shaped: a JSON object with a `version` and `recipients` or `secrets`. A vault-shaped input this murk cannot parse (a newer format version) is refused, never merged as text. Every other combination ends in a clean merge or in a conflict whose file shows both sides:
+
+- **Both branches created the vault** (empty base, two vaults, for example `murk init --vault .murk.staging` on each branch). Two separate vaults cannot be merged. The driver writes both sides into OURS between conflict markers, exits 1, and says how to keep one side (`git checkout --ours` or `--theirs`) and which secrets the other side holds, to add again.
+- **No input is a vault** (the `.murk.*` pattern also matches files such as `.murk.bak` or an editor swap file), **or a vault on some sides only** (a vault emptied or overwritten on one branch). The driver merges the files as text with `git merge-file`, as git would without a driver: it exits 0 for a clean merge, and 1 with conflict markers in OURS for a conflict. A file `git merge-file` cannot merge (binary) is left as OURS with exit 1.
 
 **With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key of the vault at `%P`, found as every other command finds it and not looked up in strict and agent mode), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`). It refuses an untrusted side as a conflict, regenerates the meta and signs the merged result. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (Trust, rule 9).
 
@@ -1126,7 +1129,7 @@ Then you abort the merge and redo it with a key. A clean keyless merge keeps OUR
 
 ### `murk setup-merge-driver`
 
-Configures git to use `murk merge-driver %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing, to the `.gitattributes` at the root of the working tree, also when run from a subdirectory. Outside a git working tree it fails and writes nothing.
+Configures git to use `murk merge-driver -- %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. The `--` keeps a vault named like a flag (`-h.murk`) a path, and the command replaces a driver line an older murk wrote. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing, to the `.gitattributes` at the root of the working tree, also when run from a subdirectory, and prints that file's path. Outside a git working tree it fails with git's own error and writes nothing. It also refuses, writing nothing, when git's working tree does not contain the current directory (a repository whose `core.worktree` points elsewhere).
 
 ---
 
