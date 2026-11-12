@@ -359,6 +359,10 @@ async fn mcp_refuses_the_pre_revoke_vault_written_back() {
     // The older, validly signed bytes that still hold the grant come back.
     std::fs::write(&path, &pre_revoke).unwrap();
     assert_all_tools_refuse(&client, "older than one this server already saw").await;
+    // The refusal tells an operator who moved the vault back on purpose
+    // (a branch switch, a restore) what to do.
+    let hint = get(&client, "API_KEY").await;
+    assert!(text(&hint).contains("restart murk mcp"), "{}", text(&hint));
     stop_server(client, stderr).await;
 }
 
@@ -405,6 +409,130 @@ fn copy_dir(from: &Path, to: &Path) {
         let entry = entry.unwrap();
         std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
     }
+}
+
+/// `contents` with a JSON edit applied (field order and layout may change,
+/// which only matters to the signature where `edit` changes signed data).
+fn edit_vault(contents: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut vault: serde_json::Value = serde_json::from_str(contents).unwrap();
+    edit(&mut vault);
+    serde_json::to_string_pretty(&vault).unwrap()
+}
+
+#[tokio::test]
+async fn mcp_an_unverified_newer_vault_never_raises_the_floor() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (_key, grant) = setup_grant(dir.path());
+    let path = dir.path().join("test.murk");
+    let valid = std::fs::read_to_string(&path).unwrap();
+    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-exec"]).await;
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+
+    let far_ahead = |v: &mut serde_json::Value| v["generation"] = 1_000_000_000_000_000u64.into();
+    // Unsigned, and signed but edited (the signature no longer verifies).
+    let unsigned = edit_vault(&valid, |v| {
+        far_ahead(v);
+        v.as_object_mut().unwrap().remove("sig");
+    });
+    let forged = edit_vault(&valid, far_ahead);
+    for bad in [unsigned, forged] {
+        std::fs::write(&path, bad).unwrap();
+        assert_all_tools_refuse(&client, "refusing to read").await;
+
+        // The valid bytes come back and serve: the bad file moved no floor.
+        std::fs::write(&path, &valid).unwrap();
+        assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+    }
+    stop_server(client, stderr).await;
+}
+
+#[tokio::test]
+async fn mcp_refuses_another_vault_signed_by_the_same_operator() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (_key, grant) = setup_grant(dir.path());
+    // A second vault, made with the same operator key, so its signature
+    // verifies under the grant's key file: only its id tells it apart.
+    common::murk_bin(dir.path())
+        .current_dir(dir.path())
+        .args(["init", "--vault", "other.murk", "--reuse-key"])
+        .write_stdin("testuser\n")
+        .assert()
+        .success();
+    let path = dir.path().join("test.murk");
+    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-exec"]).await;
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+
+    std::fs::copy(dir.path().join("other.murk"), &path).unwrap();
+    assert_all_tools_refuse(&client, "the file is another vault").await;
+    stop_server(client, stderr).await;
+}
+
+#[tokio::test]
+async fn mcp_a_respelled_signer_is_the_same_vault() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (_key, grant) = setup_grant(dir.path());
+    let path = dir.path().join("test.murk");
+    let valid = std::fs::read_to_string(&path).unwrap();
+    let (client, stderr) = start_server(dir.path(), &grant, &["--allow-exec"]).await;
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+
+    // An age recipient is case-insensitive and the signature does not cover
+    // the signer's spelling, so this is the same signed vault, not a fork.
+    let respelled = edit_vault(&valid, |v| {
+        let signer = v["sig"]["signer"].as_str().unwrap().to_uppercase();
+        v["sig"]["signer"] = signer.into();
+    });
+    std::fs::write(&path, respelled).unwrap();
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+    std::fs::write(&path, &valid).unwrap();
+    assert_eq!(text(&get(&client, "API_KEY").await), "reload-secret");
+    stop_server(client, stderr).await;
+}
+
+#[tokio::test]
+async fn mcp_a_refused_reload_of_the_loaded_bytes_keeps_refusing() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let (key, _) = init_vault(dir.path());
+    murk(dir.path(), &key)
+        .args(["add", "API_KEY", "--vault", "test.murk"])
+        .write_stdin("latch-secret\n")
+        .assert()
+        .success();
+    let grant = dir.path().join("grant.key");
+    murk(dir.path(), &key)
+        .args(["agent", "grant", "--name", "probe", "--only", "API_KEY"])
+        .args(["--ttl", "4s", "--out"])
+        .arg(&grant)
+        .args(["--vault", "test.murk"])
+        .assert()
+        .success();
+    let path = dir.path().join("test.murk");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let (client, stderr) = start_server(dir.path(), &grant, &[]).await;
+    assert_eq!(text(&get(&client, "API_KEY").await), "latch-secret");
+
+    // Refuse once, let the grant expire, and put the loaded bytes back: their
+    // reload now fails (expired), and no later call may fall back to the state
+    // loaded before the first refusal.
+    std::fs::write(&path, "not a vault").unwrap();
+    let refused = get(&client, "API_KEY").await;
+    assert!(
+        text(&refused).contains("refusing this call"),
+        "{}",
+        text(&refused)
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    std::fs::write(&path, &original).unwrap();
+    for _ in 0..2 {
+        let again = get(&client, "API_KEY").await;
+        assert_eq!(again.is_error, Some(true), "{}", text(&again));
+        assert!(
+            text(&again).contains("refusing this call: the vault could not be checked or reloaded"),
+            "{}",
+            text(&again)
+        );
+    }
+    stop_server(client, stderr).await;
 }
 
 #[tokio::test]

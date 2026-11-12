@@ -69,12 +69,11 @@ pub struct VaultWatch {
 struct Watched {
     loaded: Loaded,
     floor: Floor,
-    /// The hash of the bytes the previous check read, or `None` when it could
-    /// not read the file. The cached state serves only while the file has not
-    /// changed since a check that accepted it: once any other bytes were seen
-    /// (a refused reload included), the file goes through the full reload
-    /// again, even if it returns to the loaded bytes.
-    seen: Option<blake3::Hash>,
+    /// Set by any refused check and cleared only by a load that passes. While
+    /// set, the cached state never serves, even when the file returns to the
+    /// bytes it was loaded from: those bytes go through the full reload, and
+    /// so through the floor, again.
+    refused: bool,
 }
 
 /// A trusted load and the BLAKE3 hash of the exact file bytes it came from.
@@ -100,14 +99,21 @@ struct Floor {
     signature: String,
 }
 
-/// A vault's signer and signature, which identify its signed content.
+/// A vault's signer and signature, which identify its signed content. The
+/// signer is canonicalised: the signature does not cover its spelling, so a
+/// respelled signer must not count as other content.
 fn signature_of(vault: &Vault) -> String {
     vault
         .sig
         .as_ref()
-        .map(|s| format!("{} {}", s.signer, s.sig))
+        .map(|s| format!("{} {}", murk_cli::canonical_recipient(&s.signer), s.sig))
         .unwrap_or_default()
 }
+
+/// Appended to a floor refusal: a branch switch or a deliberate restore also
+/// moves the vault back, and only a restart clears the floor.
+const RESTART_HINT: &str = "If you switched branches or restored an older vault on purpose, \
+     restart murk mcp (restart the editor)";
 
 impl Floor {
     /// Refuse a signed `vault` that is another vault, older than the floor,
@@ -115,21 +121,21 @@ impl Floor {
     fn check(&self, vault: &Vault) -> Result<(), String> {
         if vault.vault_id != self.vault_id {
             return Err(format!(
-                "the file is another vault (id {:?}; this server started with {:?})",
+                "the file is another vault (id {:?}; this server started with {:?}). {RESTART_HINT}",
                 vault.vault_id, self.vault_id
             ));
         }
         if vault.generation < self.generation {
             return Err(format!(
                 "the vault is older than one this server already saw (save counter {}, seen {}): \
-                 an older copy was written back",
+                 an older copy was written back. {RESTART_HINT}",
                 vault.generation, self.generation
             ));
         }
         if vault.generation == self.generation && signature_of(vault) != self.signature {
             return Err(format!(
                 "the vault has the save counter of one this server already saw ({}) but other \
-                 signed contents: a forked copy",
+                 signed contents: a forked copy. {RESTART_HINT}",
                 vault.generation
             ));
         }
@@ -169,7 +175,7 @@ impl VaultWatch {
                 digest,
             },
             floor,
-            seen: Some(digest),
+            refused: false,
         };
         Ok((
             Self {
@@ -190,36 +196,37 @@ impl VaultWatch {
     /// must not fall below the floor ([`Floor::check`]); a newer signed vault
     /// raises the floor even if the grant can't load it (a revoke). Any
     /// failure (an unreadable, tampered, untrusted, older or forked file, a
-    /// revoked or expired grant) fails the call. The cached state serves only
-    /// while the file has stayed at the bytes it was loaded from since then;
-    /// after other bytes were seen, the file reloads in full again, so the
-    /// floor applies to it. Calls check one at a time.
+    /// revoked or expired grant) fails the call. After a refusal the cached
+    /// state never serves again until a load passes, so the file reloads in
+    /// full, through the floor, even if it returns to the loaded bytes.
+    /// Calls check one at a time.
     fn current(&self) -> Result<Arc<McpState>, String> {
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
-        let refuse = |e: &dyn std::fmt::Display| {
+        let result = self.check(&mut w);
+        w.refused = result.is_err();
+        result.map_err(|e| {
             tracing::warn!("murk mcp: the vault could not be checked or reloaded: {e}");
             format!("refusing this call: the vault could not be checked or reloaded: {e}")
-        };
-        let read = murk_cli::vault::read_contents(std::path::Path::new(&self.path)).map(|c| {
-            let digest = blake3::hash(c.as_bytes());
-            (c, digest)
-        });
-        let seen = read.as_ref().ok().map(|(_, digest)| *digest);
-        let unchanged = seen.is_some() && seen == w.seen;
-        w.seen = seen;
-        let (contents, digest) = read.map_err(|e| refuse(&e))?;
-        if unchanged && digest == w.loaded.digest && w.floor.holds(&w.loaded.state.vault) {
+        })
+    }
+
+    /// [`Self::current`] without the refusal bookkeeping.
+    fn check(&self, w: &mut Watched) -> Result<Arc<McpState>, String> {
+        let contents = murk_cli::vault::read_contents(std::path::Path::new(&self.path))
+            .map_err(|e| e.to_string())?;
+        let digest = blake3::hash(contents.as_bytes());
+        if !w.refused && digest == w.loaded.digest && w.floor.holds(&w.loaded.state.vault) {
             return Ok(Arc::clone(&w.loaded.state));
         }
-        let vault = murk_cli::vault::parse(&contents).map_err(|e| refuse(&e))?;
+        let vault = murk_cli::vault::parse(&contents).map_err(|e| e.to_string())?;
         murk_cli::verify_grant_signature(&vault, self.key.expose_secret())
-            .map_err(|e| refuse(&e))?;
-        w.floor.check(&vault).map_err(|e| refuse(&e))?;
+            .map_err(|e| e.to_string())?;
+        w.floor.check(&vault)?;
         if vault.generation > w.floor.generation {
             w.floor.generation = vault.generation;
             w.floor.signature = signature_of(&vault);
         }
-        let (state, warnings) = load_state(&self.path, &self.key, vault).map_err(|e| refuse(&e))?;
+        let (state, warnings) = load_state(&self.path, &self.key, vault)?;
         for warning in warnings {
             tracing::warn!("murk mcp: {warning}");
         }
