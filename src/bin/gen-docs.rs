@@ -191,6 +191,18 @@ fn env_reference() -> (PathBuf, String) {
             body.push_str(&format!("| `{}` | {} |\n", v.name, v.summary));
         }
     }
+    body.push_str(
+        "\n## Names a vault may not set\n\n\
+         `murk export`, `murk exec` and `murk agent exec` refuse a vault key named \
+         like a variable that runs code or redirects tools in the environment that \
+         loads it, unless you pass `--allow-reserved`. The MCP `murk_exec` tool \
+         always refuses it. Examples are `PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, \
+         zsh's `PROMPT` and `RPROMPT`, `KUBECONFIG`, `DOCKER_HOST`, `GOPROXY`, \
+         `TMPDIR`, names starting with `MURK_`, `XDG_` or `LUA_`, and names \
+         ending in `_PROXY`. Names are matched case-insensitively. The full list \
+         is in [Variable names a vault may not set]\
+         (https://murk.interrupted.sh/concepts/env-vars/#variable-names-a-vault-may-not-set).\n",
+    );
     (
         manifest_dir().join("docs/env-reference.md"),
         format!("{BANNER}{body}"),

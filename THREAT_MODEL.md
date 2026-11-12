@@ -813,7 +813,7 @@ For output that a shell evaluates:
 - The vault name written to `.envrc` is quoted by `shell_escape` (`src/env.rs`, test `write_envrc_escapes_vault_name`).
 - Before `cmd_exec` injects variables, it refuses empty secret names, secret names with `=` or NUL, and values with NUL.
 
-*Gap:* the reserved-name list is finite, and `--allow-reserved` lifts it. `murk export`, `murk exec` and `murk agent exec` refuse a secret named like a loader, shell, git or murk setting (`PATH`, `BASH_ENV`, `GIT_*`, `MURK_*` and others, see `is_reserved_env_name` in `src/lib.rs`), and `murk mcp` always refuses it. A recipient who can write the vault can still add a variable that is not on the list, for example `SSH_AUTH_SOCK`, `GNUPGHOME` or `KUBECONFIG`. `murk export` and `murk exec` then set it for the reader.
+*Gap:* the reserved-name list is finite, and `--allow-reserved` lifts it. `murk export`, `murk exec` and `murk agent exec` refuse a secret named like a loader, shell, git or murk setting (`PATH`, `BASH_ENV`, `GIT_*`, `MURK_*` and others, see `is_reserved_env_name` in `src/lib.rs`), and `murk mcp` always refuses it. A recipient who can write the vault can still add a variable that is not on the list, for example `AWS_ENDPOINT_URL`, `GH_HOST` or `HELM_PLUGINS`. `murk export` and `murk exec` then set it for the reader.
 
 **Path traversal and link following (CWE-22, CWE-59).** Untrusted names do not become paths:
 
