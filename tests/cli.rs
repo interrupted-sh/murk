@@ -602,11 +602,15 @@ fn two_vaults_with_different_recipients_are_each_read_with_their_own_keys() {
         (&bob_key, "test.murk", "dev-db", true),
         (&bob_key, "prod.murk", "prod-db", false),
     ] {
-        let assert = murk(&dir, key).args(["get", "DB", "--vault", vault]).assert();
+        let assert = murk(&dir, key)
+            .args(["get", "DB", "--vault", vault])
+            .assert();
         if readable {
             assert.success().stdout(format!("{value}\n"));
         } else {
-            assert.failure().stdout(predicate::str::contains(value).not());
+            assert
+                .failure()
+                .stdout(predicate::str::contains(value).not());
         }
     }
 
