@@ -504,7 +504,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 
 - the names `PATH`, `HOME`, `NODE_OPTIONS`, `BASH_ENV`, `EDITOR` and `RUSTFLAGS`
 - anything ending in `_PROXY`
-- anything starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `DOTNET_`, `CARGO_`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_` or `MURK_`
+- anything starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `_JAVA_`, `JDK_`, `DOTNET_`, `CARGO_`, `RUSTC`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_`, `LUA_`, `XDG_`, `DIRENV_` or `MURK_`
 
 The match ignores case, and `NODE_ENV` is not reserved. [Environment variables](https://murk.interrupted.sh/concepts/env-vars/#variable-names-a-vault-may-not-set) has the full list. Review who added the key, then pass `--allow-reserved` if you mean it. The MCP `murk_exec` tool never allows them.
 

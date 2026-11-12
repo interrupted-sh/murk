@@ -16,11 +16,17 @@ Set `keyFile` when the bb server cannot find your key by itself, for example whe
 
 ## Only you grant access
 
-`bb murk grant mint` and `bb murk grant revoke` refuse a call that comes from a bb thread. Otherwise an agent could grant itself any key and then read it through `murk_get`. Run both commands in your own terminal, outside bb threads. To limit a grant to one thread, pass `--thread <threadId>`. `bb murk grant list` works from anywhere: it shows no values.
+`bb murk grant mint` and `bb murk grant revoke` refuse a call that comes from a bb thread, so an agent that runs them gets a refusal instead of a new grant. Run both commands in your own terminal, outside bb threads. To limit a grant to one thread, pass `--thread <threadId>`. `bb murk grant list` works from anywhere: it shows no values.
 
 The agent skill tells agents never to run `bb murk grant`. When an agent needs a key, it asks you and gives you the command.
 
 This is a guardrail, not a sandbox. The bb CLI tells the plugin which thread called it from the `BB_THREAD_ID` variable of the calling shell. A process that clears that variable, or calls the bb server directly, looks like your terminal. An agent runs as your OS user, so it can also read your key file directly. To keep an agent away from your key, run the agent as another OS user or in a container.
+
+The plugin's settings are not secret from agents. A thread can run `bb plugin config murk`, which prints the settings, the `keyFile` path included. The path is not the key, but an agent that runs as your user can read the file it names. It is not ruled out that a thread can also change the settings, so check them if an agent had access to the bb CLI.
+
+The plugin's own messages name no key file path. When murk names one in an error, for example in its hint for a key file that others can read, the plugin shows `<key file>` instead.
+
+If `bb murk grant revoke` cannot change the vault, for example because `keyFile` names a key that moved, it still deletes the grant's key file and marks the grant revoked in the plugin. It then exits 1 and prints the `murk agent revoke` command that removes the grant from the vault.
 
 ## The plugin and `murk mcp`
 
@@ -48,7 +54,10 @@ bb murk grant mint --keys API_KEY --upgrade
 - `bb murk grant mint` and `bb murk grant revoke` refuse a call from a bb thread. Run them in your own terminal, outside bb threads. The agent skill now tells agents never to run `bb murk grant`.
 - New optional **Operator key file** setting (`keyFile`). Mint and revoke pass it to murk as `MURK_KEY_FILE`. With the setting blank, mint and revoke work as before: murk uses `MURK_KEY_FILE` or `MURK_KEY` from the bb server's environment, else the key it stored for the vault in `~/.config/murk/keys`.
 - Removed the **Default grant scope** setting. It applied only to mints from inside a thread, which the plugin now refuses. Pass `--thread <threadId>` to limit a grant to one thread.
+- `bb murk grant revoke` deletes the grant's key file and marks it revoked even when the vault write fails, then prints the `murk agent revoke` command that finishes the revoke.
+- Error messages no longer name a key file path: not the `keyFile` setting, and not a path in murk's key store that murk names in an error.
 - The agent skill loads the delivered env file in a subshell, states the default TTL and what `--thread` changes, and says when idle cleanup leaves a file in place.
+- Works with `@interrupted/murk-secrets` 0.14 and 0.15 (`^0.14.0 || ^0.15.0`).
 
 ### 0.1.1
 

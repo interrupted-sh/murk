@@ -92,13 +92,26 @@ export function runMurk(
 export function resolveOperatorKey(setting: string): string | null {
   const keyFile = setting.trim();
   if (!keyFile) return null;
-  if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
-  if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
+  // The messages name no path: plugin output can reach agent threads.
+  if (!path.isAbsolute(keyFile)) throw new Error("the keyFile setting must be an absolute path");
+  if (!existsSync(keyFile)) throw new Error("the keyFile setting names a file that does not exist");
   return keyFile;
 }
 
-function murkError(what: string, result: MurkResult): Error {
-  const detail = (result.stderr.trim() || result.stdout.trim()).replace(/\s+/g, " ");
+/**
+ * `text` with key file paths replaced by `<key file>`: the configured
+ * `keyFile`, and any path into murk's key store (`~/.config/murk/keys`). murk
+ * names the key file in some errors, such as its `chmod 600 <path>` hint for
+ * a key file that others can read.
+ */
+export function redactKeyPaths(text: string, keyFile?: string | null): string {
+  let out = keyFile ? text.split(keyFile).join("<key file>") : text;
+  out = out.replace(/[^\s'"`]*[\\/]\.config[\\/]murk[\\/]keys[^\s'"`]*/g, "<key file>");
+  return out;
+}
+
+function murkError(what: string, result: MurkResult, keyFile?: string | null): Error {
+  const detail = redactKeyPaths((result.stderr.trim() || result.stdout.trim()).replace(/\s+/g, " "), keyFile);
   return new Error(`${what} failed: ${detail || `murk exited ${result.code}`}`);
 }
 
@@ -118,7 +131,7 @@ export async function mintGrant(options: {
   const args = ["agent", "grant", "--name", options.name, "--ttl", options.ttl, "--out", options.keyFilePath, "--vault", options.vaultPath];
   for (const key of options.keys) args.push("--only", key);
   const result = await runMurk(args, { keyFile: options.operatorKey, cwd: path.dirname(options.vaultPath) });
-  if (result.code !== 0) throw murkError(`minting grant for ${options.keys.join(", ")}`, result);
+  if (result.code !== 0) throw murkError(`minting grant for ${options.keys.join(", ")}`, result, options.operatorKey);
   // murk writes the key file itself; clamp to 0600 regardless.
   chmodSync(options.keyFilePath, 0o600);
 
@@ -133,7 +146,7 @@ export async function listGrants(vaultPath: string, operatorKey: string | null):
     keyFile: operatorKey,
     cwd: path.dirname(vaultPath),
   });
-  if (result.code !== 0) throw murkError("listing grants", result);
+  if (result.code !== 0) throw murkError("listing grants", result, operatorKey);
   return z.array(grantInfoSchema).parse(JSON.parse(result.stdout));
 }
 
@@ -144,7 +157,7 @@ export async function revokeGrant(vaultPath: string, name: string, operatorKey: 
     cwd: path.dirname(vaultPath),
   });
   if (result.code !== 0 && !/no grant named|not found/i.test(result.stderr + result.stdout)) {
-    throw murkError(`revoking grant ${name}`, result);
+    throw murkError(`revoking grant ${name}`, result, operatorKey);
   }
 }
 
