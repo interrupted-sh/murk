@@ -741,6 +741,7 @@ An unsigned vault, a stripped signature, a signer this machine does not trust, a
 
 *Partly met:*
 
+- The MCP floor is only as good as the calls that see the vault. Anyone who can write the vault file can put the pre-revoke file back before the server's next call, every time, so a running server never sees the revoke. A restart after the revoke helps when the revoked vault is on disk at that moment, because a server that starts on it refuses to run. Against a writer who keeps restoring the old file, only keeping the agent from writing the vault file closes this. The floor also does not follow git branches: after a branch switch or a checkout of an older vault, a running server refuses every call until it restarts, and its refusal says so.
 - Plain `murk exec` with the operator's own key, outside self-scope, applies no agent policy.
 - Without a key, the merge driver verifies nothing. The next load checks its result ([Merge driver](#merge-driver)).
 - `murk diff REF` verifies the `REF` revision's MAC and signature before it decrypts anything, and always refuses a revision that fails either. It then judges the signer by looser rules than a load.
