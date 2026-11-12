@@ -29,6 +29,8 @@ _murk() {
             (init)
 _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
+'(--separate-key)--reuse-key[When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking]' \
+'--separate-key[When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

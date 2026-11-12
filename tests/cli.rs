@@ -496,19 +496,374 @@ fn init_in_strict_mode_neither_uses_nor_replaces_a_stored_key() {
     fs::remove_file(dir.path().join(".env")).unwrap();
 
     for var in ["MURK_AGENT", "MURK_STRICT"] {
-        murk_bin(dir.path())
+        let out = murk_bin(dir.path())
             .args(["init", "--vault", "test.murk"])
             .current_dir(dir.path())
             .env(var, "1")
             .assert()
             .failure()
-            .stderr(
-                predicate::str::contains("already stored at")
-                    .and(predicate::str::contains("set MURK_KEY_FILE=")),
-            );
+            .stderr(predicate::str::contains("already stored on this machine"));
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+        assert_no_key_store_path(&stderr, dir.path());
         assert_eq!(fs::read(&key_path).unwrap(), before, "{var}: key replaced");
         assert!(!dir.path().join(".env").exists(), "{var}: .env written");
     }
+}
+
+// ── several vaults in one directory ──
+
+/// Every key stored under `home`, sorted.
+fn stored_keys(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut keys: Vec<_> = fs::read_dir(home.join(".config/murk/keys"))
+        .map(|rd| rd.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+/// An agent refused a stored key must not learn where the key store is.
+fn assert_no_key_store_path(stderr: &str, home: &std::path::Path) {
+    assert!(
+        !stderr.contains(".config/murk") && !stderr.contains(&*home.to_string_lossy()),
+        "key-store path printed: {stderr}"
+    );
+}
+
+/// `murk init --vault <vault>` in `dir` (HOME = `dir`) with `args` appended.
+fn init_second(dir: &TempDir, vault: &str, args: &[&str]) -> assert_cmd::Command {
+    let mut cmd = murk_bin(dir.path());
+    cmd.args(["init", "--vault", vault])
+        .args(args)
+        .current_dir(dir.path())
+        .write_stdin("alice\n");
+    cmd
+}
+
+fn get_ok(home: &std::path::Path, cwd: &std::path::Path, vault: &str, key: &str, value: &str) {
+    murk_bin(home)
+        .args(["get", key, "--vault", vault])
+        .current_dir(cwd)
+        .assert()
+        .success()
+        .stdout(format!("{value}\n"));
+}
+
+#[cfg(unix)]
+fn assert_owner_only(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{} has mode {mode:o}", path.display());
+}
+
+#[test]
+fn two_vaults_with_different_recipients_are_each_read_with_their_own_keys() {
+    // dev (test.murk) is shared with bob; prod.murk has its own key and only
+    // its owner as recipient. Each key reads its own vault and nothing else.
+    let dir = TempDir::new().unwrap();
+    let (dev_key, _) = init_vault(&dir);
+    init_second(&dir, "prod.murk", &["--separate-key"])
+        .assert()
+        .success();
+    let keys = stored_keys(dir.path());
+    assert_eq!(keys.len(), 2);
+    let prod_key = keys
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap().trim().to_string())
+        .find(|k| *k != dev_key)
+        .unwrap();
+
+    let bob = TempDir::new().unwrap();
+    let (bob_key, bob_pubkey) = init_vault(&bob);
+    murk_bin(dir.path())
+        .args(["circle", "authorize", &bob_pubkey, "--vault", "test.murk"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    for (vault, value) in [("test.murk", "dev-db"), ("prod.murk", "prod-db")] {
+        murk_bin(dir.path())
+            .args(["add", "DB", "--vault", vault])
+            .current_dir(dir.path())
+            .write_stdin(format!("{value}\n"))
+            .assert()
+            .success();
+        // No key in the environment: each vault finds its own stored key.
+        get_ok(dir.path(), dir.path(), vault, "DB", value);
+    }
+    let prod = fs::read_to_string(dir.path().join("prod.murk")).unwrap();
+    assert!(prod.contains(&pubkey_of(&prod_key)));
+    assert!(!prod.contains(&pubkey_of(&dev_key)), "dev key reads prod");
+    assert!(!prod.contains(&bob_pubkey), "bob reads prod");
+
+    // Explicit keys: each reads exactly the vaults it is a recipient of.
+    for (key, vault, value, readable) in [
+        (&dev_key, "test.murk", "dev-db", true),
+        (&dev_key, "prod.murk", "prod-db", false),
+        (&prod_key, "prod.murk", "prod-db", true),
+        (&bob_key, "test.murk", "dev-db", true),
+        (&bob_key, "prod.murk", "prod-db", false),
+    ] {
+        let assert = murk(&dir, key).args(["get", "DB", "--vault", vault]).assert();
+        if readable {
+            assert.success().stdout(format!("{value}\n"));
+        } else {
+            assert.failure().stdout(predicate::str::contains(value).not());
+        }
+    }
+
+    // Trust pins stay per vault: one pin file for each.
+    let pins = fs::read_dir(dir.path().join(".config/murk/signer-pins"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|x| x == "json")
+        })
+        .count();
+    assert_eq!(pins, 2, "expected one trust pin per vault");
+}
+
+#[test]
+fn second_vault_reuses_the_stored_key_and_leaves_dotenv_alone() {
+    let dir = TempDir::new().unwrap();
+    let (key_path, before) = vault_with_stored_key(&dir);
+    let env_before = fs::read(dir.path().join(".env")).unwrap();
+
+    init_second(&dir, "prod.murk", &["--reuse-key"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("using the key of test.murk for prod.murk too")
+                .and(predicate::str::contains(
+                    "--vault prod.murk or MURK_VAULT=prod.murk",
+                ))
+                .and(predicate::str::contains("RECOVERY WORDS").not()),
+        );
+
+    assert_eq!(fs::read(dir.path().join(".env")).unwrap(), env_before);
+    assert_eq!(fs::read(&key_path).unwrap(), before, "first key changed");
+    let keys = stored_keys(dir.path());
+    assert_eq!(keys.len(), 2);
+    for key in &keys {
+        assert_eq!(
+            fs::read_to_string(key).unwrap().trim(),
+            String::from_utf8_lossy(&before).trim(),
+            "the reused key is a different identity"
+        );
+        #[cfg(unix)]
+        assert_owner_only(key);
+    }
+
+    murk_bin(dir.path())
+        .args(["add", "P", "--vault", "prod.murk"])
+        .current_dir(dir.path())
+        .write_stdin("p\n")
+        .assert()
+        .success();
+    get_ok(dir.path(), dir.path(), "prod.murk", "P", "p");
+    murk_bin(dir.path())
+        .args(["get", "P"])
+        .env("MURK_VAULT", "prod.murk")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout("p\n");
+    assert_get_still_works(&dir);
+}
+
+#[test]
+fn second_vault_reuse_stores_the_key_direnv_loaded_for_the_new_vault() {
+    // direnv exported the first vault's MURK_KEY_FILE: the new vault still
+    // gets a stored key of its own, so it works where .env is not loaded.
+    let dir = TempDir::new().unwrap();
+    let (key_path, before) = vault_with_stored_key(&dir);
+    let env_before = fs::read(dir.path().join(".env")).unwrap();
+
+    init_second(&dir, "prod.murk", &["--reuse-key"])
+        .env("MURK_KEY_FILE", &key_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "using the key of test.murk for prod.murk too",
+        ));
+
+    assert_eq!(fs::read(dir.path().join(".env")).unwrap(), env_before);
+    assert_eq!(fs::read(&key_path).unwrap(), before);
+    assert_eq!(stored_keys(dir.path()).len(), 2);
+    murk_bin(dir.path())
+        .args(["ls", "--vault", "prod.murk"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn second_vault_separate_key_leaves_dotenv_and_the_first_key_alone() {
+    let dir = TempDir::new().unwrap();
+    let (key_path, before) = vault_with_stored_key(&dir);
+    let env_before = fs::read(dir.path().join(".env")).unwrap();
+
+    init_second(&dir, "prod.murk", &["--separate-key"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("RECOVERY WORDS")
+                .and(predicate::str::contains(
+                    "--vault prod.murk or MURK_VAULT=prod.murk",
+                ))
+                .and(predicate::str::contains("y/N").not()),
+        );
+
+    assert_eq!(fs::read(dir.path().join(".env")).unwrap(), env_before);
+    assert_eq!(fs::read(&key_path).unwrap(), before, "first key changed");
+    let keys = stored_keys(dir.path());
+    assert_eq!(keys.len(), 2);
+    let new_key = keys.iter().find(|k| **k != key_path).unwrap();
+    #[cfg(unix)]
+    assert_owner_only(new_key);
+    let prod = fs::read_to_string(dir.path().join("prod.murk")).unwrap();
+    assert!(prod.contains(&pubkey_of(&fs::read_to_string(new_key).unwrap())));
+    assert!(!prod.contains(&pubkey_of(&String::from_utf8(before).unwrap())));
+    murk_bin(dir.path())
+        .args(["ls", "--vault", "prod.murk"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_get_still_works(&dir);
+}
+
+#[test]
+fn second_vault_init_without_a_terminal_needs_a_flag() {
+    let dir = TempDir::new().unwrap();
+    vault_with_stored_key(&dir);
+    let env_before = fs::read(dir.path().join(".env")).unwrap();
+
+    init_second(&dir, "prod.murk", &[])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--reuse-key")
+                .and(predicate::str::contains("--separate-key"))
+                .and(predicate::str::contains("choose").not()),
+        );
+
+    assert!(!dir.path().join("prod.murk").exists());
+    assert_eq!(stored_keys(dir.path()).len(), 1);
+    assert_eq!(fs::read(dir.path().join(".env")).unwrap(), env_before);
+}
+
+#[test]
+fn second_vault_init_in_strict_mode_never_reuses_and_prints_no_key_path() {
+    let dir = TempDir::new().unwrap();
+    let (key_path, before) = vault_with_stored_key(&dir);
+    let env_before = fs::read(dir.path().join(".env")).unwrap();
+
+    for var in ["MURK_AGENT", "MURK_STRICT"] {
+        for flags in [&[][..], &["--reuse-key"][..]] {
+            let out = init_second(&dir, "prod.murk", flags)
+                .env(var, "1")
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("strict mode"));
+            assert_no_key_store_path(
+                &String::from_utf8_lossy(&out.get_output().stderr),
+                dir.path(),
+            );
+            assert!(!dir.path().join("prod.murk").exists(), "{var} {flags:?}");
+            assert_eq!(stored_keys(dir.path()), vec![key_path.clone()]);
+        }
+    }
+
+    // A separate key is allowed; it is not the operator's stored key.
+    let out = init_second(&dir, "prod.murk", &["--separate-key"])
+        .env("MURK_AGENT", "1")
+        .assert()
+        .success();
+    assert_no_key_store_path(
+        &String::from_utf8_lossy(&out.get_output().stderr),
+        dir.path(),
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), before);
+    assert_eq!(fs::read(dir.path().join(".env")).unwrap(), env_before);
+    let prod = fs::read_to_string(dir.path().join("prod.murk")).unwrap();
+    assert!(!prod.contains(&pubkey_of(&String::from_utf8(before).unwrap())));
+}
+
+#[test]
+fn second_vault_init_never_replaces_a_key_stored_for_it() {
+    // prod.murk already has its own stored key (another identity): init uses
+    // it, whatever the flag, and a broken one is reported, never replaced.
+    let dir = TempDir::new().unwrap();
+    let (test_key, _) = vault_with_stored_key(&dir);
+    init_second(&dir, "prod.murk", &["--separate-key"])
+        .assert()
+        .success();
+    let snapshot = || -> Vec<_> {
+        stored_keys(dir.path())
+            .into_iter()
+            .map(|k| {
+                let bytes = fs::read(&k).unwrap();
+                (k, bytes)
+            })
+            .collect()
+    };
+    let keys_before = snapshot();
+    assert_eq!(keys_before.len(), 2);
+
+    for flags in [&["--reuse-key"][..], &["--separate-key"][..], &[][..]] {
+        fs::remove_file(dir.path().join("prod.murk")).unwrap();
+        init_second(&dir, "prod.murk", flags)
+            .assert()
+            .success()
+            .stderr(
+                predicate::str::contains("using existing key")
+                    .and(predicate::str::contains("RECOVERY WORDS").not()),
+            );
+        assert_eq!(snapshot(), keys_before, "{flags:?}: a stored key changed");
+    }
+
+    // A broken key stored for prod.murk stops init; nothing replaces it.
+    let prod_path = keys_before
+        .iter()
+        .map(|(k, _)| k.clone())
+        .find(|k| *k != test_key)
+        .unwrap();
+    fs::write(&prod_path, "hello\n").unwrap();
+    fs::remove_file(dir.path().join("prod.murk")).unwrap();
+    init_second(&dir, "prod.murk", &["--reuse-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("move it aside"));
+    assert_eq!(fs::read(&prod_path).unwrap(), b"hello\n");
+    assert!(!dir.path().join("prod.murk").exists());
+}
+
+#[test]
+fn reuse_key_refuses_to_choose_between_different_keys() {
+    let dir = TempDir::new().unwrap();
+    vault_with_stored_key(&dir);
+    init_second(&dir, "staging.murk", &["--separate-key"])
+        .assert()
+        .success();
+
+    init_second(&dir, "prod.murk", &["--reuse-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot choose"));
+    assert!(!dir.path().join("prod.murk").exists());
+    assert_eq!(stored_keys(dir.path()).len(), 2);
+}
+
+#[test]
+fn reuse_key_with_nothing_to_reuse_does_not_make_a_new_key() {
+    let dir = TempDir::new().unwrap();
+    init_second(&dir, "prod.murk", &["--reuse-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reuse-key"));
+    assert!(stored_keys(dir.path()).is_empty());
+    assert!(!dir.path().join("prod.murk").exists());
 }
 
 // ── add / get ──
@@ -3221,10 +3576,9 @@ fn init_new_vault_in_a_worktree_reuses_the_sibling_checkouts_key() {
     let base = TempDir::new().unwrap();
     let (home, repo, worktree) = worktree_fixture(base.path());
     murk_bin(&home)
-        .args(["init", "--vault", "other.murk"])
+        .args(["init", "--vault", "other.murk", "--separate-key"])
         .current_dir(&repo)
-        // The repo's .env already references test.murk's key: replace it.
-        .write_stdin("testuser\ny\n")
+        .write_stdin("testuser\n")
         .assert()
         .success();
     let keys_dir = home.join(".config/murk/keys");
@@ -3247,6 +3601,71 @@ fn init_new_vault_in_a_worktree_reuses_the_sibling_checkouts_key() {
         2,
         "init stored a second key for the worktree"
     );
+}
+
+#[test]
+fn second_vault_with_a_reused_key_is_found_in_a_fresh_worktree() {
+    // prod.murk created next to test.murk with the reused key, then
+    // committed: a worktree made afterwards reads it with no setup at all.
+    let base = TempDir::new().unwrap();
+    let (home, repo, _worktree) = worktree_fixture(base.path());
+    murk_bin(&home)
+        .args(["init", "--vault", "prod.murk", "--reuse-key"])
+        .current_dir(&repo)
+        .write_stdin("testuser\n")
+        .assert()
+        .success();
+    murk_bin(&home)
+        .args(["add", "PROD", "--vault", "prod.murk"])
+        .current_dir(&repo)
+        .write_stdin("p\n")
+        .assert()
+        .success();
+    git_ok(&repo, &["add", "prod.murk"]);
+    git_ok(&repo, &["commit", "-m", "prod"]);
+    let fresh = real_path(base.path()).join("fresh");
+    git_ok(
+        &repo,
+        &["worktree", "add", "--detach", fresh.to_str().unwrap()],
+    );
+
+    get_ok(&home, &fresh, "prod.murk", "PROD", "p");
+    get_ok(&home, &fresh, "test.murk", "API_KEY", "s3cret");
+}
+
+#[test]
+fn init_in_a_worktree_offers_the_key_of_a_vault_stored_in_a_sibling() {
+    // The worktree has test.murk but its key is stored only for the original
+    // checkout's path. A new vault there is still offered that key, and the
+    // copy is stored for the worktree's own path.
+    let base = TempDir::new().unwrap();
+    let (home, _repo, worktree) = worktree_fixture(base.path());
+
+    murk_bin(&home)
+        .args(["init", "--vault", "staging.murk"])
+        .current_dir(&worktree)
+        .write_stdin("testuser\n")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("(test.murk)").and(predicate::str::contains("--reuse-key")),
+        );
+
+    murk_bin(&home)
+        .args(["init", "--vault", "staging.murk", "--reuse-key"])
+        .current_dir(&worktree)
+        .write_stdin("testuser\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "using the key of test.murk for staging.murk too",
+        ));
+    assert!(!worktree.join(".env").exists(), "init wrote .env");
+    murk_bin(&home)
+        .args(["ls", "--vault", "staging.murk"])
+        .current_dir(&worktree)
+        .assert()
+        .success();
 }
 
 #[test]

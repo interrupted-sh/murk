@@ -59,6 +59,8 @@ complete -c murk -n "__fish_murk_needs_command" -f -a "merge-driver" -d 'Git mer
 complete -c murk -n "__fish_murk_needs_command" -f -a "completion" -d 'Generate or install shell completions'
 complete -c murk -n "__fish_murk_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c murk -n "__fish_murk_using_subcommand init" -l vault -d 'Vault filename' -r
+complete -c murk -n "__fish_murk_using_subcommand init" -l reuse-key -d 'When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking'
+complete -c murk -n "__fish_murk_using_subcommand init" -l separate-key -d 'When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking'
 complete -c murk -n "__fish_murk_using_subcommand init" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand env" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand env" -s h -l help -d 'Print help (see more with \'--help\')'

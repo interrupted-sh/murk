@@ -56,6 +56,8 @@ set edit:completion:arg-completer[murk] = {|@words|
         }
         &'murk;init'= {
             cand --vault 'Vault filename'
+            cand --reuse-key 'When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking'
+            cand --separate-key 'When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking'
             cand -h 'Print help'
             cand --help 'Print help'
         }
