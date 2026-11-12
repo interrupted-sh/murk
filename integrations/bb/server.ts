@@ -12,13 +12,14 @@
 // its keys' values inline. Everything fails closed: unknown keys, expired
 // TTLs, revoked grants, non-local hosts.
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { withGrantIdentity } from "./lib/binding";
 import { KEY_NAME_PATTERN, renderDotenv } from "./lib/dotenv";
 import { GRANT_MIGRATIONS, GrantStore, isExpired, type GrantRecord } from "./lib/grants";
-import { agentPlan, mintGrant, resolveOperatorKey, revokeGrant, runMurk } from "./lib/murk-cli";
+import { agentPlan, mintGrant, redactKeyPaths, resolveOperatorKey, revokeGrant, runMurk, shellQuote } from "./lib/murk-cli";
 import { legacyUpgradeRefusal, readVaultFormat, vaultCheckout } from "./lib/vault-format";
 
 /**
@@ -161,8 +162,17 @@ export default async function plugin(bb: BbPluginApi) {
     return { worktree: environment.path, hostId: environment.hostId };
   }
 
-  function toolError(message: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
-    return { content: [{ type: "text", text: `murk: ${message}` }], isError: true };
+  /**
+   * A tool error result. Tool results reach the agent, so key file paths are
+   * redacted (murk and the binding name the key file in some errors). The
+   * operator's own `bb murk grant` output keeps full paths.
+   */
+  async function toolError(message: string): Promise<{ content: Array<{ type: "text"; text: string }>; isError: true }> {
+    const text = redactKeyPaths(`murk: ${message}`, {
+      files: [(await settings.get()).keyFile.trim(), process.env.MURK_KEY_FILE],
+      dirs: [path.join(homedir(), ".config", "murk", "keys"), agentKeysDir()],
+    });
+    return { content: [{ type: "text", text }], isError: true };
   }
 
   // ---- key → grant resolution ----------------------------------------------
@@ -642,7 +652,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (grants.length === 0) return { exitCode: 0, stdout: "no grants" };
     const lines = grants.map((grant) => {
       const scope = scopeLabel(grant);
-      const status = grant.revokedAt ? "revoked" : isExpired(grant.expiresAt) ? "EXPIRED" : "active";
+      const status = grant.revokedAt
+        ? "revoked"
+        : grant.revokePendingAt
+          ? "REVOKE-PENDING"
+          : isExpired(grant.expiresAt)
+            ? "EXPIRED"
+            : "active";
       const reveal = grant.reveal ? "reveal" : "file-only";
       return `${grant.id}  ${status}  ${reveal}  ${scope}  expires ${grant.expiresAt}  keys: ${grant.keys.join(", ")}`;
     });
@@ -664,20 +680,24 @@ export default async function plugin(bb: BbPluginApi) {
         vaultError = error instanceof Error ? error.message : String(error);
       }
     }
-    // Delete the key file and mark the grant revoked even when the vault
-    // write failed (a stale keyFile setting, a moved key): no thread can use
-    // the grant through the plugin after this.
+    // Delete the key file even when the vault write failed (a stale keyFile
+    // setting, a vault that does not load): the plugin then cannot serve the
+    // grant. But the grant stays live in the vault for any copy of its key,
+    // so it is marked revoked only once murk removed it from the vault; until
+    // then it is pending, and every retry runs the vault revoke again.
     rmSync(grant.keyPath, { force: true });
-    store.markRevoked(id);
     if (vaultError) {
+      store.markRevokePending(id);
       return {
         exitCode: 1,
         stderr:
-          `murk: deleted the key file of grant ${id} and marked it revoked here, but could not remove ` +
-          `${grant.murkName} from the vault: ${vaultError}\n` +
-          `run this in your terminal to finish: murk agent revoke ${grant.murkName} --vault ${grant.vaultPath}`,
+          `murk: grant ${id} (${grant.murkName}) is still live in the vault: could not remove it: ${vaultError}\n` +
+          `deleted its key file here, so threads no longer get it from the plugin; a copy of the key still reads the vault\n` +
+          `fix the cause and run bb murk grant revoke ${id} again, or run: ` +
+          `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`,
       };
     }
+    store.markRevoked(id);
     return {
       exitCode: 0,
       stdout:
