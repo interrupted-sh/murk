@@ -41,7 +41,7 @@
     "format": "biome check --write"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.9",
+    "@biomejs/biome": "^2.6.5",
     "@napi-rs/cli": "^3"
   },
   "engines": {
