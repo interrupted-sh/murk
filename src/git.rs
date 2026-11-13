@@ -86,7 +86,8 @@ fn working_tree_root() -> Result<PathBuf, String> {
         .trim_end_matches(['\n', '\r'])
         .to_string();
     if !out.status.success() || root.is_empty() {
-        let git_said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let git_said =
+            crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true).into_owned();
         let mut msg =
             "not inside a git working tree; run murk setup-merge-driver in your repository"
                 .to_string();
@@ -104,10 +105,46 @@ fn working_tree_root() -> Result<PathBuf, String> {
         return Err(format!(
             "git's working tree for this repository is {}, which does not contain the current directory\n\
              the repository's core.worktree points elsewhere; murk setup-merge-driver changes nothing",
-            root.display()
+            crate::terminal_text(&root.display().to_string(), false)
         ));
     }
     Ok(root)
+}
+
+/// The `merge.murk.driver` lines murk itself has written, current and older.
+const MURK_DRIVER_COMMANDS: [&str; 3] = [
+    MERGE_DRIVER_COMMAND,
+    "murk merge-driver %O %A %B %P",
+    "murk merge-driver %O %A %B",
+];
+
+/// Refuse to replace a `merge.murk.driver` murk did not write, in any git
+/// config scope git reads here: a custom wrapper is the user's choice, and
+/// a local line would silently shadow a global one. Lines murk wrote, even
+/// several of them, may be replaced.
+fn check_existing_driver() -> Result<(), String> {
+    let out = git_command()
+        .args(["config", "--get-all", GIT_CONFIG_MERGE_DRIVER])
+        .output()
+        .map_err(|e| format!("running git config: {e}"))?;
+    let values = String::from_utf8_lossy(&out.stdout);
+    let custom: Vec<String> = values
+        .lines()
+        .filter(|v| !MURK_DRIVER_COMMANDS.contains(&v.trim()))
+        .map(|v| crate::terminal_text(v, false).into_owned())
+        .collect();
+    if custom.is_empty() {
+        return Ok(());
+    }
+    let mut lines = vec![format!(
+        "git config already sets {GIT_CONFIG_MERGE_DRIVER} to a command murk did not write: {}",
+        custom.join(" | ")
+    )];
+    lines.push("murk setup-merge-driver changed nothing".into());
+    lines.push(format!(
+        "to use murk's driver, remove it (git config --unset-all {GIT_CONFIG_MERGE_DRIVER}, add --global if it is set there), then run murk setup-merge-driver again"
+    ));
+    Err(lines.join("\n"))
 }
 
 /// Configure git to use murk's custom merge driver for vault files.
@@ -125,6 +162,8 @@ pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
     // `.gitattributes` in a subdirectory only covers that subdirectory.
     let gitattributes_path = working_tree_root()?.join(".gitattributes");
     let gitattributes = gitattributes_path.as_path();
+    // Before anything is written: never replace someone else's driver.
+    check_existing_driver()?;
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
 
@@ -169,12 +208,16 @@ pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
         (GIT_CONFIG_MERGE_DRIVER, MERGE_DRIVER_COMMAND),
     ];
     for (key, value) in &configs {
-        let status = git_command()
-            .args(["config", key, value])
-            .status()
+        // --replace-all: several local lines murk wrote collapse into one,
+        // where a plain set would fail on a multi-valued key.
+        let out = git_command()
+            .args(["config", "--replace-all", key, value])
+            .output()
             .map_err(|e| format!("running git config: {e}"))?;
-        if !status.success() {
-            return Err(format!("git config {key} failed (are you in a git repo?)"));
+        if !out.status.success() {
+            let git_said = crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true)
+                .into_owned();
+            return Err(format!("git config {key} failed: {git_said}"));
         }
     }
     steps.push(MergeDriverSetupStep::GitConfigured);

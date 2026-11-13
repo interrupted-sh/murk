@@ -1371,8 +1371,10 @@ fn merge_driver_refuses_a_grant_key_and_leaves_ours_untouched() {
         "the driver wrote %A: {stderr}"
     );
     assert!(
-        stderr.contains("agent grants are read-only"),
-        "driver must say why: {stderr}"
+        stderr.contains("agent grants are read-only")
+            && stderr.contains("still ours, unchanged, and theirs was NOT merged")
+            && stderr.contains("drops their changes"),
+        "driver must say why and what the file holds: {stderr}"
     );
 }
 

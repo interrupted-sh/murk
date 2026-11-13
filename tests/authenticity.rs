@@ -2716,7 +2716,8 @@ fn a_merge_never_upgrades_an_unaccepted_0_13_side() {
     assert!(!merged, "the merge must not complete: {stderr}");
     assert!(
         stderr.contains("theirs is a pre-0.14 vault this machine hasn't accepted on this branch")
-            && stderr.contains("nothing was written; the working file is still ours"),
+            && stderr.contains("nothing was written: the working file .murk is still ours, unchanged, and theirs was NOT merged")
+            && stderr.contains("committing it as it is drops their changes"),
         "{stderr}"
     );
     assert_eq!(
