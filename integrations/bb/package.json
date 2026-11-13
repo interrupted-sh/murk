@@ -32,7 +32,7 @@
     "@types/node": "^26.6.5",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.2",
-    "hono": "^4.13.14",
+    "hono": "^4.13.18",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
