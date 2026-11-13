@@ -661,11 +661,13 @@ export default async function plugin(bb: BbPluginApi) {
       const scope = scopeLabel(grant);
       const status = grant.revokedAt
         ? "revoked"
-        : grant.revokePendingAt
-          ? "REVOKE-PENDING"
-          : isExpired(grant.expiresAt)
-            ? "EXPIRED"
-            : "active";
+        : grant.forgottenAt
+          ? "FORGOTTEN (vault not revoked)"
+          : grant.revokePendingAt
+            ? "REVOKE-PENDING"
+            : isExpired(grant.expiresAt)
+              ? "EXPIRED"
+              : "active";
       const reveal = grant.reveal ? "reveal" : "file-only";
       return `${grant.id}  ${status}  ${reveal}  ${scope}  expires ${grant.expiresAt}  keys: ${grant.keys.join(", ")}`;
     });
@@ -680,7 +682,16 @@ export default async function plugin(bb: BbPluginApi) {
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
+    const vaultRevoke = `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`;
     if (forget) {
+      if (grant.forgottenAt) {
+        return {
+          exitCode: 0,
+          stdout:
+            `grant ${id} (${grant.murkName}) is already forgotten here; nothing was revoked in a vault\n` +
+            `to revoke it in the vault, run bb murk grant revoke ${id}, or: ${vaultRevoke}`,
+        };
+      }
       // Clears local state only, for a grant no revoke can reach: its vault
       // file is gone for good, or you removed the grant from the vault
       // yourself. Never for an active grant: revoke that first.
@@ -691,13 +702,15 @@ export default async function plugin(bb: BbPluginApi) {
         };
       }
       rmSync(grant.keyPath, { force: true });
-      store.markRevoked(id);
+      // Forgotten, never revoked: list shows it, and a later revoke runs murk.
+      store.markForgotten(id);
       return {
         exitCode: 0,
         stdout:
           `forgot grant ${id} (${grant.murkName}) here and deleted its key file; nothing was revoked in a vault\n` +
-          `the grant may still exist in any copy of that vault (another clone, a branch, git history): ` +
-          `run murk agent revoke ${shellQuote(grant.murkName)} wherever that vault lives`,
+          `bb murk grant list shows it as FORGOTTEN (vault not revoked). The grant may still exist in this vault ` +
+          `or any copy of it (another clone, a branch, git history): run ${vaultRevoke}, or ` +
+          `murk agent revoke ${shellQuote(grant.murkName)} wherever a copy lives`,
       };
     }
     // Only murk can say the grant is gone from the vault. A vault that now
@@ -728,19 +741,20 @@ export default async function plugin(bb: BbPluginApi) {
     rmSync(grant.keyPath, { force: true });
     if (vaultError) {
       store.markRevokePending(id);
-      const forgetHint =
-        `run bb murk grant revoke --forget ${id} to clear the grant here only; ` +
-        `it may still exist in any copy of that vault`;
-      // The hint only; whatever murk said, the grant stays pending.
-      const notFound = /grant not found/i.test(vaultError);
-      const next = !existsSync(grant.vaultPath)
-        ? `the vault file ${grant.vaultPath} is gone. Restore it and run bb murk grant revoke ${id} again. ` +
-          `If it is gone for good (bb deleted the worktree), ${forgetHint}`
-        : notFound
-          ? `murk did not find the grant in this vault. If you removed it yourself, ${forgetHint}. ` +
-            `Otherwise check the vault and run bb murk grant revoke ${id} again`
-          : `fix the cause and run bb murk grant revoke ${id} again, or run: ` +
-            `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`;
+      // One neutral hint, whatever murk printed: its output can carry text
+      // that whoever writes the vault planted, and the vault file can be moved
+      // by anyone who can write the worktree. Neither may steer the operator.
+      const forgotten = grant.forgottenAt
+        ? `this grant was forgotten here earlier (revoke --forget): that cleared only the plugin's own state; ` +
+          `it was never revoked in a vault\n`
+        : "";
+      const next =
+        forgotten +
+        `the message above is what murk reported; the plugin does not guess its cause. ` +
+        `Fix the cause and run bb murk grant revoke ${id} again, or revoke it in the vault yourself: ${vaultRevoke}\n` +
+        `if the vault file is missing, run git status in its checkout first: a moved or deleted file can be restored\n` +
+        `only if you removed the grant from the vault yourself, or the vault is gone for good, run ` +
+        `bb murk grant revoke --forget ${id}: it clears the grant here only, and the grant stays in any copy of that vault`;
       return {
         exitCode: 1,
         stderr:

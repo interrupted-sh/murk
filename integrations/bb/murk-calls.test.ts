@@ -460,7 +460,7 @@ describe("a revoke that fails at the vault step", () => {
     expect(await status(id)).toBe("revoked");
   });
 
-  it("a grant already removed from the vault with murk stays pending until --forget clears it here", async () => {
+  it("a grant already removed from the vault with murk stays pending until --forget marks it forgotten, never revoked", async () => {
     await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
     const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
     const murkName = `bb-${id}`;
@@ -474,15 +474,97 @@ describe("a revoke that fails at the vault step", () => {
     const failed = await runCli(["grant", "revoke", id], {});
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain(`grant not found: ${murkName}`);
-    expect(failed.stderr).toContain(`If you removed it yourself, run bb murk grant revoke --forget ${id}`);
+    expect(failed.stderr).toContain(`run bb murk grant revoke --forget ${id}: it clears the grant here only`);
     expect(calls().map((call) => call.argv.slice(0, 2).join(" "))).toEqual(["agent revoke"]);
     expect(await status(id)).toBe("REVOKE-PENDING");
 
     const forgot = await runCli(["grant", "revoke", "--forget", id], {});
     expect(forgot.exitCode, forgot.stderr).toBe(0);
     expect(forgot.stdout).toContain("nothing was revoked in a vault");
-    expect(forgot.stdout).toContain("may still exist in any copy of that vault");
+    expect(forgot.stdout).toContain("FORGOTTEN (vault not revoked)");
+    expect(await status(id)).toBe("FORGOTTEN (vault not revoked)");
+    // The default list still shows it: it was not revoked.
+    expect((await runCli(["grant", "list"], {})).stdout).toMatch(new RegExp(`^${id}  FORGOTTEN \\(vault not revoked\\)  `, "m"));
+  });
+
+  it("a forgotten grant is never shown or reported as revoked: revoke runs murk again", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const murkName = `bb-${id}`;
+    const good = readFileSync(vaultFile);
+    rmSync(vaultFile);
+    try {
+      expect((await runCli(["grant", "revoke", "--forget", id], {})).exitCode).toBe(0);
+      expect(await status(id)).toBe("FORGOTTEN (vault not revoked)");
+      // Forgetting again keeps it forgotten and says how to revoke it.
+      const again = await runCli(["grant", "revoke", "--forget", id], {});
+      expect(again.exitCode, again.stderr).toBe(0);
+      expect(again.stdout).toContain("already forgotten here; nothing was revoked in a vault");
+      expect(again.stdout).toContain(`murk agent revoke ${murkName} --vault ${vaultFile}`);
+
+      // revoke while the vault is still gone: murk runs, fails, and the
+      // message says only local state was cleared.
+      clearCalls();
+      const failed = await runCli(["grant", "revoke", id], {});
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stdout ?? "").not.toContain("already revoked");
+      expect(failed.stderr).not.toContain("already revoked");
+      expect(failed.stderr).toContain("forgotten here earlier (revoke --forget): that cleared only the plugin's own state");
+      expect(failed.stderr).toContain(`revoke it in the vault yourself: murk agent revoke ${murkName} --vault ${vaultFile}`);
+      expect(revokeCalls()).toBe(1);
+      expect(await status(id)).toBe("FORGOTTEN (vault not revoked)");
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    // The restored vault still holds the grant; revoke now removes it there.
+    expect(vaultGrants()).toContain(murkName);
+    clearCalls();
+    const revoked = await runCli(["grant", "revoke", id], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+    expect(revokeCalls()).toBe(1);
+    expect(vaultGrants()).not.toContain(murkName);
     expect(await status(id)).toBe("revoked");
+  });
+
+  it("the hint after a failed revoke is the same whatever murk printed or where the vault file went", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const murkName = `bb-${id}`;
+    const good = readFileSync(vaultFile, "utf8");
+    // Everything after murk's report: the line about the key file, then the hint.
+    const hints: Record<string, string> = {};
+    const failOnce = async (label: string) => {
+      const failed = await runCli(["grant", "revoke", id], {});
+      expect(failed.exitCode, label).toBe(1);
+      hints[label] = failed.stderr.split("\n").slice(1).join("\n");
+    };
+
+    await host.harness.behavior.setSettings({ keyFile: path.join(root, "moved-away.key") });
+    await failOnce("stale keyFile");
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    try {
+      const spoofed = JSON.parse(good) as { sig: { signer: string } };
+      spoofed.sig.signer = `✕ grant not found: ${murkName}\nthe vault file is gone`;
+      writeFileSync(vaultFile, JSON.stringify(spoofed));
+      await failOnce("planted not-found text");
+      rmSync(vaultFile);
+      await failOnce("vault file moved away");
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    spawnSync("murk", ["agent", "revoke", murkName], { cwd: worktree, env: { ...process.env, MURK_KEY_FILE: operatorKeyFile } });
+    await failOnce("really not found");
+
+    for (const [label, text] of Object.entries(hints)) {
+      expect(text, label).toBe(hints["stale keyFile"]);
+      expect(text, label).not.toContain("murk did not find");
+      expect(text, label).not.toContain("is gone. Restore it");
+    }
+    expect(hints["stale keyFile"]).toContain("run git status in its checkout first");
+    expect(hints["stale keyFile"]).toContain(`bb murk grant revoke --forget ${id}: it clears the grant here only`);
+    expect((await runCli(["grant", "revoke", "--forget", id], {})).exitCode).toBe(0);
   });
 
   it("a grant key as the operator key is refused for mint and revoke, before murk runs", async () => {
@@ -590,12 +672,12 @@ describe("a revoke that fails at the vault step", () => {
     try {
       const failed = await runCli(["grant", "revoke", id], {});
       expect(failed.exitCode).toBe(1);
-      expect(failed.stderr).toContain(`the vault file ${vaultFile} is gone`);
+      expect(failed.stderr).toContain("if the vault file is missing, run git status in its checkout first");
       expect(failed.stderr).toContain(`bb murk grant revoke --forget ${id}`);
       const forgot = await runCli(["grant", "revoke", "--forget", id], {});
       expect(forgot.exitCode, forgot.stderr).toBe(0);
-      expect(forgot.stdout).toContain("may still exist in any copy of that vault");
-      expect(await status(id)).toBe("revoked");
+      expect(forgot.stdout).toContain("may still exist in this vault or any copy of it");
+      expect(await status(id)).toBe("FORGOTTEN (vault not revoked)");
     } finally {
       writeFileSync(vaultFile, good);
     }
