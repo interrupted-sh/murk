@@ -354,7 +354,7 @@ describe("a revoke that fails at the vault step", () => {
     await host.harness.behavior.setSettings({ keyFile: stale });
     const failed = await runCli(["grant", "revoke", id], {});
     expect(failed.exitCode).toBe(1);
-    expect(failed.stderr).toContain(`still live in the vault: could not remove it: the keyFile setting points at ${stale}`);
+    expect(failed.stderr).toContain(`may still be live in the vault: could not remove it: the keyFile setting points at ${stale}`);
     expect(failed.stderr).toContain(`murk agent revoke ${murkName} --vault ${path.join(worktree, ".murk")}`);
     expect(existsSync(keyPath(id))).toBe(false);
     expect(await status(id)).toBe("REVOKE-PENDING");
@@ -386,7 +386,7 @@ describe("a revoke that fails at the vault step", () => {
     try {
       const failed = await runCli(["grant", "revoke", id], {});
       expect(failed.exitCode).toBe(1);
-      expect(failed.stderr).toContain(`still live in the vault: could not remove it: revoking grant ${murkName} failed:`);
+      expect(failed.stderr).toContain(`may still be live in the vault: could not remove it: revoking grant ${murkName} failed:`);
       expect(failed.stderr).toContain("integrity check failed");
       expect(await status(id)).toBe("REVOKE-PENDING");
       clearCalls();
@@ -423,7 +423,7 @@ describe("a revoke that fails at the vault step", () => {
       try {
         const failed = await runCli(["grant", "revoke", id], {});
         expect(failed.exitCode, label).toBe(1);
-        expect(failed.stderr, label).toContain("still live in the vault");
+        expect(failed.stderr, label).toContain("may still be live in the vault");
         expect(await status(id), label).toBe("REVOKE-PENDING");
       } finally {
         writeFileSync(vaultFile, good);
@@ -434,5 +434,214 @@ describe("a revoke that fails at the vault step", () => {
       expect(vaultGrants(), label).not.toContain(murkName);
       expect(await status(id), label).toBe("revoked");
     }
+  });
+
+  it("error text never decides: a planted \"grant not found\" stays pending until the restored vault's retry removes the grant", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const murkName = `bb-${id}`;
+    const good = readFileSync(vaultFile, "utf8");
+    const spoofed = JSON.parse(good) as { sig: { signer: string } };
+    spoofed.sig.signer = `x grant not found: ${murkName} y`;
+    writeFileSync(vaultFile, JSON.stringify(spoofed));
+    try {
+      const failed = await runCli(["grant", "revoke", id], {});
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stderr).toContain(`grant not found: ${murkName}`);
+      expect(await status(id)).toBe("REVOKE-PENDING");
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    expect(vaultGrants()).toContain(murkName);
+    const retried = await runCli(["grant", "revoke", id], {});
+    expect(retried.exitCode, retried.stderr).toBe(0);
+    expect(vaultGrants()).not.toContain(murkName);
+    expect(await status(id)).toBe("revoked");
+  });
+
+  it("a grant already removed from the vault with murk stays pending until --forget clears it here", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const murkName = `bb-${id}`;
+    const byHand = spawnSync("murk", ["agent", "revoke", murkName], {
+      cwd: worktree,
+      encoding: "utf8",
+      env: { ...process.env, MURK_KEY_FILE: operatorKeyFile },
+    });
+    expect(byHand.status, byHand.stderr).toBe(0);
+    clearCalls();
+    const failed = await runCli(["grant", "revoke", id], {});
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain(`grant not found: ${murkName}`);
+    expect(failed.stderr).toContain(`If you removed it yourself, run bb murk grant revoke --forget ${id}`);
+    expect(calls().map((call) => call.argv.slice(0, 2).join(" "))).toEqual(["agent revoke"]);
+    expect(await status(id)).toBe("REVOKE-PENDING");
+
+    const forgot = await runCli(["grant", "revoke", "--forget", id], {});
+    expect(forgot.exitCode, forgot.stderr).toBe(0);
+    expect(forgot.stdout).toContain("nothing was revoked in a vault");
+    expect(forgot.stdout).toContain("may still exist in any copy of that vault");
+    expect(await status(id)).toBe("revoked");
+  });
+
+  it("a grant key as the operator key is refused for mint and revoke, before murk runs", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const a = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const b = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    // A grant key sees only its own grant record: its listing would show grant b gone.
+    const refusal = "the operator key must be a full recipient key, not an agent grant";
+    await host.harness.behavior.setSettings({ keyFile: keyPath(a) });
+    clearCalls();
+    const mint = await runCli(mintArgs, { cwd: worktree, projectId: PROJECT });
+    expect(mint.exitCode).toBe(1);
+    expect(mint.stderr).toContain(`${refusal}: the keyFile setting names a grant key`);
+    expect(mint.stderr).not.toContain(keyPath(a));
+    const failed = await runCli(["grant", "revoke", b], {});
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain(`${refusal}: the keyFile setting names a grant key`);
+    expect(calls()).toEqual([]);
+    expect(await status(b)).toBe("REVOKE-PENDING");
+    expect(vaultGrants()).toContain(`bb-${b}`);
+
+    // The same key in the bb server's MURK_KEY_FILE, with the setting blank.
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    await withServerEnv({ MURK_KEY_FILE: keyPath(a) }, async () => {
+      clearCalls();
+      const viaEnv = await runCli(mintArgs, { cwd: worktree, projectId: PROJECT });
+      expect(viaEnv.exitCode).toBe(1);
+      expect(viaEnv.stderr).toContain(`${refusal}: MURK_KEY_FILE on the bb server names a grant key`);
+      expect(viaEnv.stderr).not.toContain(keyPath(a));
+      expect(calls()).toEqual([]);
+    });
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    expect((await runCli(["grant", "revoke", b], {})).exitCode).toBe(0);
+    expect((await runCli(["grant", "revoke", a], {})).exitCode).toBe(0);
+    expect(vaultGrants()).not.toContain(`bb-${b}`);
+  });
+
+  it("a pending grant is never served, even with its key file put back", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    // Revoke every other grant, so only the pending one could serve this thread.
+    for (const line of (await runCli(["grant", "list"], {})).stdout.split("\n")) {
+      const other = line.match(/^(g[0-9a-f]{8})  active/)?.[1];
+      if (other) expect((await runCli(["grant", "revoke", other], {})).exitCode).toBe(0);
+    }
+    const thread = "thread-pending";
+    const id = await mintedId([...mintArgs, "--thread", thread], { projectId: PROJECT });
+    const key = readFileSync(keyPath(id));
+    await host.harness.behavior.setSettings({ keyFile: path.join(root, "moved-away.key") });
+    expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(1);
+    writeFileSync(keyPath(id), key, { mode: 0o600 });
+    const got = JSON.stringify(await host.harness.behavior.callAgentTool("murk_get", {}, { threadId: thread, projectId: PROJECT }));
+    expect(got).toContain("no active grant covers this thread");
+    expect(got).not.toContain(SECRET);
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
+  });
+
+  it("a vault that now reads as pre-0.14 is never handed to murk, and the revoke stays pending", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const good = readFileSync(vaultFile);
+    writeFileSync(vaultFile, readFileSync(path.join(__dirname, "..", "..", "tests", "fixtures", "v0_13_signed.murk")));
+    try {
+      clearCalls();
+      const failed = await runCli(["grant", "revoke", id], {});
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stderr).toContain("pre-0.14 format");
+      expect(calls()).toEqual([]);
+      expect(await status(id)).toBe("REVOKE-PENDING");
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
+  });
+
+  it("the printed murk agent revoke command quotes a vault path with spaces", async () => {
+    const spaced = path.join(root, "a repo");
+    mkdirSync(spaced);
+    expect(spawnSync("git", ["init", "-q"], { cwd: spaced }).status).toBe(0);
+    expect(spawnSync("murk", ["init"], { cwd: spaced, input: "spaced\n", encoding: "utf8" }).status).toBe(0);
+    expect(spawnSync("murk", ["add", "TEST_API_KEY"], { cwd: spaced, input: "x\n", encoding: "utf8" }).status).toBe(0);
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    const id = await mintedId(mintArgs, { cwd: spaced, projectId: PROJECT });
+    await host.harness.behavior.setSettings({ keyFile: path.join(root, "moved-away.key") });
+    const failed = await runCli(["grant", "revoke", id], {});
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain(`murk agent revoke bb-${id} --vault '${path.join(spaced, ".murk")}'`);
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+  });
+
+  it("a vault file gone for good: the message offers --forget, which clears the grant here only", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const refused = await runCli(["grant", "revoke", "--forget", id], {});
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("is active and its vault exists");
+    expect(await status(id)).toBe("active");
+
+    const good = readFileSync(vaultFile);
+    rmSync(vaultFile);
+    try {
+      const failed = await runCli(["grant", "revoke", id], {});
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stderr).toContain(`the vault file ${vaultFile} is gone`);
+      expect(failed.stderr).toContain(`bb murk grant revoke --forget ${id}`);
+      const forgot = await runCli(["grant", "revoke", "--forget", id], {});
+      expect(forgot.exitCode, forgot.stderr).toBe(0);
+      expect(forgot.stdout).toContain("may still exist in any copy of that vault");
+      expect(await status(id)).toBe("revoked");
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    // Nothing was revoked in a vault: the restored file still holds the grant.
+    expect(vaultGrants()).toContain(`bb-${id}`);
+    spawnSync("murk", ["agent", "revoke", `bb-${id}`], { cwd: worktree, env: { ...process.env, MURK_KEY_FILE: operatorKeyFile } });
+  });
+});
+
+describe("tool errors redact every key path they may carry", () => {
+  const keyPath = (id: string) => path.join(dataDir, "plugins", "murk", "agent-keys", `${id}.key`);
+  // The vaultPath setting is echoed in the murk_plan error when it is not
+  // absolute; a value that embeds a key path shows which paths are redacted.
+  async function planError(vaultPath: string, env: Record<string, string> = {}): Promise<string> {
+    await host.harness.behavior.setSettings({ vaultPath });
+    let text = "";
+    await withServerEnv(env, async () => {
+      text = JSON.stringify(await host.harness.behavior.callAgentTool("murk_plan", {}, { threadId: THREAD, projectId: PROJECT }));
+    });
+    await host.harness.behavior.setSettings({ vaultPath: "" });
+    return text;
+  }
+
+  it("murk's key store, the keyFile setting, the server's MURK_KEY_FILE and every grant key path", async () => {
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    const stored = await planError(`x${operatorKeyFile}`);
+    expect(stored).toContain("isError");
+    expect(stored).not.toContain(operatorKeyFile);
+
+    const explicit = path.join(root, "explicit-setting.key");
+    await host.harness.behavior.setSettings({ keyFile: explicit });
+    expect(await planError(`x${explicit}`)).not.toContain(explicit);
+
+    const serverKey = path.join(root, "server-env.key");
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    expect(await planError(`x${serverKey}`, { MURK_KEY_FILE: serverKey })).not.toContain(serverKey);
+
+    // A grant whose key file is recorded outside the plugin's key directory
+    // (another spelling of the data dir): its recorded path is redacted too.
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const elsewhere = path.join(root, "other-data", `${id}.key`);
+    mkdirSync(path.dirname(elsewhere), { recursive: true });
+    renameSync(keyPath(id), elsewhere);
+    host.bb.storage.database().prepare("UPDATE grants SET key_path = ? WHERE id = ?").run(elsewhere, id);
+    expect(await planError(`x${elsewhere}`)).not.toContain(elsewhere);
+    expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
   });
 });

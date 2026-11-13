@@ -6,7 +6,7 @@
 // (`murk agent plan`). All of these run server-side against a server-local
 // vault file — the plugin's v1 contract is local-host-only.
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
 
@@ -82,19 +82,50 @@ export function runMurk(
   return promise;
 }
 
+/** Lines murk writes into every grant key file (`src/agents.rs`), never into an operator key. */
+const GRANT_KEY_MARKERS = ["# murk-grant-id:", "# murk-trusted-signer:"];
+
+function isGrantKeyText(text: string): boolean {
+  return text.split(/\r?\n/).some((line) => GRANT_KEY_MARKERS.some((marker) => line.trim().startsWith(marker)));
+}
+
+function grantKeyRefusal(source: string): Error {
+  return new Error(`the operator key must be a full recipient key, not an agent grant: ${source} names a grant key`);
+}
+
 /**
  * The operator identity for `murk agent grant`, `agent ls` and `agent revoke`.
  * The keyFile setting wins. When it is blank, this returns null and murk runs
  * with the bb server's environment: its MURK_KEY or MURK_KEY_FILE, else the
  * key murk stored for the vault (see `runMurk`). The vault's .env is never
  * read: it sits in a worktree that an agent can edit.
+ *
+ * A key file with grant key lines is refused, a common mistake that would
+ * only fail later. This is a guard, not a guarantee: murk also accepts a bare
+ * grant key with no such lines.
  */
-export function resolveOperatorKey(setting: string): string | null {
+export function resolveOperatorKey(setting: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const keyFile = setting.trim();
-  if (!keyFile) return null;
-  if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
-  if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
-  return keyFile;
+  if (keyFile) {
+    if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
+    if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
+    if (isGrantKeyText(readKeyText(keyFile))) throw grantKeyRefusal("the keyFile setting");
+    return keyFile;
+  }
+  if (env.MURK_KEY && isGrantKeyText(env.MURK_KEY)) throw grantKeyRefusal("MURK_KEY on the bb server");
+  if (env.MURK_KEY_FILE && isGrantKeyText(readKeyText(env.MURK_KEY_FILE))) {
+    throw grantKeyRefusal("MURK_KEY_FILE on the bb server");
+  }
+  return null;
+}
+
+/** A key file's text, or "" when it cannot be read (murk then reports why). */
+function readKeyText(file: string): string {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 /** `value` quoted for a POSIX shell, so a printed command copies as one argument per value. */
@@ -184,20 +215,18 @@ export async function listGrants(vaultPath: string, operatorKey: string | null):
 }
 
 /**
- * Revoke a grant by its murk name. Succeeds when murk removed it, or when murk
- * loaded the vault (every check passed) and reports that it holds no grant of
- * that name. Any other failure, a missing vault included, throws.
+ * Revoke a grant by its murk name. Succeeds only when `murk agent revoke`
+ * exits 0, that is when murk removed the grant from the vault. Every other
+ * outcome throws, a grant murk reports as not in the vault included: neither
+ * murk's error text (a vault writer can plant text in fields murk echoes) nor
+ * a grant listing (a grant key sees only its own record) proves it is gone.
  */
 export async function revokeGrant(vaultPath: string, name: string, operatorKey: string | null): Promise<void> {
   const result = await runMurk(["agent", "revoke", name, "--vault", vaultPath], {
     keyFile: operatorKey,
     cwd: path.dirname(vaultPath),
   });
-  if (result.code === 0) return;
-  // Strip terminal colours, then match murk's exact message for this name.
-  const output = `${result.stderr}\n${result.stdout}`.replace(/\x1b\[[0-9;]*m/g, "");
-  const gone = new RegExp(`(^|\\s)grant not found: ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`, "m");
-  if (!gone.test(output)) throw murkError(`revoking grant ${name}`, result);
+  if (result.code !== 0) throw murkError(`revoking grant ${name}`, result);
 }
 
 /**

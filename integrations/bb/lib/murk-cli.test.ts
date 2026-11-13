@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: murk contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { redactKeyPaths, shellQuote } from "./murk-cli";
 
@@ -25,6 +28,21 @@ describe("redactKeyPaths", () => {
     expect(redactKeyPaths(text, { files: [file], dirs: [] })).toBe(
       "vault /srv/key-project/.murk and /srv/key.bak and /srv/keys/x, key <key file>",
     );
+  });
+
+  it("redacts the resolved spelling of a key file reached through a symlinked directory", () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "murk-redact-")));
+    try {
+      mkdirSync(path.join(root, "real"));
+      writeFileSync(path.join(root, "real", "op.key"), "k");
+      symlinkSync(path.join(root, "real"), path.join(root, "link"));
+      const resolved = path.join(root, "real", "op.key");
+      expect(redactKeyPaths(`cannot read ${resolved}`, { files: [path.join(root, "link", "op.key")], dirs: [] })).toBe(
+        "cannot read <key file>",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("redacts the macOS /private spelling of a /tmp path", () => {
