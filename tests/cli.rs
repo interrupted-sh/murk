@@ -4114,6 +4114,25 @@ fn setup_merge_driver_outside_a_repository_writes_nothing() {
     assert!(!dir.path().join(".gitattributes").exists());
 }
 
+/// A file in a git working tree, with its line endings normalized to `\n`.
+///
+/// With `core.autocrlf=true` (the default on GitHub's Windows runners) git
+/// writes every working-tree file, a merge driver's result included, with
+/// CRLF endings. The driver itself writes LF, and git converts the whole file
+/// afterwards, so the endings must be uniform: a mix would mean part of the
+/// file bypassed git's conversion.
+fn working_tree_text(path: &std::path::Path) -> String {
+    let text = fs::read_to_string(path).unwrap();
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count();
+    assert!(
+        crlf == 0 || crlf == lf,
+        "{}: mixed line endings ({crlf} of {lf} lines end in CRLF)",
+        path.display()
+    );
+    text.replace("\r\n", "\n")
+}
+
 /// A repository in `repo` whose `.gitattributes` and git config use the murk
 /// merge driver (the test binary) for both vault naming styles, configured
 /// the way `setup-merge-driver` writes it.
@@ -4187,7 +4206,7 @@ fn merge_driver_merges_a_non_vault_file_as_text() {
         stderr.contains(".murk.bak is not a murk vault: merged as text, with conflict markers"),
         "{stderr}"
     );
-    let bak = fs::read_to_string(repo.join(".murk.bak")).unwrap();
+    let bak = working_tree_text(&repo.join(".murk.bak"));
     assert!(
         bak.contains("<<<<<<< ours:.murk.bak\nOURS\n")
             && bak.contains(">>>>>>> theirs:.murk.bak")
@@ -4195,7 +4214,7 @@ fn merge_driver_merges_a_non_vault_file_as_text() {
         "{bak}"
     );
     assert_eq!(
-        fs::read_to_string(repo.join(".murk.orig")).unwrap(),
+        working_tree_text(&repo.join(".murk.orig")),
         "ONE\ntwo\nthree\nfour\nFIVE\n"
     );
 }
@@ -4350,7 +4369,7 @@ fn merge_driver_damaged_vault_side_ends_in_a_git_conflict() {
         stderr.contains("murk never merges a vault as text"),
         "{stderr}"
     );
-    let file = fs::read_to_string(repo.join(".murk")).unwrap();
+    let file = working_tree_text(&repo.join(".murk"));
     assert!(file.starts_with("<<<<<<< ours:.murk\n"), "{file}");
 }
 
@@ -4409,7 +4428,7 @@ fn merge_driver_add_add_of_a_vault_shows_both_sides_and_what_to_redo() {
     create("THEIRS_ONLY");
     git_ok(&repo, &["checkout", "-q", "main"]);
     create("OURS_ONLY");
-    let ours = fs::read_to_string(repo.join(".murk.staging")).unwrap();
+    let ours = working_tree_text(&repo.join(".murk.staging"));
 
     let (merged, stderr) = git_merge_as(&home, &repo, "theirs");
     assert!(!merged, "merge succeeded");
@@ -4426,7 +4445,7 @@ fn merge_driver_add_add_of_a_vault_shows_both_sides_and_what_to_redo() {
         .find(|l| l.contains("git checkout --theirs -- .murk.staging"))
         .unwrap_or_else(|| panic!("{stderr}"));
     assert!(keep_theirs.contains("OURS_ONLY"), "{stderr}");
-    let file = fs::read_to_string(repo.join(".murk.staging")).unwrap();
+    let file = working_tree_text(&repo.join(".murk.staging"));
     assert!(
         file.starts_with("<<<<<<< ours:.murk.staging\n")
             && file.contains(ours.trim_end())
