@@ -51,10 +51,17 @@ secret.
 Run the driver with your key available: `MURK_KEY`, `MURK_KEY_FILE`, or the
 stored key of the vault being merged. The driver finds the stored key of
 `.murk.prod` or `prod.murk` as `--vault` does, so a vault with its own key
-merges with no setup. A file that matches the pattern but is not a vault
-(`.murk.bak`), or a vault on one branch and something else on the other, is
-merged as text, with conflict markers where both sides changed the same
-lines.
+merges with no setup.
+
+The driver never merges a vault as text. A file that matches the pattern
+but plainly is not a vault (`.murk.bak` holding notes) is merged as text,
+with conflict markers where both sides changed the same lines. When a side
+is or could be a vault but murk cannot read it, for example a vault re-saved
+with a byte-order mark, a stray line, or a vault overwritten on one branch,
+the driver stops. It puts ours and theirs in the file between conflict
+markers and names the side it cannot read. Keep one side with `git checkout
+--ours` or `--theirs`, check it with `murk verify`, and redo the other
+side's changes.
 
 When both branches created the same vault, for example `murk init --vault
 .murk.staging` on each, there are two separate vaults, and no merge can
@@ -162,6 +169,17 @@ with no path. A driver with that configuration still runs. But it uses
 vault's trust pin nor its stored key. Such a vault then merges only with
 `MURK_KEY` or `MURK_KEY_FILE` set. Run `murk setup-merge-driver` again in
 each clone: it replaces the old line with `murk merge-driver -- %O %A %B %P`.
+It replaces only lines that murk wrote. If `merge.murk.driver` runs your own
+command, for example a wrapper script, setup changes nothing and tells you
+to remove the line first.
+
+### When the driver stops
+
+Some refusals leave the file as ours, without conflict markers: no key, a
+save counter at its limit, or an agent grant key. The message says that
+nothing was written and theirs was not merged. Do not commit the file as it
+is, because that drops their changes. Set your key and run the merge again,
+or keep one side and redo the other side's changes with murk.
 
 ### Merges that never run the driver
 

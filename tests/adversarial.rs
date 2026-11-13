@@ -351,14 +351,13 @@ fn world_readable_key_file_rejected() {
 
 // ── Merge driver abuse ──
 
-/// Empty inputs next to a real vault are not a vault merge: they merge as
-/// text. Theirs did not change the (empty) base, so the result is ours,
-/// byte for byte, and nothing of the empty sides gets in.
+/// Empty inputs next to a real vault are refused: a conflict whose file holds
+/// both sides between markers, never a text merge of a vault.
 #[test]
 fn merge_driver_empty_files() {
     let dir = TempDir::new().unwrap();
     init_vault(&dir);
-    let ours = fs::read(dir.path().join("test.murk")).unwrap();
+    let ours = fs::read_to_string(dir.path().join("test.murk")).unwrap();
     fs::write(dir.path().join("base.murk"), "").unwrap();
     fs::write(dir.path().join("theirs.murk"), "").unwrap();
 
@@ -370,8 +369,10 @@ fn merge_driver_empty_files() {
             dir.path().join("theirs.murk").to_str().unwrap(),
         ])
         .assert()
-        .success();
-    assert_eq!(fs::read(dir.path().join("test.murk")).unwrap(), ours);
+        .failure()
+        .stderr(predicate::str::contains("never merges a vault as text"));
+    let merged = fs::read_to_string(dir.path().join("test.murk")).unwrap();
+    assert!(merged.starts_with("<<<<<<< ours:") && merged.contains(ours.trim_end()));
 }
 
 #[test]
