@@ -169,7 +169,11 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function toolError(message: string): Promise<{ content: Array<{ type: "text"; text: string }>; isError: true }> {
     const text = redactKeyPaths(`murk: ${message}`, {
-      files: [(await settings.get()).keyFile.trim(), process.env.MURK_KEY_FILE],
+      files: [
+        (await settings.get()).keyFile.trim(),
+        process.env.MURK_KEY_FILE,
+        ...store.list({ includeRevoked: true }).map((grant) => grant.keyPath),
+      ],
       dirs: [path.join(homedir(), ".config", "murk", "keys"), agentKeysDir()],
     });
     return { content: [{ type: "text", text }], isError: true };
@@ -245,7 +249,7 @@ export default async function plugin(bb: BbPluginApi) {
         const schema = entries.map((entry) => ({ key: entry.key, tags: entry.tags ?? [] }));
         return JSON.stringify({ entries: schema }, null, 2);
       } catch (error) {
-        return toolError(error instanceof Error ? error.message : String(error));
+        return await toolError(error instanceof Error ? error.message : String(error));
       }
     },
   });
@@ -277,7 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
         const { allowRevealGrants } = await settings.get();
         const grants = store.activeFor(projectId, threadId);
         if (grants.length === 0) {
-          return toolError(
+          return await toolError(
             "no active grant covers this thread — ask the user to mint one with: " +
               `bb murk grant mint --keys KEY[,KEY…] --thread ${threadId}`,
           );
@@ -334,12 +338,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (saved.outcome === "conflict") {
             if (owning) {
               store.forgetDelivery(threadId, filePath);
-              return toolError(
+              return await toolError(
                 `the file at ${filePath} was modified externally since the plugin wrote it — ` +
                   "it will not be touched again; move it aside and call murk_get again",
               );
             }
-            return toolError(
+            return await toolError(
               `a file already exists at ${filePath} that this plugin did not create — ` +
                 "move it aside (or delete it) and call murk_get again",
             );
@@ -365,7 +369,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         return JSON.stringify(result, null, 2);
       } catch (error) {
-        return toolError(error instanceof Error ? error.message : String(error));
+        return await toolError(error instanceof Error ? error.message : String(error));
       }
     },
   });
@@ -472,7 +476,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "grant-revoke",
         summary: "Revoke a grant: remove its vault identity and delete its key file",
-        usage: "bb murk grant revoke <grantId>",
+        usage: "bb murk grant revoke [--forget] <grantId>",
       },
     ],
     async run(argv, ctx) {
@@ -485,7 +489,10 @@ export default async function plugin(bb: BbPluginApi) {
         if ((sub === "mint" || sub === "revoke") && ctx.threadId) return refuseFromThread(sub, ctx.threadId);
         if (sub === "mint") return await cliMint(rest, ctx.cwd, ctx.projectId);
         if (sub === "list") return await cliList(rest.includes("--all"));
-        if (sub === "revoke") return await cliRevoke(rest[0]);
+        if (sub === "revoke") {
+          const forget = rest.includes("--forget");
+          return await cliRevoke(rest.filter((arg) => arg !== "--forget")[0], forget);
+        }
         return { exitCode: 1, stderr: "usage: bb murk grant <mint|list|revoke> …" };
       } catch (error) {
         return { exitCode: 1, stderr: `murk: ${error instanceof Error ? error.message : String(error)}` };
@@ -665,11 +672,34 @@ export default async function plugin(bb: BbPluginApi) {
     return { exitCode: 0, stdout: lines.join("\n") };
   }
 
-  async function cliRevoke(id: string | undefined): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
-    if (!id) return { exitCode: 1, stderr: "usage: bb murk grant revoke <grantId>" };
+  async function cliRevoke(
+    id: string | undefined,
+    forget = false,
+  ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+    if (!id) return { exitCode: 1, stderr: "usage: bb murk grant revoke [--forget] <grantId>" };
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
+    if (forget) {
+      // Clears local state only, for a grant no revoke can reach: its vault
+      // file is gone for good, or you removed the grant from the vault
+      // yourself. Never for an active grant: revoke that first.
+      if (!grant.revokePendingAt && existsSync(grant.vaultPath)) {
+        return {
+          exitCode: 1,
+          stderr: `murk: grant ${id} is active and its vault exists; run bb murk grant revoke ${id} without --forget`,
+        };
+      }
+      rmSync(grant.keyPath, { force: true });
+      store.markRevoked(id);
+      return {
+        exitCode: 0,
+        stdout:
+          `forgot grant ${id} (${grant.murkName}) here and deleted its key file; nothing was revoked in a vault\n` +
+          `the grant may still exist in any copy of that vault (another clone, a branch, git history): ` +
+          `run murk agent revoke ${shellQuote(grant.murkName)} wherever that vault lives`,
+      };
+    }
     // Only murk can say the grant is gone from the vault. A vault that now
     // reads as pre-0.14 is not the one the grant was minted into (mint never
     // writes a grant into that format), and murk must not save it, so the
@@ -698,13 +728,25 @@ export default async function plugin(bb: BbPluginApi) {
     rmSync(grant.keyPath, { force: true });
     if (vaultError) {
       store.markRevokePending(id);
+      const forgetHint =
+        `run bb murk grant revoke --forget ${id} to clear the grant here only; ` +
+        `it may still exist in any copy of that vault`;
+      // The hint only; whatever murk said, the grant stays pending.
+      const notFound = /grant not found/i.test(vaultError);
+      const next = !existsSync(grant.vaultPath)
+        ? `the vault file ${grant.vaultPath} is gone. Restore it and run bb murk grant revoke ${id} again. ` +
+          `If it is gone for good (bb deleted the worktree), ${forgetHint}`
+        : notFound
+          ? `murk did not find the grant in this vault. If you removed it yourself, ${forgetHint}. ` +
+            `Otherwise check the vault and run bb murk grant revoke ${id} again`
+          : `fix the cause and run bb murk grant revoke ${id} again, or run: ` +
+            `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`;
       return {
         exitCode: 1,
         stderr:
-          `murk: grant ${id} (${grant.murkName}) is still live in the vault: could not remove it: ${vaultError}\n` +
+          `murk: grant ${id} (${grant.murkName}) may still be live in the vault: could not remove it: ${vaultError}\n` +
           `deleted its key file here, so threads no longer get it from the plugin; a copy of the key still reads the vault\n` +
-          `fix the cause and run bb murk grant revoke ${id} again, or run: ` +
-          `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`,
+          next,
       };
     }
     store.markRevoked(id);
