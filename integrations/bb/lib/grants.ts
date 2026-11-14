@@ -51,6 +51,10 @@ export const GRANT_MIGRATIONS = [
   // grant from the vault. Such a grant is never served, and it is marked
   // revoked only once a retry removes it from the vault.
   `ALTER TABLE grants ADD COLUMN revoke_pending_at TEXT`,
+  // Set by `revoke --forget`: the plugin cleared its own state for the grant
+  // and deleted its key file, but no vault revoke happened. Never the same as
+  // revoked: the grant may still be live in the vault.
+  `ALTER TABLE grants ADD COLUMN forgotten_at TEXT`,
 ];
 
 export interface GrantRecord {
@@ -68,6 +72,8 @@ export interface GrantRecord {
   revokedAt: string | null;
   /** When a revoke failed at the vault step; the grant may still be live in the vault. */
   revokePendingAt: string | null;
+  /** When `revoke --forget` cleared the grant here; it was not revoked in any vault. */
+  forgottenAt: string | null;
 }
 
 export interface DeliveryRecord {
@@ -93,6 +99,7 @@ interface GrantRow {
   created_at: string;
   revoked_at: string | null;
   revoke_pending_at: string | null;
+  forgotten_at: string | null;
 }
 
 interface DeliveryRow {
@@ -125,6 +132,7 @@ function toGrant(row: GrantRow): GrantRecord {
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
     revokePendingAt: row.revoke_pending_at,
+    forgottenAt: row.forgotten_at,
   };
 }
 
@@ -135,7 +143,7 @@ export class GrantStore {
     return `g${randomBytes(4).toString("hex")}`;
   }
 
-  create(grant: Omit<GrantRecord, "createdAt" | "revokedAt" | "revokePendingAt">): GrantRecord {
+  create(grant: Omit<GrantRecord, "createdAt" | "revokedAt" | "revokePendingAt" | "forgottenAt">): GrantRecord {
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
@@ -154,7 +162,7 @@ export class GrantStore {
         grant.expiresAt,
         createdAt,
       );
-    return { ...grant, createdAt, revokedAt: null, revokePendingAt: null };
+    return { ...grant, createdAt, revokedAt: null, revokePendingAt: null, forgottenAt: null };
   }
 
   get(id: string): GrantRecord | null {
@@ -170,15 +178,16 @@ export class GrantStore {
   }
 
   /**
-   * Grants usable by one thread: unrevoked, with no pending revoke, unexpired,
-   * matching the thread's project, and either project-scoped or narrowed to
-   * exactly this thread.
+   * Grants usable by one thread: unrevoked, not forgotten, with no pending
+   * revoke, unexpired, matching the thread's project, and either
+   * project-scoped or narrowed to exactly this thread.
    */
   activeFor(projectId: string, threadId: string, now: Date = new Date()): GrantRecord[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM grants
-         WHERE revoked_at IS NULL AND revoke_pending_at IS NULL AND project_id = ? AND (thread_id IS NULL OR thread_id = ?)
+         WHERE revoked_at IS NULL AND revoke_pending_at IS NULL AND forgotten_at IS NULL
+           AND project_id = ? AND (thread_id IS NULL OR thread_id = ?)
          ORDER BY created_at DESC`,
       )
       .all(projectId, threadId) as GrantRow[];
@@ -193,6 +202,13 @@ export class GrantStore {
   markRevokePending(id: string): void {
     this.db
       .prepare(`UPDATE grants SET revoke_pending_at = COALESCE(revoke_pending_at, ?) WHERE id = ?`)
+      .run(new Date().toISOString(), id);
+  }
+
+  /** Record `revoke --forget`: local state cleared, nothing revoked in a vault. */
+  markForgotten(id: string): void {
+    this.db
+      .prepare(`UPDATE grants SET forgotten_at = COALESCE(forgotten_at, ?) WHERE id = ?`)
       .run(new Date().toISOString(), id);
   }
 

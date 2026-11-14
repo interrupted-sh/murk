@@ -113,7 +113,7 @@ static CLOCK: AtomicU64 = AtomicU64::new(1_700_000_000);
 /// later commit date than the one before, so `git rev-list` orders commits the
 /// same way on every run, however fast the machine commits.
 pub fn git_in(dir: &Path, home: &Path, key_file: Option<&Path>) -> std::process::Command {
-    let murk = assert_cmd::cargo::cargo_bin("murk");
+    let murk = assert_cmd::cargo::cargo_bin!("murk");
     let bin_dir = murk.parent().expect("murk binary has a directory");
     let path = std::env::join_paths(std::iter::once(bin_dir.to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),

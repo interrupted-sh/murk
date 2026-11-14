@@ -247,7 +247,12 @@ impl Fixture {
             "",
         );
         // A vault write after a grant's TTL drops the grant, so the TTL must
-        // outlast the fixture's remaining writes; checked below.
+        // outlast the fixture's remaining writes; checked below. murk stores
+        // `expires_at` truncated to the second, so the grant expires between
+        // TTL - 1s after the command starts and TTL after it returns.
+        const EXPIRING_TTL: Duration = Duration::from_secs(10);
+        let ttl = format!("{}s", EXPIRING_TTL.as_secs());
+        let granting = Instant::now();
         run(
             "owner",
             &[
@@ -258,13 +263,14 @@ impl Fixture {
                 "--only",
                 "AGENT_OK",
                 "--ttl",
-                "5s",
+                &ttl,
                 "--out",
                 expired_path,
             ],
             "",
         );
-        let expired_at = Instant::now() + Duration::from_millis(5100);
+        let still_valid_until = granting + EXPIRING_TTL - Duration::from_secs(1);
+        let expired_at = Instant::now() + EXPIRING_TTL + Duration::from_millis(100);
         run("owner", &["circle", "revoke", "revoked"], "");
 
         // Commit, then change the shared and group values so `diff` has
@@ -301,7 +307,7 @@ impl Fixture {
         ids.insert("grant", Who::from_secret("grant", &read(&grant_key)));
         ids.insert("expired", Who::from_secret("expired", &read(&expired_key)));
         assert!(
-            Instant::now() < expired_at,
+            Instant::now() < still_valid_until,
             "the fixture took longer than the expiring grant's TTL, so a later write may have dropped it"
         );
         for vault in ["test.murk", ".merge/ours.murk", ".merge/theirs.murk"] {

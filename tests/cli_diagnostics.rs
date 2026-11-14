@@ -917,7 +917,7 @@ fn vault_repo_on(
     let (key, _) = init_vault(&dir);
     murk_steps(dir.path(), &key, base);
 
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(
         dir.path(),
