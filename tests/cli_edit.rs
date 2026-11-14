@@ -220,7 +220,7 @@ printf leaked > "$1""#,
 /// Start `murk edit` in a process group of its own and return once the
 /// editor has written `ready`.
 fn spawn_edit(f: &Fixture, (editor, ready): (String, PathBuf)) -> Child {
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }

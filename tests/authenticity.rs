@@ -312,7 +312,7 @@ fn self_enrolled_signer_on_a_fresh_clone_waits_for_murk_trust() {
 fn merge_of_a_forged_theirs_is_a_conflict_and_never_signed() {
     let base = TempDir::new().unwrap();
     let (alice, repo) = alice_repo(base.path());
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git_ok(
         &repo,
         &[
@@ -1615,7 +1615,7 @@ fn legacy_history_repo(base: &Path, side_file: Option<&str>) -> (Machine, PathBu
     let repo = base.join("repo");
     fs::create_dir_all(&repo).unwrap();
     git_ok(&repo, &["init", "-q", "-b", "main"]);
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git_ok(
         &repo,
         &[
@@ -2653,7 +2653,7 @@ fn a_merge_never_upgrades_an_unaccepted_0_13_side() {
     let repo = base.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     git_ok(&repo, &["init", "-q", "-b", "main"]);
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git_ok(
         &repo,
         &[
@@ -2992,7 +2992,7 @@ impl Machine {
 
 /// Configure the murk merge driver in `repo` and commit everything.
 fn use_merge_driver(repo: &Path) {
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git_ok(
         repo,
         &[

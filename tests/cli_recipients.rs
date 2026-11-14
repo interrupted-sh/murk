@@ -1256,7 +1256,7 @@ fn agent_exec_sh(script: &str) -> (TempDir, std::process::Command) {
         .assert()
         .success();
     let grant_key = std::fs::read_to_string(&grant_path).unwrap();
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }

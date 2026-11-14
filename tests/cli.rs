@@ -357,7 +357,7 @@ fn init_does_not_replace_a_vault_that_appears_during_the_name_prompt() {
     let pulled = fs::read(source.path().join("test.murk")).unwrap();
 
     let dir = TempDir::new().unwrap();
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }
@@ -948,7 +948,7 @@ fn init_never_replaces_a_key_stored_while_it_waits_for_the_name() {
         fs::remove_file(file).unwrap();
     }
 
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }
@@ -1656,7 +1656,7 @@ fn run_with_stdout_file(
     out_file: &std::path::Path,
 ) -> std::process::ExitStatus {
     let file = fs::File::create(out_file).unwrap();
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }
@@ -3171,7 +3171,7 @@ fn prompted_writes_refuse_a_vault_changed_on_disk_while_waiting() {
             "while murk waited for input",
         ),
     ] {
-        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
         for var in MURK_CONTEXT_VARS {
             cmd.env_remove(var);
         }
@@ -4138,7 +4138,7 @@ fn working_tree_text(path: &std::path::Path) -> String {
 /// the way `setup-merge-driver` writes it.
 fn repo_with_merge_driver(repo: &std::path::Path) {
     git_ok(repo, &["init", "-q", "-b", "main"]);
-    let driver = assert_cmd::cargo::cargo_bin("murk");
+    let driver = assert_cmd::cargo::cargo_bin!("murk");
     git_ok(
         repo,
         &[
@@ -5806,7 +5806,7 @@ fn operator_shell(dir: &TempDir) -> assert_cmd::Command {
 #[cfg(unix)]
 fn spawn_agent_exec_sh(dir: &TempDir, script: &str) -> std::process::Command {
     let key = exec_grant_key(dir);
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("murk"));
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("murk"));
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
     }
