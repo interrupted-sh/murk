@@ -148,7 +148,7 @@ fn grant_vault(dir: &TempDir) -> String {
 fn murk_argv() -> Vec<String> {
     let me = std::env::current_exe().unwrap();
     [
-        assert_cmd::cargo::cargo_bin("murk").to_str().unwrap(),
+        assert_cmd::cargo::cargo_bin!("murk").to_str().unwrap(),
         "agent",
         "exec",
         "--only",

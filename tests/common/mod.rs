@@ -72,7 +72,7 @@ pub const MURK_CONTEXT_VARS: &[&str] = &[
 /// spawn murk in tests — callers add `.current_dir(...)`, `.env("MURK_KEY", ...)`,
 /// or args on top.
 pub fn murk_bin(home: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("murk").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("murk");
     cmd.env("HOME", home).env("XDG_RUNTIME_DIR", home);
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
