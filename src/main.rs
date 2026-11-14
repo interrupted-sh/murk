@@ -53,7 +53,11 @@ fn run() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init { vault } => cmd_init(&vault),
+        Command::Init {
+            vault,
+            reuse_key,
+            separate_key,
+        } => cmd_init(&vault, KeyChoice::from_flags(reuse_key, separate_key)),
         Command::Recover => cmd_recover(),
         Command::Restore { vault } => cmd_restore(&vault),
         Command::Import {

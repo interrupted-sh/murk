@@ -26,31 +26,24 @@ pub(crate) fn cmd_mcp(vault_path: &str, allow_exec: bool) {
             1,
         );
     }
-
-    // Resolve the key and load the vault. Agent context forces strict mode, so
-    // this will not silently fall back to the operator's stored key. The
-    // decrypted state is handed to the server so the tools read in-process.
-    let (vault, murk, identity) = load_vault(vault_path);
-    let pubkey = identity.pubkey_string().unwrap_or_else(|e| die(&e, 1));
-
-    // The resolved identity must be one of the vault's grants. Anything else —
-    // the operator's own key, a plain recipient — is refused: the whole point is
-    // to bound the agent to a grant's scope.
-    if !murk_cli::is_agent_identity(&murk, &pubkey) {
-        die(
-            &"murk mcp refuses to run without a scoped grant: this identity is not a `murk agent grant` key (fail-closed). Mint one with `murk agent init`.",
-            1,
-        );
+    if let Some(warning) = murk_cli::env_permission_warning() {
+        eprintln!("{warning}");
     }
 
-    try_or_die(crate::mcp::serve(
-        crate::mcp::McpState {
-            vault,
-            murk,
-            pubkey,
-        },
-        allow_exec,
-    ));
+    // Resolve the key once and load the vault. Agent context forces strict
+    // mode, so this will not silently fall back to the operator's stored key.
+    // The server keeps this key and reloads the vault as the same grant when
+    // the file changes. The load refuses any identity that is not one of the
+    // vault's grants (the operator's own key, a plain recipient): the whole
+    // point is to bound the agent to a grant's scope.
+    let key = try_or_die(murk_cli::resolve_key_for_vault(vault_path));
+    let (vault, warnings) =
+        crate::mcp::VaultWatch::open(vault_path, key).unwrap_or_else(|e| die(&e, 1));
+    for warning in &warnings {
+        eprintln!("{} {warning}", "warn".yellow().bold());
+    }
+
+    try_or_die(crate::mcp::serve(vault, allow_exec));
 }
 
 /// Write the rendered output of `skeleton -o` / `agent plan -o` to a *new* file.

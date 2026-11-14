@@ -57,12 +57,25 @@ function needsReview(name) {
 // held(names) -> the names that need a human review.
 const held = (names) => names.filter(needsReview);
 
+// Dependabot directories whose updates always wait for review. The bb
+// plugin's check (.github/workflows/bb-plugin.yaml) is not required by branch
+// protection, so auto-merge would not wait for it.
+const REVIEW_DIRECTORIES = ["/integrations/bb"];
+
+const inReviewDirectory = (d) => REVIEW_DIRECTORIES.includes((d.directory || "").replace(/\/+$/, ""));
+
 // decide(dependencies) -> { automerge, reason } for Dependabot, where
-// dependencies is fetch-metadata's list of { dependencyName, updateType }.
-// A dependency updated in several directories appears once per directory.
+// dependencies is fetch-metadata's list of { dependencyName, updateType,
+// directory }. A dependency updated in several directories appears once per
+// directory.
 function decide(dependencies) {
   if (!Array.isArray(dependencies) || dependencies.length === 0) {
     return { automerge: false, reason: "no dependencies reported; needs review" };
+  }
+  const inDirectory = dependencies.filter(inReviewDirectory);
+  if (inDirectory.length) {
+    const list = [...new Set(inDirectory.map((d) => `${d.dependencyName || "unnamed"} in ${d.directory}`))];
+    return { automerge: false, reason: `update in a directory without a required check, needs review: ${list.join(", ")}` };
   }
   const notPatch = dependencies.filter((d) => d.updateType !== "version-update:semver-patch");
   if (notPatch.length) {
@@ -156,6 +169,11 @@ function selfTest() {
     ["actions group, all patch", deps(patch, "actions/setup-python, astral-sh/setup-uv"), true],
     ["actions group, one minor", deps(patch, "astral-sh/setup-uv").concat(deps(minor, "actions/setup-python")), false],
     ["actions group, one untyped", deps(patch, "astral-sh/setup-uv").concat(deps("", "dtolnay/rust-toolchain")), false],
+    // The bb plugin's npm tree waits for review: its check is not required.
+    ["bb plugin patch", deps(patch, "zod").map((d) => ({ ...d, directory: "/integrations/bb" })), false],
+    ["bb plugin patch, trailing slash", deps(patch, "zod").map((d) => ({ ...d, directory: "/integrations/bb/" })), false],
+    ["docs-site patch", deps(patch, "astro").map((d) => ({ ...d, directory: "/docs-site" })), true],
+    ["root and bb plugin", deps(patch, "clap").concat(deps(patch, "zod").map((d) => ({ ...d, directory: "/integrations/bb" }))), false],
   ];
   for (const [label, list, want] of dependabot) {
     check(`dependabot ${label}`, decide(list).automerge, want);

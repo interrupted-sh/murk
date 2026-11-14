@@ -49,13 +49,15 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand doctor 'Check the surrounding repo for hygiene issues'
             cand scan 'Scan files for leaked secret values'
             cand diff 'Show secret and access changes vs a git ref (experimental)'
-            cand setup-merge-driver 'Configure git to use murk''s merge driver for .murk files (experimental)'
+            cand setup-merge-driver 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)'
             cand merge-driver 'Git merge driver for .murk vault files (called by git, experimental)'
             cand completion 'Generate or install shell completions'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'murk;init'= {
             cand --vault 'Vault filename'
+            cand --reuse-key 'When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking'
+            cand --separate-key 'When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -467,8 +469,8 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;setup-merge-driver'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;merge-driver'= {
             cand -h 'Print help'
@@ -530,7 +532,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand doctor 'Check the surrounding repo for hygiene issues'
             cand scan 'Scan files for leaked secret values'
             cand diff 'Show secret and access changes vs a git ref (experimental)'
-            cand setup-merge-driver 'Configure git to use murk''s merge driver for .murk files (experimental)'
+            cand setup-merge-driver 'Configure git to use murk''s merge driver for vault files named `*.murk` or `.murk.*` (experimental)'
             cand merge-driver 'Git merge driver for .murk vault files (called by git, experimental)'
             cand completion 'Generate or install shell completions'
             cand help 'Print this message or the help of the given subcommand(s)'

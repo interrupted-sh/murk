@@ -259,10 +259,16 @@ signers you require, murk never accepts an unsigned vault.
 
 `murk export`, `murk exec` and `murk agent exec` refuse to set a variable
 that controls how programs, shells or murk itself run. Examples are `PATH`,
-`HOME`, names that start with `GIT_`, `CARGO_`, `NPM_CONFIG_`, `PYTHON`,
-`SSL_` or `PIP_`, and names that end in `_PROXY`. A common CI secret such as
+`HOME`, `TMPDIR`, `KUBECONFIG`, `DOCKER_HOST`, `GOPROXY`, names that start
+with `GIT_`, `CARGO_`, `NPM_CONFIG_`, `PYTHON`, `SSL_`, `PIP_` or `XDG_`, and
+names that end in `_PROXY`. A common CI secret such as
 `CARGO_REGISTRY_TOKEN` is one of them. The command exits 1 and names the
 key: `refusing to set CARGO_REGISTRY_TOKEN from the vault`.
+
+murk 0.15 reserves more names than 0.14: shell prompt variables, package
+sources such as `GOPROXY` and `UV_INDEX_URL`, client configs such as
+`KUBECONFIG`, `DOCKER_HOST` and `AWS_CONFIG_FILE`, and `TMPDIR`. A vault that
+0.14 exported in CI can fail on 0.15 if it holds one of them.
 
 murk-action runs `murk export` without `--allow-reserved` and has no input
 for it. So a vault that holds such a key fails the whole action step. To keep

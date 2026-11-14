@@ -83,7 +83,7 @@ murk has one maintainer, [@iicky](https://github.com/iicky). The maintainer make
 - Triages issues.
 - Reviews and merges pull requests. [`.github/CODEOWNERS`](.github/CODEOWNERS) assigns every file to the maintainer.
 - Reviews every dependency PR that updates a crate murk's security rests on, even a patch update. [`scripts/automerge-policy.cjs`](scripts/automerge-policy.cjs) lists these crates, among them age, the SSH key, cipher, hash, signature and random-number crates, `zeroize`, `ureq`, `rustls`, `serde` and `rmcp`.
-- Lets other dependency PRs merge without a manual review once CI passes, in two cases: a Dependabot update in which every dependency gets a patch release, and a lockfile-only advisory fix (see [Security advisories](#security-advisories)).
+- Lets other dependency PRs merge without a manual review once CI passes, in two cases: a Dependabot update in which every dependency gets a patch release (except updates of the bb plugin's dependencies), and a lockfile-only advisory fix (see [Security advisories](#security-advisories)).
 - Cuts murk releases and bb plugin releases (see [Releases](#releases)).
 - Handles private vulnerability reports as described in [SECURITY.md](SECURITY.md), and ships the fixes.
 - Enforces the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -109,6 +109,7 @@ The maintainer checks each pull request for:
   - A change that adds an asset, moves a trust boundary or weakens a stated property updates the threat model in the same pull request.
 - **Documentation and changelog.** User-visible changes update the README or the docs site. A change to a command or flag regenerates the CLI and env references (`make docs`). CI fails if they are out of date. Commit subjects follow the [pull request rules](#pull-requests), because each release's list of changes comes from them.
 - **CI.** Branch protection requires the `Lint`, `Test` and `VHS` checks, and it applies to the maintainer too. CodeQL runs on every pull request. The Node, Python and docs-preview workflows run when their paths change.
+  - The `bb plugin` check ([`.github/workflows/bb-plugin.yaml`](.github/workflows/bb-plugin.yaml)) runs the bb plugin's typecheck and tests when the plugin, the murk sources or the Node binding change. It is not required, so a Dependabot update of the plugin's dependencies waits for a review.
   - `Lint` covers formatting, clippy, generated docs, version consistency, guide commands, demo tapes and SPDX headers ([`scripts/spdx-headers.cjs`](scripts/spdx-headers.cjs)).
 - **Dependency changes.** A pull request that changes a `Cargo.toml`, a `Cargo.lock` or `deny.toml` runs `cargo deny` (advisories, bans, licenses, sources) and `cargo audit`. For a new dependency, the maintainer also checks that it is needed and maintained.
 

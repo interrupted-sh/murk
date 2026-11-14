@@ -64,6 +64,14 @@ pub enum Command {
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
+        /// When another vault in this directory already has a key stored on
+        /// this machine, store that key for this vault too, without asking
+        #[arg(long, conflicts_with = "separate_key")]
+        reuse_key: bool,
+        /// When another vault in this directory already has a key stored on
+        /// this machine, make a new key for this vault, without asking
+        #[arg(long)]
+        separate_key: bool,
     },
 
     /// Write a .envrc for direnv integration
@@ -515,7 +523,11 @@ pub enum Command {
         vault: String,
     },
 
-    /// Configure git to use murk's merge driver for .murk files (experimental)
+    /// Configure git to use murk's merge driver for vault files named `*.murk` or `.murk.*` (experimental)
+    ///
+    /// Adds `*.murk merge=murk` and `.murk.* merge=murk` to the `.gitattributes`
+    /// at the root of the working tree, and sets `merge.murk.*` in git config.
+    /// A file that matches but is not a vault is merged as text.
     #[command(name = "setup-merge-driver")]
     SetupMergeDriver,
 

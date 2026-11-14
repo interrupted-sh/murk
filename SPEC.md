@@ -413,7 +413,7 @@ A merge that would change a group's membership relative to ours is a conflict wh
 - Once the pin holds a `vault_id` or a counter, a 0.13 side that this machine has not accepted on that branch is refused too, because it is read-only. Trust, rule 6, Read-only copy, says what the refused merge writes and covers the 0.13 ancestor case.
 - Before the pin holds either, and for a copy the user accepted with `murk trust`, the driver cannot tell an older 0.13 revision from a newer one. A branch that commits an older 0.13 file then merges cleanly and sets values back.
 
-**Merge driver in git.** git passes the vault's path as `%P` (`murk merge-driver %O %A %B %P`) so the driver reads the right trust pin. A driver configured before 0.14 has no `%P` and falls back to `.murk`. A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart.
+**Merge driver in git.** git passes the vault's path as `%P` (`murk merge-driver -- %O %A %B %P`) so the driver reads the right trust pin and finds that vault's stored key. A driver configured before 0.14 has no `%P` and falls back to `.murk`: its trust pin and its stored key, so a vault with another name and its own key merges without a key unless `MURK_KEY` or `MURK_KEY_FILE` is set. A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart.
 
 **Merge driver and removed keys.** A merge judges removals on every branch, whichever branch it merges into (rule 8 below).
 
@@ -655,13 +655,13 @@ A grant load reads and writes no trust pin, so it has no rollback check. Every w
 
 This section states what each command does. [docs/cli-reference.md](docs/cli-reference.md), generated from the CLI, lists every flag with its help text.
 
-### `murk init [--vault NAME]`
+### `murk init [--vault NAME] [--reuse-key | --separate-key]`
 
 Interactive setup. Prompts for a display name. Then:
 
-1. Finds your key. It looks at `MURK_KEY` or `MURK_KEY_FILE` from the environment first. Then it looks at the key stored at `~/.config/murk/keys/<vault-hash>` for this checkout or for the same vault in a sibling worktree (the lookup under Discovery). Only when neither exists does it generate an age keypair via BIP39 (a 24-word mnemonic encodes the key directly) and write the secret key to `~/.config/murk/keys/<vault-hash>` with mode 0600. The key file is created exclusively, so init never overwrites one.
+1. Finds your key. It looks at `MURK_KEY` or `MURK_KEY_FILE` from the environment first. Then it looks at the key stored at `~/.config/murk/keys/<vault-hash>` for this checkout or for the same vault in a sibling worktree (the lookup under Discovery). Then it looks for keys stored for other vaults in the same directory (see Several vaults in one directory below). Only when none of these exists does it generate an age keypair via BIP39 (a 24-word mnemonic encodes the key directly) and write the secret key to `~/.config/murk/keys/<vault-hash>` with mode 0600. The key file is created exclusively, so init never overwrites one.
 2. For a newly generated key, prints the BIP39 24-word recovery phrase to stderr. A reused key prints none (use `murk recover`).
-3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes a `MURK_KEY_FILE` path from the environment. If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes.
+3. Writes `export MURK_KEY_FILE='<path>'` to `.env` (creates it if missing). It never writes an inline `MURK_KEY`, and in strict or agent mode it never writes `.env` at all and prints no key-store path (not even the `MURK_KEY_FILE` it uses). If `.env` already has a `MURK_KEY` or `MURK_KEY_FILE` line, a reused key leaves that line as it is. If init must generate a new key, it asks before replacing that line and aborts unless you answer yes. A key for a second vault in the same directory never touches `.env`.
 4. Creates the `.murk` vault with your pubkey as the first recipient, a fresh `vault_id` and `generation` 1, signed by your key when that key can sign, and records it in the local trust pin with the creator as its trusted signer.
 
 If the vault already exists, init does not change it. It uses the same key lookup and writes `.env` by the same rules. Then it reports whether the key is a recipient:
@@ -669,7 +669,21 @@ If the vault already exists, init does not change it. It uses the same key looku
 - A recipient is told to run `murk trust` once per machine if this machine has no trust pin for the vault yet.
 - A key that is not a recipient prints its public key and, for an age or ssh-ed25519 key, its signing-key fingerprint, to send to someone who can authorize it.
 
-init never replaces a stored key file. To get a new identity, move the key file away first. In strict or agent mode, init neither uses nor replaces a stored key. With no key in the environment and a stored key present (here or in a sibling worktree), it refuses. Set `MURK_KEY_FILE` to that path to use it.
+init never replaces a stored key file. To get a new identity, move the key file away first. In strict or agent mode, init neither uses nor replaces a stored key. With no key in the environment and a stored key present (here or in a sibling worktree), it refuses without printing where the key is stored.
+
+#### Several vaults in one directory
+
+A repository can hold one vault for each environment (`.murk`, `staging.murk`, `prod.murk`). When the vault has no stored key of its own, init looks for keys stored for the other vaults in its directory: a regular file (not a symlink) of that name in this checkout, or at the same relative directory of a sibling worktree, for which the Discovery lookup finds a key. It reads no vault file. Keys with the same public key count as one offer.
+
+- On a terminal, with no flag, init asks once: reuse one of the offered keys (the default vault's key first, and it is the default answer), or make a separate key.
+- `--reuse-key` reuses the offered key without asking. It refuses when the offered keys differ, and when there is nothing to reuse (it never generates a key instead).
+- `--separate-key` generates a new key without asking.
+- Without a terminal and without a flag, init refuses and names the two flags.
+- In strict or agent mode init never reads an offered key and never asks. With no flag or with `--reuse-key` it refuses, and it prints no key-store path. `--separate-key` still generates a new key.
+
+Reuse stores the same secret key for the new vault, with the same exclusive 0600 write as a generated key. Both choices leave `.env` unchanged, and both print how commands find the key (`--vault` or `MURK_VAULT`). A `MURK_KEY` or `MURK_KEY_FILE` in the environment whose key is one of the offered keys (for example from the first vault's `.env`) narrows the offer to that key. It does not decide for the new vault, so the new vault still gets a stored key of its own.
+
+The recipients, trust pin, grants and policy of each vault stay separate.
 
 ---
 
@@ -801,11 +815,16 @@ Prints all secrets as `export KEY=VALUE` statements to stdout. Scoped values ove
 
 **Reserved names.** A key named like a variable that changes how a program, its loader, its shell, git or murk runs is refused, and the whole export fails before anything is printed. `--allow-reserved` lifts the refusal. The reserved names are:
 
-- `PATH`, `HOME`, `IFS`, `SHELL`, `ENV`, `BASH_ENV`, `ZDOTDIR`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `PS0`–`PS4`, `PROMPT_COMMAND`, `XDG_CONFIG_HOME`, `EDITOR`, `VISUAL`, `PAGER`, `MANPAGER`, `LESSOPEN`, `LESSCLOSE`, `BROWSER`, `SSH_ASKPASS`, `SUDO_ASKPASS`, `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS`, `CLASSPATH`, `GCONV_PATH`, `GLIBC_TUNABLES`, `OPENSSL_CONF`, `OPENSSL_ENGINES`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `GOFLAGS`, `MAVEN_OPTS`, `GRADLE_OPTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`
-- every name starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `_JAVA_`, `JDK_`, `DOTNET_`, `CARGO_`, `RUSTC`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_` or `MURK_`
+- `PATH`, `HOME`, `IFS`, `SHELL`, `ENV`, `BASH_ENV`, `ZDOTDIR`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `PS0`–`PS4`, `PROMPT_COMMAND`, `EDITOR`, `VISUAL`, `PAGER`, `MANPAGER`, `LESSOPEN`, `LESSCLOSE`, `BROWSER`, `SSH_ASKPASS`, `SUDO_ASKPASS`, `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS`, `CLASSPATH`, `GCONV_PATH`, `GLIBC_TUNABLES`, `OPENSSL_CONF`, `OPENSSL_ENGINES`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `GOFLAGS`, `MAVEN_OPTS`, `GRADLE_OPTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`
+- zsh, bash and fish prompts and hooks: `PROMPT`, `PROMPT2`–`PROMPT4`, `RPROMPT`, `RPROMPT2`, `RPS1`, `RPS2`, `SPROMPT`, `TIMEFMT`, `WATCHFMT`, `MAILPATH`, `NULLCMD`, `READNULLCMD`, `FPATH`, `MODULE_PATH`, `INPUTRC`, `FISH_FUNCTION_PATH`, `FISH_COMPLETE_PATH`, `FISH_USER_PATHS`
+- interpreter and build hooks: `CC`, `CXX`, `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_REPL_EXTERNAL_MODULE`, `IRBRC`, `GEMRC`, `PHPRC`, `PHP_INI_SCAN_DIR`
+- package sources and toolchain downloads: `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOINSECURE`, `GOTOOLCHAIN`, `GOENV`, `GOVCS`, `UV_INDEX`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR`, `YARN_YARN_PATH`, `YARN_RC_FILENAME`, `YARN_NPM_REGISTRY_SERVER`, `YARN_REGISTRY`, `COREPACK_NPM_REGISTRY`, `HOMEBREW_API_DOMAIN`, `HOMEBREW_BOTTLE_DOMAIN`, `HOMEBREW_ARTIFACT_DOMAIN`, `HOMEBREW_BREW_GIT_REMOTE`, `HOMEBREW_CORE_GIT_REMOTE`
+- client configs, daemons and credential stores: `KUBECONFIG`, `KUBE_EDITOR`, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_CERT_PATH`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CA_BUNDLE`, `GNUPGHOME`, `SSH_AUTH_SOCK`, `CURL_HOME`, `WGETRC`
+- scratch files, history and system lookup paths: `TMPDIR`, `TMP`, `TEMP`, `TMPPREFIX`, `HISTFILE`, `NLSPATH`, `LOCPATH`, `HOSTALIASES`, `TERMINFO`, `TERMINFO_DIRS`
+- every name starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `_JAVA_`, `JDK_`, `DOTNET_`, `CARGO_`, `RUSTC`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_`, `LUA_`, `XDG_`, `DIRENV_` or `MURK_`
 - every name ending in `_PROXY`
 
-murk compares all of them case-insensitively. `NODE_ENV` is not reserved. Whoever can write the vault must not get to run code in the shell that evaluates it, redirect its traffic, or switch off murk's own settings there. `exec`, `agent exec` and the MCP `murk_exec` tool apply the same list. `murk_exec` has no override.
+murk compares all of them case-insensitively. `NODE_ENV`, `MAIL_*`, `DOCKER_PASSWORD`, `SSH_PRIVATE_KEY` and other `GO*`, `UV_*`, `YARN_*` and `HOMEBREW_*` names are not reserved. Whoever can write the vault must not get to run code in the shell that evaluates it, redirect its traffic or the tools it runs, or switch off murk's own settings there. `exec`, `agent exec` and the MCP `murk_exec` tool apply the same list. `murk_exec` has no override.
 
 When `MURK_STRICT` is set, `export` refuses to run if stdout is a regular file (e.g. `murk export > .env`), since that persists plaintext secrets to disk. Piping to a process (the direnv flow) and printing to a terminal are still allowed. `get` and `diff --show-values` are guarded the same way. This is a guardrail against accidental redirects, not an airtight control: an explicit `murk export | tee .env` still writes the file.
 
@@ -897,6 +916,10 @@ Removes murk's server entry from an AI client's MCP config. Without `CLIENT`, it
 ### `murk mcp [--allow-exec] [--vault NAME]`
 
 Runs an in-process MCP (Model Context Protocol) stdio server so AI-agent harnesses can read murk secrets on the capability-not-credential model. It calls the murk-cli library directly, with no subprocess and no Node. It fails closed unless the loaded identity is a scoped agent grant with `MURK_AGENT=1`. It refuses to start with the operator's stored key, a plain recipient, or no grant. stdout is the JSON-RPC channel (never written to otherwise). All logs go to stderr.
+
+Before every tool call the server hashes the vault file (BLAKE3). When the bytes changed, it first verifies their signature against the signers in the grant's key file (and `MURK_TRUSTED_SIGNERS`). The server keeps a floor: the highest `generation` it has seen with a valid signature, and that vault's signature (signer canonicalised), even when the grant could not load that vault (a revoke). It refuses a vault with another `vault_id`, a lower `generation`, or the floor's `generation` with another signature (a fork). Otherwise it loads those bytes again through the full load path with the grant key it started with, and uses the new state only if that load passes; any failure fails the call, and until a load passes the cached state is not served again, even for the bytes it came from. A revoke, a policy change or a tampered file therefore applies to the next call, and an older or forked copy written back after a call has seen the newer vault is refused. Every call also re-checks the grant's expiry, so an expired grant fails every tool, `murk_plan` included.
+
+The floor is held in memory and starts from the vault the server opens. A copy written back before any call saw the newer vault is accepted, as a grant load accepts it, so anyone who can write the vault file can keep a running server from seeing a revoke; restart the server after a revoke to be sure, since a server that starts on the revoked vault refuses to run. The floor also refuses a vault moved back on purpose (a branch switch, a checkout of an older commit) until the server restarts, and the refusal says so.
 
 Tools, all bounded to the grant:
 
@@ -1086,9 +1109,19 @@ Under `MURK_STRICT` the "not trusted on this machine" case is refused instead, a
 
 ### `murk merge-driver BASE OURS THEIRS [PATH]`
 
-Git merge driver for `.murk` files, called by git (the command is hidden from help). git supplies the three paths (`%O`, `%A`, `%B`) and the vault's path `%P`. The result replaces OURS. It merges non-conflicting secret changes automatically.
+Git merge driver for vault files, called by git (the command is hidden from help). git supplies the three paths (`%O`, `%A`, `%B`) and the vault's path `%P`. The result replaces OURS. It merges non-conflicting secret changes automatically.
 
-**With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key for a vault named `.murk`, which strict and agent mode do not look up), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`). It refuses an untrusted side as a conflict, regenerates the meta and signs the merged result. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (Trust, rule 9).
+The driver never merges a vault as text, and never exits 0 with a file murk cannot read as a vault. It merges as vaults only when murk reads all three inputs as vaults. Otherwise:
+
+- **Both branches created the vault** (empty base, two vaults murk reads, for example `murk init --vault .murk.staging` on each branch). Two separate vaults cannot be merged. The driver writes ours and theirs into OURS between conflict markers, exits 1, and says how to keep one side (`git checkout --ours` or `--theirs`) and which secrets the other side holds, to add again.
+- **No input is or could be a vault** (the `.murk.*` pattern also matches files such as `.murk.bak` holding notes). The driver merges the files as text with `git merge-file`, as git would without a driver: it exits 0 for a clean merge, and 1 with conflict markers in OURS for a conflict. A file `git merge-file` cannot merge (binary) is left as OURS with exit 1. A clean result that could be a vault but does not read as one is refused as below.
+- **Anything else**: some input is or could be a vault, but murk cannot read every side. An input could be a vault when, after a byte-order mark and whitespace, it starts with `{`, or when it contains `"version"`, `"recipients"`, `"secrets"` or `"meta"`. This covers a vault re-saved with a BOM or a stray line, a renamed key, a newer format version, and a vault emptied or overwritten on one branch. The driver writes ours and theirs into OURS between conflict markers, exits 1, and names each side it cannot read, with the reason.
+
+A vault merge that would exit 0 first reads the written file back. If it does not read as a vault, the driver refuses as above.
+
+The refusals that write nothing (no key, the save-counter limit, an unaccepted 0.13 side, an agent grant key, and any other error of the vault merge) leave OURS unchanged without markers. Each says so plainly: nothing was written, the working file is still ours, theirs was not merged, and committing it as it is drops their changes. It then says how to finish (set the key and redo the merge, or keep one side and redo the other side's changes). A merge with field conflicts exits 1 and says that the file keeps ours for each conflict, keeps ours' integrity data, and must not be committed as it is.
+
+**With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key of the vault at `%P`, found as every other command finds it and not looked up in strict and agent mode), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`). It refuses an untrusted side as a conflict, regenerates the meta and signs the merged result. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (Trust, rule 9).
 
 **Without a key**, the driver merges cleanly only when the merge changed nothing the meta covers. In each of these cases it exits 1 and writes nothing (when there are no merge conflicts):
 
@@ -1103,7 +1136,7 @@ Then you abort the merge and redo it with a key. A clean keyless merge keeps OUR
 
 ### `murk setup-merge-driver`
 
-Configures git to use `murk merge-driver %O %A %B %P` for `.murk` files via `.gitattributes` and `.git/config`.
+Configures git to use `murk merge-driver -- %O %A %B %P` for vault files via `.gitattributes` and `.git/config`. The `--` keeps a vault named like a flag (`-h.murk`) a path. It replaces `merge.murk.driver` lines that murk wrote (also several of them), but refuses, writing nothing, when any `merge.murk.driver` value git reads here is a command murk did not write, and says how to remove it. It adds the lines `*.murk merge=murk` (`.murk`, `prod.murk`) and `.murk.* merge=murk` (`.murk.prod`), each only if it is missing, to the `.gitattributes` at the root of the working tree, also when run from a subdirectory, and prints that file's path (made safe for the terminal). Outside a git working tree it fails with git's own error and writes nothing. It also refuses, writing nothing, when git's working tree does not contain the current directory (a repository whose `core.worktree` points elsewhere).
 
 ---
 

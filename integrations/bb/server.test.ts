@@ -3,11 +3,13 @@
 
 // Integration-style tests: this repo's murk CLI (npm test builds it and puts it
 // first on PATH), real murk Node binding, real temp vault, fake bb plugin
-// host. HOME is redirected to a temp dir so
-// murk's stored operator key never touches the developer's real key directory.
+// host. HOME is redirected to a temp dir so murk's stored operator key never
+// touches the developer's real key directory. Most tests hand the plugin the
+// operator key through its keyFile setting; the "operator key" tests cover
+// the server environment and murk's own stored-key lookup.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { PluginAgentConfigurationContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
@@ -28,6 +30,8 @@ const OTHER_VALUE = "other-secret-value-67890";
 let tmpRoot: string;
 let worktree: string;
 let host: FakePluginHost;
+/** The key file `murk init` made, read from the .env pointer it wrote. */
+let operatorKeyFile: string;
 const savedEnv: Record<string, string | undefined> = {};
 const providerCatalog: Array<{ id: string }> = [{ id: "acp-omp" }, { id: "claude-code" }];
 
@@ -40,7 +44,7 @@ function murk(args: string[], input?: string): void {
     cwd: worktree,
     input,
     encoding: "utf8",
-    env: process.env,
+    env: operatorKeyFile ? { ...process.env, MURK_KEY_FILE: operatorKeyFile } : process.env,
   });
   if (result.status !== 0) {
     throw new Error(`murk ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
@@ -83,14 +87,30 @@ beforeAll(async () => {
   mkdirSync(worktree, { recursive: true });
 
   // Redirect murk's key storage and drop any identity inherited from the
-  // developer shell (direnv commonly exports MURK_KEY_FILE in this repo).
-  for (const name of ["HOME", "MURK_KEY", "MURK_KEY_FILE", "MURK_AGENT", "MURK_STRICT", "MURK_VAULT"]) {
+  // developer shell (direnv commonly exports MURK_KEY_FILE in this repo), and
+  // the agent-harness markers of the shell running the tests: the bb server
+  // runs with none of them.
+  for (const name of [
+    "HOME",
+    "MURK_KEY",
+    "MURK_KEY_FILE",
+    "MURK_AGENT",
+    "MURK_STRICT",
+    "MURK_VAULT",
+    "BB_THREAD_ID",
+    "BB_PROJECT_ID",
+    "CLAUDECODE",
+    "OMPCODE",
+  ]) {
     savedEnv[name] = process.env[name];
     delete process.env[name];
   }
   process.env.HOME = fakeHome;
 
   murk(["init"], "bb-plugin-tests\n");
+  const pointer = readFileSync(path.join(worktree, ".env"), "utf8").match(/^export MURK_KEY_FILE='([^']+)'$/m);
+  if (!pointer) throw new Error("murk init wrote no MURK_KEY_FILE pointer to .env");
+  operatorKeyFile = pointer[1];
   murk(["add", "TEST_API_KEY", "--desc", "Test API key", "--tag", "agents"], SECRET_VALUE);
   murk(["add", "OTHER_SECRET", "--desc", "Second key", "--tag", "agents"], OTHER_VALUE);
 
@@ -145,6 +165,7 @@ beforeAll(async () => {
     },
   });
   await plugin(host.bb);
+  await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
 }, 30_000);
 
 afterAll(async () => {
@@ -163,7 +184,7 @@ describe("registrations", () => {
     expect(registrations.cli?.name).toBe("murk");
     expect(Object.keys(registrations.settingsDescriptors).sort()).toEqual([
       "allowRevealGrants",
-      "defaultScope",
+      "keyFile",
       "vaultPath",
     ]);
     expect(registrations.agentConfigurationProvider).not.toBeNull();
@@ -187,13 +208,11 @@ describe("agent context env", () => {
   }
 
   it("keeps every catalog provider's murk off the operator key, even after a dotenv refill", async () => {
-    const keysDir = path.join(process.env.HOME ?? "", ".config", "murk", "keys");
-    const operatorKeyFile = path.join(keysDir, readdirSync(keysDir)[0]);
     const operatorKey = readFileSync(operatorKeyFile, "utf8").trim();
     const inheritedKeyFile = { ...process.env, MURK_KEY_FILE: operatorKeyFile };
     const inheritedKey = { ...process.env, MURK_KEY: operatorKey };
     // Every operator path decrypts without the contribution: an inherited
-    // MURK_KEY_FILE or MURK_KEY, and the stored-key fallback with nothing set.
+    // MURK_KEY_FILE or MURK_KEY, and murk's stored-key lookup with nothing set.
     for (const base of [inheritedKeyFile, inheritedKey, process.env]) {
       expect(murkGet(base).stdout).toContain(SECRET_VALUE);
     }
@@ -558,30 +577,31 @@ describe("pre-0.14 vaults", () => {
   // its test-only key. Any write is its first 0.14 save, which rewrites it.
   const fixtures = path.join(import.meta.dirname, "..", "..", "tests", "fixtures");
   let legacyDir: string;
-  let savedKeyFile: string | undefined;
 
   function git(args: string[]): void {
     const result = spawnSync("git", args, { cwd: legacyDir, encoding: "utf8" });
     if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   }
 
-  beforeAll(() => {
+  beforeAll(async () => {
     legacyDir = path.join(tmpRoot, "legacy-repo");
     mkdirSync(legacyDir, { recursive: true });
     writeFileSync(path.join(legacyDir, ".murk"), readFileSync(path.join(fixtures, "v0_13_signed.murk")), { mode: 0o644 });
     const keyFile = path.join(tmpRoot, "legacy.key");
     writeFileSync(keyFile, readFileSync(path.join(fixtures, "v0_13_signed.test-only.key")), { mode: 0o600 });
     git(["init", "-q", "-b", "feature/legacy-test"]);
-    savedKeyFile = process.env.MURK_KEY_FILE;
-    process.env.MURK_KEY_FILE = keyFile;
     // First use on this machine: trust it once, which pins but does not rewrite.
-    const trust = spawnSync("murk", ["trust", "--yes"], { cwd: legacyDir, encoding: "utf8", env: process.env });
+    const trust = spawnSync("murk", ["trust", "--yes"], {
+      cwd: legacyDir,
+      encoding: "utf8",
+      env: { ...process.env, MURK_KEY_FILE: keyFile },
+    });
     if (trust.status !== 0) throw new Error(`murk trust failed: ${trust.stderr}`);
+    await host.harness.behavior.setSettings({ keyFile });
   });
 
-  afterAll(() => {
-    if (savedKeyFile === undefined) delete process.env.MURK_KEY_FILE;
-    else process.env.MURK_KEY_FILE = savedKeyFile;
+  afterAll(async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
   });
 
   function mint(extra: string[] = [], cwd = legacyDir) {
@@ -663,6 +683,147 @@ describe("vault-truth fail-closed", () => {
 
     const revoke = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
     expect(revoke.exitCode).toBe(0);
+  });
+});
+
+describe("grant changes from a thread", () => {
+  const agentKeysDir = () => path.join(tmpRoot, "bb-data", "plugins", "murk", "agent-keys");
+
+  it("refuses a mint that comes from a thread and changes nothing", async () => {
+    const vaultBefore = readFileSync(path.join(worktree, ".murk"));
+    const keysBefore = readdirSync(agentKeysDir()).sort();
+    const listBefore = (await host.harness.behavior.runCli(["grant", "list", "--all"], {})).stdout;
+
+    const result = await host.harness.behavior.runCli(
+      ["grant", "mint", "--keys", "TEST_API_KEY", "--reveal", "--thread", THREAD_ID],
+      { cwd: worktree, threadId: THREAD_ID, projectId: PROJECT_ID },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`refused from a bb thread. This call came from thread ${THREAD_ID}.`);
+    expect(result.stderr).toContain(`bb murk grant mint --keys KEY[,KEY…] --thread ${THREAD_ID}`);
+    expect(result.stdout).toBe("");
+
+    expect(readFileSync(path.join(worktree, ".murk")).equals(vaultBefore)).toBe(true);
+    expect(readdirSync(agentKeysDir()).sort()).toEqual(keysBefore);
+    expect((await host.harness.behavior.runCli(["grant", "list", "--all"], {})).stdout).toBe(listBefore);
+  });
+
+  it("refuses a revoke that comes from a thread; the user's terminal still revokes", async () => {
+    const mint = await host.harness.behavior.runCli(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], {
+      cwd: worktree,
+      projectId: PROJECT_ID,
+    });
+    expect(mint.exitCode, mint.stderr).toBe(0);
+    const grantId = mint.stdout.match(/minted grant (g[0-9a-f]{8})/)![1];
+
+    const refused = await host.harness.behavior.runCli(["grant", "revoke", grantId], { threadId: THREAD_ID });
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("bb murk grant revoke is refused from a bb thread");
+    expect(existsSync(path.join(agentKeysDir(), `${grantId}.key`))).toBe(true);
+    expect((await host.harness.behavior.runCli(["grant", "list"], {})).stdout).toMatch(new RegExp(`${grantId}  active`));
+
+    const revoked = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+    expect(existsSync(path.join(agentKeysDir(), `${grantId}.key`))).toBe(false);
+  });
+
+  it("still lists grants for a thread: the list holds no values", async () => {
+    const result = await host.harness.behavior.runCli(["grant", "list"], { threadId: THREAD_ID });
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("operator key", () => {
+  // The fake HOME holds the key murk init stored for this vault, which murk
+  // finds by itself when neither the setting nor the server env names a key.
+  function mint() {
+    return host.harness.behavior.runCli(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], {
+      cwd: worktree,
+      projectId: PROJECT_ID,
+    });
+  }
+
+  async function withServerEnv(env: Record<string, string>, fn: () => Promise<void>): Promise<void> {
+    const saved = Object.fromEntries(Object.keys(env).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, env);
+    try {
+      await fn();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+
+  afterAll(async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+  });
+
+  function murkGrantNames(): string[] {
+    const result = spawnSync("murk", ["agent", "ls", "--json"], {
+      cwd: worktree,
+      encoding: "utf8",
+      env: { ...process.env, MURK_KEY_FILE: operatorKeyFile },
+    });
+    if (result.status !== 0) throw new Error(`murk agent ls failed: ${result.stderr}`);
+    return (JSON.parse(result.stdout) as Array<{ name: string }>).map((grant) => grant.name);
+  }
+
+  it("mints and revokes through murk's own key lookup when neither the setting nor the server env names a key", async () => {
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    expect(process.env.MURK_KEY).toBeUndefined();
+    expect(process.env.MURK_KEY_FILE).toBeUndefined();
+
+    const minted = await mint();
+    expect(minted.exitCode, minted.stderr).toBe(0);
+    const [, grantId, murkName] = minted.stdout.match(/minted grant (g[0-9a-f]{8}) \((bb-g[0-9a-f]{8})\)/)!;
+    expect(murkGrantNames()).toContain(murkName);
+
+    const revoked = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+    expect(murkGrantNames()).not.toContain(murkName);
+  });
+
+  it("uses the bb server's own MURK_KEY_FILE or MURK_KEY when the setting is blank", async () => {
+    await host.harness.behavior.setSettings({ keyFile: "" });
+    const operatorKey = readFileSync(operatorKeyFile, "utf8").trim();
+    // Hide the key murk stored for the vault, so its own lookup cannot be
+    // what signs: only the server env's key can.
+    const serverKeyFile = path.join(tmpRoot, "server-env.key");
+    writeFileSync(serverKeyFile, readFileSync(operatorKeyFile), { mode: 0o600 });
+    const hidden = `${operatorKeyFile}.hidden`;
+    renameSync(operatorKeyFile, hidden);
+    try {
+      const serverEnvs: Array<Record<string, string>> = [{ MURK_KEY_FILE: serverKeyFile }, { MURK_KEY: operatorKey }];
+      for (const env of serverEnvs) {
+        await withServerEnv(env, async () => {
+          const result = await mint();
+          expect(result.exitCode, result.stderr).toBe(0);
+        });
+      }
+      expect((await mint()).exitCode).toBe(1);
+    } finally {
+      renameSync(hidden, operatorKeyFile);
+    }
+  });
+
+  it("the setting wins over a key in the bb server's environment", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    // Either variable alone would break the call: a key file that cannot
+    // exist, and MURK_KEY set together with MURK_KEY_FILE.
+    await withServerEnv({ MURK_KEY_FILE: "/dev/null/none", MURK_KEY: "AGE-SECRET-KEY-NOT-A-KEY" }, async () => {
+      const result = await mint();
+      expect(result.exitCode, result.stderr).toBe(0);
+    });
+  });
+
+  it("rejects a relative or missing keyFile, naming it to the operator", async () => {
+    await host.harness.behavior.setSettings({ keyFile: "keys/me.key" });
+    expect((await mint()).stderr).toContain("the keyFile setting must be an absolute path, got keys/me.key");
+    const missing = path.join(tmpRoot, "no-such.key");
+    await host.harness.behavior.setSettings({ keyFile: missing });
+    expect((await mint()).stderr).toContain(`the keyFile setting points at ${missing}, which does not exist`);
   });
 });
 

@@ -9,5 +9,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["server.ts", "lib", "server.test.ts"]
+  "include": ["server.ts", "lib", "server.test.ts", "murk-calls.test.ts"]
 }

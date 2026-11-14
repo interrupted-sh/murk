@@ -24,7 +24,7 @@ Download a release binary and check it against the release's `SHA256SUMS`:
 
 ```dockerfile
 FROM debian:bookworm-slim
-ARG MURK_VERSION=v0.14.1
+ARG MURK_VERSION=v0.15.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
@@ -73,10 +73,10 @@ ENV MURK_KEY_FILE=/run/murk/key
 ENTRYPOINT ["murk", "agent", "exec", "--only", "API_KEY", "--only", "DATABASE_URL", "--", "/app/app.sh"]
 ```
 
-Run it with the key file mounted read-only, and with `--init`:
+Run it with the key file mounted read-only:
 
 ```bash
-docker run --init -v "$PWD/web.key:/run/murk/key:ro" my-app
+docker run -v "$PWD/web.key:/run/murk/key:ro" my-app
 ```
 
 What this gives you:
@@ -95,12 +95,14 @@ What this gives you:
 
 What to know:
 
-- **Use `--init`** (compose: `init: true`). `agent exec` supervises the app
-  instead of replacing itself with it, so without an init process murk is
-  PID 1. murk 0.14.1 does not pass on a `SIGTERM` that comes from outside the
-  container. Without `--init`, `docker stop` waits out its timeout and then
-  kills the container (exit code 137). With `--init`, the app gets the
-  `SIGTERM` and murk exits with the app's exit code.
+- **murk is PID 1.** `agent exec` supervises the app instead of replacing
+  itself with it. `docker stop` sends `SIGTERM` to murk, murk passes it to the
+  app, and murk exits with the app's exit code. murk 0.14.1 did not pass on a
+  `SIGTERM` from outside the container, so with 0.14.1, use `--init`.
+- **`--init` is optional** (compose: `init: true`). murk waits only for the
+  app. It does not reap other processes that end up under PID 1. If the app
+  starts background processes and does not wait for them, use `--init`, so
+  that the exited processes are reaped.
 - **`agent exec` clears the environment.** The app gets only `PATH`, `HOME`,
   `TERM`, the injected secrets, `MURK_AGENT=1` and `MURK_STRICT=1`. A setting
   passed with `docker run -e PORT=8080` does not reach it. Put such settings
@@ -127,14 +129,12 @@ murk agent grant --name worker --only WORKER_TOKEN --ttl 7d --out worker.key
 services:
   web:
     build: .
-    init: true
     entrypoint: ["murk", "agent", "exec", "--only", "API_KEY", "--only", "DATABASE_URL", "--", "/app/app.sh"]
     environment:
       MURK_KEY_FILE: /run/secrets/web_grant
     secrets: [web_grant]
   worker:
     build: .
-    init: true
     entrypoint: ["murk", "agent", "exec", "--only", "WORKER_TOKEN", "--", "/app/worker.sh"]
     environment:
       MURK_KEY_FILE: /run/secrets/worker_grant

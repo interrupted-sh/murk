@@ -102,13 +102,12 @@ pub fn discover_stored_key(vault_path: &str) -> Result<Option<DiscoveredKey>, St
         return Ok(None);
     };
     if crate::hardening::strict_mode() {
+        // No path: an agent that is refused a stored key must not be told
+        // where to read it.
         return Err([
-            format!(
-                "a key for this vault is already stored at {}",
-                path.display()
-            ),
-            "strict mode (MURK_STRICT or MURK_AGENT) neither uses nor replaces stored keys".into(),
-            format!("to use it, set MURK_KEY_FILE={}", path.display()),
+            "a key for this vault is already stored on this machine",
+            "strict mode (MURK_STRICT or MURK_AGENT) neither uses nor replaces stored keys",
+            "set MURK_KEY_FILE to your key yourself, or run murk init outside strict mode",
         ]
         .join("\n"));
     }
@@ -121,6 +120,69 @@ pub fn discover_stored_key(vault_path: &str) -> Result<Option<DiscoveredKey>, St
                 path.display()
             )
         })
+}
+
+/// Whether a key for `vault_path` is stored on this machine, here or in a
+/// sibling worktree (see [`crate::env::discover_key_file`]). Nothing is read,
+/// and an absent key store is not created.
+pub fn has_stored_key(vault_path: &str) -> bool {
+    crate::env::has_key_store() && crate::env::discover_key_file(vault_path).is_some()
+}
+
+/// A key stored on this machine for one or more other vaults in the
+/// directory of the vault `murk init` is setting up.
+#[derive(Debug)]
+pub struct NeighbourKey {
+    /// The vault file names that use this key, sorted.
+    pub vaults: Vec<String>,
+    pub key: DiscoveredKey,
+}
+
+/// The names of other vaults next to `vault_path` that have a key stored on
+/// this machine (see [`crate::env::stored_keys_for_neighbour_vaults`]). No
+/// key is read, so this is safe in strict mode, where `murk init` only needs
+/// to know that such keys exist.
+pub fn neighbour_vaults_with_keys(vault_path: &str) -> Vec<String> {
+    crate::env::stored_keys_for_neighbour_vaults(vault_path)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Stored keys that failed to load, as `(vault name, reason)`.
+pub type SkippedKeys = Vec<(String, String)>;
+
+/// The keys stored for other vaults next to `vault_path`, one entry per
+/// identity, for `murk init` to offer when a repository gets a second vault.
+///
+/// A key that fails to load (loose permissions, not a key) is left out and
+/// reported in the second list as `(vault name, reason)`: it is another
+/// vault's problem and must not block this one. Strict and agent mode never
+/// read a stored key, so there this is an error.
+pub fn discover_neighbour_keys(
+    vault_path: &str,
+) -> Result<(Vec<NeighbourKey>, SkippedKeys), String> {
+    if crate::hardening::strict_mode() {
+        return Err("strict mode (MURK_STRICT or MURK_AGENT) never reads stored keys".into());
+    }
+    let mut keys: Vec<NeighbourKey> = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, path) in crate::env::stored_keys_for_neighbour_vaults(vault_path) {
+        let loaded = crate::env::read_stored_key(&path).and_then(|secret| {
+            DiscoveredKey::new(secret, crate::env::KeySource::Auto(path.clone()))
+        });
+        match loaded {
+            Ok(key) => match keys.iter_mut().find(|k| k.key.pubkey == key.pubkey) {
+                Some(same) => same.vaults.push(name),
+                None => keys.push(NeighbourKey {
+                    vaults: vec![name],
+                    key,
+                }),
+            },
+            Err(reason) => skipped.push((name, reason)),
+        }
+    }
+    Ok((keys, skipped))
 }
 
 /// Status of an existing vault relative to a given key.

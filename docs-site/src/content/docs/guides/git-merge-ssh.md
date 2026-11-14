@@ -25,18 +25,20 @@ murk setup-merge-driver
 
 This command does two things:
 
-- It adds `*.murk merge=murk` to `.gitattributes`. Commit that file. It goes
-  to every clone with the repository.
+- It adds `*.murk merge=murk` and `.murk.* merge=murk` to `.gitattributes`,
+  so the driver covers `.murk`, `prod.murk` and `.murk.prod`. Commit that
+  file. It goes to every clone with the repository.
 - It writes the driver definition to `.git/config`. That is local git
   configuration, which does not go with the repository. Everyone who works
   on the vault runs `murk setup-merge-driver` once in their own clone.
 
-The definition is `murk merge-driver %O %A %B %P`, and git runs `murk` from
-your `PATH`. git runs the driver during a merge or rebase in which
+The definition is `murk merge-driver -- %O %A %B %P`, and git runs `murk`
+from your `PATH`. git runs the driver during a merge or rebase in which
 both branches changed `.murk`. Without it, git does a text three-way merge
 on the raw file. The driver's arguments are `BASE OURS THEIRS PATH`. `BASE`
-is the common ancestor. `PATH` is the path of the
-vault (git's `%P`), so the driver reads the correct trust pin.
+is the common ancestor. `PATH` is the path of the vault (git's `%P`), so the
+driver reads the correct trust pin and finds that vault's key. The `--`
+keeps a vault named like a flag a path.
 
 The driver merges secret changes that do not conflict, such as different
 keys added or changed on each side. It decrypts secret values only when both
@@ -47,8 +49,31 @@ secret.
 ### What the driver checks
 
 Run the driver with your key available: `MURK_KEY`, `MURK_KEY_FILE`, or the
-stored key for a vault named `.murk`. For a vault with another name, set
-`MURK_KEY_FILE`.
+stored key of the vault being merged. The driver finds the stored key of
+`.murk.prod` or `prod.murk` as `--vault` does, so a vault with its own key
+merges with no setup.
+
+The driver never merges a vault as text. A file that matches the pattern
+but plainly is not a vault (`.murk.bak` holding notes) is merged as text,
+with conflict markers where both sides changed the same lines. When a side
+is or could be a vault but murk cannot read it, for example a vault re-saved
+with a byte-order mark, a stray line, or a vault overwritten on one branch,
+the driver stops. It puts ours and theirs in the file between conflict
+markers and names the side it cannot read. Keep one side with `git checkout
+--ours` or `--theirs`, check it with `murk verify`, and redo the other
+side's changes.
+
+When both branches created the same vault, for example `murk init --vault
+.murk.staging` on each, there are two separate vaults, and no merge can
+combine them. The driver puts both sides in the file between conflict
+markers and stops. It names the secrets that only one side has. Keep one
+side and add the other side's secrets again:
+
+```bash
+git checkout --ours -- .murk.staging
+murk add API_TOKEN --vault .murk.staging
+git add .murk.staging
+```
 
 With a key, the driver checks **both sides** as a load does:
 
@@ -140,8 +165,21 @@ the revision at `REF` before it shows anything from it.
 
 Before 0.14, `murk setup-merge-driver` wrote `murk merge-driver %O %A %B`
 with no path. A driver with that configuration still runs. But it uses
-`.murk` as the path, so it cannot find the pin for a vault with another name.
-Run `murk setup-merge-driver` again in each clone to add `%P`.
+`.murk` as the path, so for a vault with another name it reads neither that
+vault's trust pin nor its stored key. Such a vault then merges only with
+`MURK_KEY` or `MURK_KEY_FILE` set. Run `murk setup-merge-driver` again in
+each clone: it replaces the old line with `murk merge-driver -- %O %A %B %P`.
+It replaces only lines that murk wrote. If `merge.murk.driver` runs your own
+command, for example a wrapper script, setup changes nothing and tells you
+to remove the line first.
+
+### When the driver stops
+
+Some refusals leave the file as ours, without conflict markers: no key, a
+save counter at its limit, or an agent grant key. The message says that
+nothing was written and theirs was not merged. Do not commit the file as it
+is, because that drops their changes. Set your key and run the merge again,
+or keep one side and redo the other side's changes with murk.
 
 ### Merges that never run the driver
 

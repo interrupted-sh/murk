@@ -47,6 +47,10 @@ export const GRANT_MIGRATIONS = [
   // Legacy rows default to '' — a hash that can never match, so the plugin
   // relinquishes those files instead of overwriting or deleting them.
   `ALTER TABLE deliveries ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''`,
+  // Set when a revoke deleted the grant's key file but could not remove the
+  // grant from the vault. Such a grant is never served, and it is marked
+  // revoked only once a retry removes it from the vault.
+  `ALTER TABLE grants ADD COLUMN revoke_pending_at TEXT`,
 ];
 
 export interface GrantRecord {
@@ -62,6 +66,8 @@ export interface GrantRecord {
   expiresAt: string;
   createdAt: string;
   revokedAt: string | null;
+  /** When a revoke failed at the vault step; the grant may still be live in the vault. */
+  revokePendingAt: string | null;
 }
 
 export interface DeliveryRecord {
@@ -86,6 +92,7 @@ interface GrantRow {
   expires_at: string;
   created_at: string;
   revoked_at: string | null;
+  revoke_pending_at: string | null;
 }
 
 interface DeliveryRow {
@@ -117,6 +124,7 @@ function toGrant(row: GrantRow): GrantRecord {
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
+    revokePendingAt: row.revoke_pending_at,
   };
 }
 
@@ -127,7 +135,7 @@ export class GrantStore {
     return `g${randomBytes(4).toString("hex")}`;
   }
 
-  create(grant: Omit<GrantRecord, "createdAt" | "revokedAt">): GrantRecord {
+  create(grant: Omit<GrantRecord, "createdAt" | "revokedAt" | "revokePendingAt">): GrantRecord {
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
@@ -146,7 +154,7 @@ export class GrantStore {
         grant.expiresAt,
         createdAt,
       );
-    return { ...grant, createdAt, revokedAt: null };
+    return { ...grant, createdAt, revokedAt: null, revokePendingAt: null };
   }
 
   get(id: string): GrantRecord | null {
@@ -162,14 +170,15 @@ export class GrantStore {
   }
 
   /**
-   * Grants usable by one thread: unrevoked, unexpired, matching the thread's
-   * project, and either project-scoped or narrowed to exactly this thread.
+   * Grants usable by one thread: unrevoked, with no pending revoke, unexpired,
+   * matching the thread's project, and either project-scoped or narrowed to
+   * exactly this thread.
    */
   activeFor(projectId: string, threadId: string, now: Date = new Date()): GrantRecord[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM grants
-         WHERE revoked_at IS NULL AND project_id = ? AND (thread_id IS NULL OR thread_id = ?)
+         WHERE revoked_at IS NULL AND revoke_pending_at IS NULL AND project_id = ? AND (thread_id IS NULL OR thread_id = ?)
          ORDER BY created_at DESC`,
       )
       .all(projectId, threadId) as GrantRow[];
@@ -178,6 +187,13 @@ export class GrantStore {
 
   markRevoked(id: string): void {
     this.db.prepare(`UPDATE grants SET revoked_at = ? WHERE id = ?`).run(new Date().toISOString(), id);
+  }
+
+  /** Record a revoke that deleted the key file but could not reach the vault. */
+  markRevokePending(id: string): void {
+    this.db
+      .prepare(`UPDATE grants SET revoke_pending_at = COALESCE(revoke_pending_at, ?) WHERE id = ?`)
+      .run(new Date().toISOString(), id);
   }
 
   recordDelivery(delivery: Omit<DeliveryRecord, "updatedAt">): void {

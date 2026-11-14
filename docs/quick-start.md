@@ -123,6 +123,8 @@ direnv allow
 
 To add a teammate, run the `murk circle authorize` command from step 3, then commit and push `.murk`.
 
+For separate development, staging and production secrets, create one vault for each environment, for example `murk init --vault prod.murk`. `murk init` offers to reuse the key you already have. See [Environments](https://murk.interrupted.sh/guides/environments/).
+
 ## What to know
 
 - Secret names are public. Anyone with repo access can see what secrets exist (for example `STRIPE_KEY`) and their descriptions. Only values are encrypted.

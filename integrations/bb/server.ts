@@ -12,13 +12,14 @@
 // its keys' values inline. Everything fails closed: unknown keys, expired
 // TTLs, revoked grants, non-local hosts.
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { withGrantIdentity } from "./lib/binding";
 import { KEY_NAME_PATTERN, renderDotenv } from "./lib/dotenv";
 import { GRANT_MIGRATIONS, GrantStore, isExpired, type GrantRecord } from "./lib/grants";
-import { agentPlan, mintGrant, revokeGrant, runMurk } from "./lib/murk-cli";
+import { agentPlan, mintGrant, redactKeyPaths, resolveOperatorKey, revokeGrant, runMurk, shellQuote } from "./lib/murk-cli";
 import { legacyUpgradeRefusal, readVaultFormat, vaultCheckout } from "./lib/vault-format";
 
 /**
@@ -41,8 +42,9 @@ interface ThreadTarget {
 }
 
 /**
- * Resolve symlinks in a vault path. murk keys its stored-key auto-discovery on
- * the absolute vault path, so /var/folders vs /private/var (macOS) must agree.
+ * Resolve symlinks in a vault path, so /var/folders and /private/var (macOS)
+ * name one vault: git reports resolved paths, and vaultCheckout compares
+ * against them.
  */
 function canonicalVault(vaultPath: string): string {
   try {
@@ -59,16 +61,15 @@ function scopeLabel(grant: GrantRecord): string {
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
-    defaultScope: {
-      type: "select",
-      label: "Default grant scope",
+    keyFile: {
+      type: "string",
+      label: "Operator key file",
       description:
-        "Where a new grant applies when you do not pass --thread. " +
-        "\"project\" lets every thread in the project read the granted keys. " +
-        "\"thread\" limits a grant minted from inside a thread to that thread. " +
-        "A mint from a plain terminal still creates a project grant unless you pass --thread <id>.",
-      options: ["project", "thread"],
-      default: "project",
+        "Optional. Absolute path to your murk key file: the MURK_KEY_FILE path that murk init wrote to the vault's .env. " +
+        "bb murk grant mint and grant revoke sign the vault with it. The plugin passes it only to the murk commands " +
+        "it runs on the bb server, never to agent threads. Leave blank to use MURK_KEY_FILE or MURK_KEY from the " +
+        "bb server's environment, or, if neither is set, the key murk stored for the vault in ~/.config/murk/keys.",
+      default: "",
     },
     vaultPath: {
       type: "string",
@@ -161,8 +162,21 @@ export default async function plugin(bb: BbPluginApi) {
     return { worktree: environment.path, hostId: environment.hostId };
   }
 
-  function toolError(message: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
-    return { content: [{ type: "text", text: `murk: ${message}` }], isError: true };
+  /**
+   * A tool error result. Tool results reach the agent, so key file paths are
+   * redacted (murk and the binding name the key file in some errors). The
+   * operator's own `bb murk grant` output keeps full paths.
+   */
+  async function toolError(message: string): Promise<{ content: Array<{ type: "text"; text: string }>; isError: true }> {
+    const text = redactKeyPaths(`murk: ${message}`, {
+      files: [
+        (await settings.get()).keyFile.trim(),
+        process.env.MURK_KEY_FILE,
+        ...store.list({ includeRevoked: true }).map((grant) => grant.keyPath),
+      ],
+      dirs: [path.join(homedir(), ".config", "murk", "keys"), agentKeysDir()],
+    });
+    return { content: [{ type: "text", text }], isError: true };
   }
 
   // ---- key → grant resolution ----------------------------------------------
@@ -235,7 +249,7 @@ export default async function plugin(bb: BbPluginApi) {
         const schema = entries.map((entry) => ({ key: entry.key, tags: entry.tags ?? [] }));
         return JSON.stringify({ entries: schema }, null, 2);
       } catch (error) {
-        return toolError(error instanceof Error ? error.message : String(error));
+        return await toolError(error instanceof Error ? error.message : String(error));
       }
     },
   });
@@ -267,7 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
         const { allowRevealGrants } = await settings.get();
         const grants = store.activeFor(projectId, threadId);
         if (grants.length === 0) {
-          return toolError(
+          return await toolError(
             "no active grant covers this thread — ask the user to mint one with: " +
               `bb murk grant mint --keys KEY[,KEY…] --thread ${threadId}`,
           );
@@ -324,12 +338,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (saved.outcome === "conflict") {
             if (owning) {
               store.forgetDelivery(threadId, filePath);
-              return toolError(
+              return await toolError(
                 `the file at ${filePath} was modified externally since the plugin wrote it — ` +
                   "it will not be touched again; move it aside and call murk_get again",
               );
             }
-            return toolError(
+            return await toolError(
               `a file already exists at ${filePath} that this plugin did not create — ` +
                 "move it aside (or delete it) and call murk_get again",
             );
@@ -355,15 +369,15 @@ export default async function plugin(bb: BbPluginApi) {
         }
         return JSON.stringify(result, null, 2);
       } catch (error) {
-        return toolError(error instanceof Error ? error.message : String(error));
+        return await toolError(error instanceof Error ? error.message : String(error));
       }
     },
   });
 
   // ---- agent context for every provider ------------------------------------
   // murk_get is the sanctioned path to secrets, but an agent's shell can still
-  // run `murk` itself. Outside an agent context murk falls back to the
-  // operator's stored key (~/.config/murk/keys, sibling git worktrees
+  // run `murk` itself. Outside an agent context, murk falls back to
+  // the operator's stored key (~/.config/murk/keys, sibling git worktrees
   // included), and an inherited MURK_KEY / MURK_KEY_FILE is the operator's
   // identity outright. Every provider process therefore starts as an agent
   // context with no usable key, so a direct `murk` call fails closed.
@@ -462,7 +476,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "grant-revoke",
         summary: "Revoke a grant: remove its vault identity and delete its key file",
-        usage: "bb murk grant revoke <grantId>",
+        usage: "bb murk grant revoke [--forget] <grantId>",
       },
     ],
     async run(argv, ctx) {
@@ -472,15 +486,39 @@ export default async function plugin(bb: BbPluginApi) {
         }
         const sub = argv[1];
         const rest = argv.slice(2);
-        if (sub === "mint") return await cliMint(rest, ctx.cwd, ctx.threadId, ctx.projectId);
+        if ((sub === "mint" || sub === "revoke") && ctx.threadId) return refuseFromThread(sub, ctx.threadId);
+        if (sub === "mint") return await cliMint(rest, ctx.cwd, ctx.projectId);
         if (sub === "list") return await cliList(rest.includes("--all"));
-        if (sub === "revoke") return await cliRevoke(rest[0]);
+        if (sub === "revoke") {
+          const forget = rest.includes("--forget");
+          return await cliRevoke(rest.filter((arg) => arg !== "--forget")[0], forget);
+        }
         return { exitCode: 1, stderr: "usage: bb murk grant <mint|list|revoke> …" };
       } catch (error) {
         return { exitCode: 1, stderr: `murk: ${error instanceof Error ? error.message : String(error)}` };
       }
     },
   });
+
+  /**
+   * Granting and revoking secrets is the user's decision, never an agent's: a
+   * thread that could mint would grant itself any key. The bb CLI forwards
+   * the caller's thread id (BB_THREAD_ID, set in every thread's shell), so a
+   * call that carries one is refused. A guardrail, not a sandbox: a process
+   * that clears BB_THREAD_ID, or calls the server directly, looks like the
+   * user's terminal.
+   */
+  function refuseFromThread(sub: "mint" | "revoke", threadId: string): { exitCode: number; stderr: string } {
+    const command =
+      sub === "mint" ? `bb murk grant mint --keys KEY[,KEY…] --thread ${threadId}` : "bb murk grant revoke <grantId>";
+    return {
+      exitCode: 1,
+      stderr:
+        `murk: bb murk grant ${sub} is refused from a bb thread. This call came from thread ${threadId}. ` +
+        `Only the user grants or revokes secrets. Ask the user to run this in their own terminal: ${command}\n` +
+        "That terminal must be outside bb threads, because the bb CLI reports the thread of the shell it runs in.",
+    };
+  }
 
   interface MintFlags {
     keys: string[];
@@ -519,11 +557,10 @@ export default async function plugin(bb: BbPluginApi) {
   async function cliMint(
     argv: string[],
     cwd: string | undefined,
-    ctxThreadId: string | undefined,
     ctxProjectId: string | undefined,
   ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
     const flags = parseMintFlags(argv);
-    const { defaultScope, allowRevealGrants } = await settings.get();
+    const { allowRevealGrants, keyFile } = await settings.get();
 
     if (flags.reveal && !allowRevealGrants) {
       return {
@@ -532,13 +569,12 @@ export default async function plugin(bb: BbPluginApi) {
       };
     }
 
-    // Resolve project + vault. Grants default to project scope; --thread (or
-    // the defaultScope=thread setting, when invoked from a thread) narrows.
+    // Resolve project + vault. Grants default to project scope; --thread
+    // narrows to one thread and finds the vault in its worktree.
     let projectId = flags.project ?? ctxProjectId ?? null;
     let worktree: string | null = null;
-    const contextThreadId = flags.thread ?? ctxThreadId ?? null;
-    if (contextThreadId) {
-      const thread = await bb.sdk.threads.get({ threadId: contextThreadId });
+    if (flags.thread) {
+      const thread = await bb.sdk.threads.get({ threadId: flags.thread });
       projectId ??= thread.projectId;
       if (thread.environmentId) {
         const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
@@ -565,8 +601,6 @@ export default async function plugin(bb: BbPluginApi) {
     if (!existsSync(vaultPath)) {
       return { exitCode: 1, stderr: `murk: vault not found at ${vaultPath}` };
     }
-    // murk's stored-key auto-discovery hashes the absolute vault path, so
-    // symlinked segments (macOS /var/folders → /private/var) must be resolved.
     vaultPath = canonicalVault(vaultPath);
 
     // Minting saves the vault. On a pre-0.14 vault that save is its format
@@ -578,7 +612,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { exitCode: 1, stderr: `murk: ${legacyUpgradeRefusal(vaultPath, format, checkout, "minting a grant")}` };
     }
 
-    const threadId = flags.thread ?? (defaultScope === "thread" && ctxThreadId ? ctxThreadId : null);
+    const operatorKey = resolveOperatorKey(keyFile);
 
     const id = store.newGrantId();
     const murkName = `bb-${id}`;
@@ -589,12 +623,13 @@ export default async function plugin(bb: BbPluginApi) {
       keys: flags.keys,
       ttl: flags.ttl,
       keyFilePath,
+      operatorKey,
     });
     const grant = store.create({
       id,
       murkName,
       projectId,
-      threadId,
+      threadId: flags.thread,
       keys: flags.keys,
       reveal: flags.reveal,
       vaultPath,
@@ -624,24 +659,96 @@ export default async function plugin(bb: BbPluginApi) {
     if (grants.length === 0) return { exitCode: 0, stdout: "no grants" };
     const lines = grants.map((grant) => {
       const scope = scopeLabel(grant);
-      const status = grant.revokedAt ? "revoked" : isExpired(grant.expiresAt) ? "EXPIRED" : "active";
+      const status = grant.revokedAt
+        ? "revoked"
+        : grant.revokePendingAt
+          ? "REVOKE-PENDING"
+          : isExpired(grant.expiresAt)
+            ? "EXPIRED"
+            : "active";
       const reveal = grant.reveal ? "reveal" : "file-only";
       return `${grant.id}  ${status}  ${reveal}  ${scope}  expires ${grant.expiresAt}  keys: ${grant.keys.join(", ")}`;
     });
     return { exitCode: 0, stdout: lines.join("\n") };
   }
 
-  async function cliRevoke(id: string | undefined): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
-    if (!id) return { exitCode: 1, stderr: "usage: bb murk grant revoke <grantId>" };
+  async function cliRevoke(
+    id: string | undefined,
+    forget = false,
+  ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+    if (!id) return { exitCode: 1, stderr: "usage: bb murk grant revoke [--forget] <grantId>" };
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
-    // A pre-0.14 vault cannot hold agent grants, so there is nothing in it to
-    // revoke, and calling murk would risk its first 0.14 save. Revoke locally.
-    if (!existsSync(grant.vaultPath) || !readVaultFormat(grant.vaultPath).legacy) {
-      await revokeGrant(grant.vaultPath, grant.murkName);
+    if (forget) {
+      // Clears local state only, for a grant no revoke can reach: its vault
+      // file is gone for good, or you removed the grant from the vault
+      // yourself. Never for an active grant: revoke that first.
+      if (!grant.revokePendingAt && existsSync(grant.vaultPath)) {
+        return {
+          exitCode: 1,
+          stderr: `murk: grant ${id} is active and its vault exists; run bb murk grant revoke ${id} without --forget`,
+        };
+      }
+      rmSync(grant.keyPath, { force: true });
+      store.markRevoked(id);
+      return {
+        exitCode: 0,
+        stdout:
+          `forgot grant ${id} (${grant.murkName}) here and deleted its key file; nothing was revoked in a vault\n` +
+          `the grant may still exist in any copy of that vault (another clone, a branch, git history): ` +
+          `run murk agent revoke ${shellQuote(grant.murkName)} wherever that vault lives`,
+      };
     }
+    // Only murk can say the grant is gone from the vault. A vault that now
+    // reads as pre-0.14 is not the one the grant was minted into (mint never
+    // writes a grant into that format), and murk must not save it, so the
+    // revoke stays pending until the vault is back.
+    let vaultError: string | null = null;
+    let legacy = false;
+    try {
+      legacy = readVaultFormat(grant.vaultPath).legacy;
+    } catch {
+      // unreadable or missing: murk reports it below
+    }
+    if (legacy) {
+      vaultError = `${grant.vaultPath} is in the pre-0.14 format, which cannot hold this grant; restore the vault the grant was minted into`;
+    } else {
+      try {
+        await revokeGrant(grant.vaultPath, grant.murkName, resolveOperatorKey((await settings.get()).keyFile));
+      } catch (error) {
+        vaultError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    // Delete the key file even when the vault write failed (a stale keyFile
+    // setting, a vault that does not load): the plugin then cannot serve the
+    // grant. But the grant stays live in the vault for any copy of its key,
+    // so it is marked revoked only once murk removed it from the vault; until
+    // then it is pending, and every retry runs the vault revoke again.
     rmSync(grant.keyPath, { force: true });
+    if (vaultError) {
+      store.markRevokePending(id);
+      const forgetHint =
+        `run bb murk grant revoke --forget ${id} to clear the grant here only; ` +
+        `it may still exist in any copy of that vault`;
+      // The hint only; whatever murk said, the grant stays pending.
+      const notFound = /grant not found/i.test(vaultError);
+      const next = !existsSync(grant.vaultPath)
+        ? `the vault file ${grant.vaultPath} is gone. Restore it and run bb murk grant revoke ${id} again. ` +
+          `If it is gone for good (bb deleted the worktree), ${forgetHint}`
+        : notFound
+          ? `murk did not find the grant in this vault. If you removed it yourself, ${forgetHint}. ` +
+            `Otherwise check the vault and run bb murk grant revoke ${id} again`
+          : `fix the cause and run bb murk grant revoke ${id} again, or run: ` +
+            `murk agent revoke ${shellQuote(grant.murkName)} --vault ${shellQuote(grant.vaultPath)}`;
+      return {
+        exitCode: 1,
+        stderr:
+          `murk: grant ${id} (${grant.murkName}) may still be live in the vault: could not remove it: ${vaultError}\n` +
+          `deleted its key file here, so threads no longer get it from the plugin; a copy of the key still reads the vault\n` +
+          next,
+      };
+    }
     store.markRevoked(id);
     return {
       exitCode: 0,

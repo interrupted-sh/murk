@@ -487,6 +487,60 @@ pub fn discover_key_file(vault_path: &str) -> Option<std::path::PathBuf> {
         .find(|key| key.exists())
 }
 
+/// The keys this operator has stored for *other* vaults in the directory of
+/// `vault_path`: one `(vault file name, key file)` pair per vault, sorted by
+/// name. `murk init` offers them for reuse when a repository gets a second
+/// vault (`.murk.staging`, `.murk.prod` next to `.murk`), so one person does
+/// not end up with a key per environment by accident.
+///
+/// A vault counts when a regular file of that name (not a symlink) sits in
+/// this directory, or at the same relative directory of a sibling git
+/// worktree, and [`discover_key_file`] finds a key for it — the same lookup
+/// the runtime uses, so this offers nothing the runtime would not already
+/// hand that vault. Only names are listed and paths hashed: no file here is
+/// opened or read, and the key files are not read either.
+pub fn stored_keys_for_neighbour_vaults(vault_path: &str) -> Vec<(String, std::path::PathBuf)> {
+    if !has_key_store() {
+        return Vec::new();
+    }
+    let Ok(as_spelled) = absolute_vault_path(vault_path) else {
+        return Vec::new();
+    };
+    let abs_path = key_naming_path(&as_spelled);
+    let (Some(dir), Some(own_name)) = (abs_path.parent(), abs_path.file_name()) else {
+        return Vec::new();
+    };
+
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Some(root) = crate::git::worktree_root(dir).map(|r| key_naming_dir(&r))
+        && let Ok(relative) = dir.strip_prefix(&root)
+    {
+        dirs.extend(
+            crate::git::sibling_worktrees(&root)
+                .into_iter()
+                .map(|worktree| worktree.join(relative)),
+        );
+    }
+
+    let names: std::collections::BTreeSet<String> = dirs
+        .iter()
+        .filter_map(|d| fs::read_dir(d).ok())
+        .flat_map(Iterator::flatten)
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| std::ffi::OsStr::new(name) != own_name)
+        .collect();
+
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let candidate = dir.join(&name);
+            let key = discover_key_file(candidate.to_str()?)?;
+            Some((name, key))
+        })
+        .collect()
+}
+
 /// Compute the file path for an agent grant key:
 /// `~/.config/murk/agent-keys/<vault-hash>-<name>`.
 ///
@@ -534,6 +588,15 @@ pub fn agent_keys_dir() -> Result<std::path::PathBuf, String> {
 /// Return `~/.config/murk/keys/`, creating it if needed (dir `0700`).
 fn dirs_path() -> Result<std::path::PathBuf, String> {
     config_subdir("keys", "key directory")
+}
+
+/// Whether `~/.config/murk/keys/` exists, without creating it. Lookups that
+/// only ask "is a key stored?" check this first, so asking never leaves an
+/// empty key store behind.
+pub(crate) fn has_key_store() -> bool {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .is_ok_and(|home| Path::new(&home).join(".config/murk/keys").is_dir())
 }
 
 /// Return `~/.config/murk/<name>/`, creating it if needed. On Unix both it and

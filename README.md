@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/interrupted-sh/murk/main/install.sh
 
 The script checks the archive against the release's `SHA256SUMS`. That catches a corrupt download but not a tampered release. The script then checks the release's build provenance with the [GitHub CLI](https://cli.github.com) (`gh`, logged in with `gh auth login` or `GH_TOKEN`). If a check fails, the install stops.
 
-If `gh` is missing or not logged in, the script asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.14.1` to install a specific release.
+If `gh` is missing or not logged in, the script asks whether to install anyway (default no). Without a terminal, as in CI or a docker build, it stops unless `MURK_SKIP_ATTESTATION=1` is set on the `sh` side. Set `MURK_TAG=v0.15.0` to install a specific release.
 
 The script installs to `/usr/local/bin` by default. To change that, set one of these variables on the `sh` side of the pipe, for example `... | PREFIX="$HOME/.local" sh`. A variable set before `curl` reaches only `curl`, not the script.
 
@@ -84,9 +84,9 @@ Pre-built binaries for Linux (x86_64, aarch64, armhf), macOS (x86_64, Apple Sili
 Binary releases carry [attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). Verify one downloaded file at a time (this needs `gh auth login`):
 
 ```bash
-gh attestation verify murk-v0.14.1-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk \
+gh attestation verify murk-v0.15.0-aarch64-apple-darwin.tar.gz --repo interrupted-sh/murk \
   --signer-workflow interrupted-sh/murk/.github/workflows/release.yaml \
-  --source-ref refs/tags/v0.14.1
+  --source-ref refs/tags/v0.15.0
 ```
 
 This works for 0.12.0 and later. Releases 0.10.2 to 0.11.0 were signed as `interrupted-inc/murk`, and 0.3.1 to 0.10.1 as `iicky/murk`. See [VERIFYING.md](VERIFYING.md) to verify older releases and the npm, PyPI and crates.io packages.
@@ -114,7 +114,7 @@ direnv allow
 
 `murk init` writes no `.gitignore`. Its `.env` points at your key, and every write creates an empty `.murk.lock` next to the vault. Neither belongs in git. `murk doctor` warns when `.env` is not ignored.
 
-murk stores your key in `~/.config/murk/keys/` with restricted permissions. murk finds it on its own from the vault's absolute path. That includes a git worktree of the same repo, so a fresh worktree needs no setup. `murk init` also writes a `.env` file with a `MURK_KEY_FILE` line that points at the key (the key itself is not in the repo). murk does not read `.env`. Use `source .env` if you want the variable in your shell.
+murk stores your key in `~/.config/murk/keys/` with restricted permissions. murk finds it on its own from the vault's absolute path. That includes a git worktree of the same repo, so a fresh worktree needs no setup. `murk init` also writes a `.env` file with a `MURK_KEY_FILE` line that points at the key (the key itself is not in the repo). Under `MURK_STRICT` or `MURK_AGENT`, `murk init` writes no `.env` and prints no key path. murk does not read `.env`. Use `source .env` if you want the variable in your shell.
 
 Without direnv, use `murk exec`:
 
@@ -153,6 +153,8 @@ murk add DATABASE_URL --group me
 # Or pipe for scripting (use a command that does not leak to shell history)
 pbpaste | murk add DATABASE_URL
 ```
+
+A vault holds one value for each key. For a different value in development, staging and production, use one vault for each environment (`murk init --vault prod.murk`). Each vault has its own recipients, so production can be for the operations team only. See [Environments](https://murk.interrupted.sh/guides/environments/).
 
 ## Teams
 
@@ -402,7 +404,7 @@ export MURK_KEY_FILE=~/.config/murk/restored.key
 |---------|-------------|
 | `murk completion generate\|install SHELL` | Generate or install shell completions |
 
-Every vault command accepts `--vault FILE` (or `MURK_VAULT`, default `.murk`). `ls`, `export`, `info`, `exec` and `agent plan` filter by `--tag`. `ls`, `export`, `info`, `diff` and `agent plan` support `--json`. See `murk <command> --help` for the full flag list, or [docs/cli-reference.md](docs/cli-reference.md) for the complete reference (generated from the binary, so it stays in sync).
+Every vault command accepts `--vault FILE` (or `MURK_VAULT`, default `.murk`), so one repository can hold a vault for each environment (see [Environments](https://murk.interrupted.sh/guides/environments/)). `ls`, `export`, `info`, `exec` and `agent plan` filter by `--tag`. `ls`, `export`, `info`, `diff` and `agent plan` support `--json`. See `murk <command> --help` for the full flag list, or [docs/cli-reference.md](docs/cli-reference.md) for the complete reference (generated from the binary, so it stays in sync).
 
 ## Pre-commit hooks
 
@@ -411,7 +413,7 @@ murk provides a [pre-commit](https://pre-commit.com/) hook to scan staged files 
 ```yaml
 repos:
   - repo: https://github.com/interrupted-sh/murk
-    rev: v0.14.1  # run 'pre-commit autoupdate' to move to a newer tag
+    rev: v0.15.0  # run 'pre-commit autoupdate' to move to a newer tag
     hooks:
       - id: murk-scan
 ```
@@ -502,7 +504,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 
 - the names `PATH`, `HOME`, `NODE_OPTIONS`, `BASH_ENV`, `EDITOR` and `RUSTFLAGS`
 - anything ending in `_PROXY`
-- anything starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `DOTNET_`, `CARGO_`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_` or `MURK_`
+- anything starting with `LD_`, `DYLD_`, `GIT_`, `BASH_FUNC_`, `PYTHON`, `PERL`, `RUBY`, `JAVA_`, `_JAVA_`, `JDK_`, `DOTNET_`, `CARGO_`, `RUSTC`, `SSL_`, `PIP_`, `GEM_`, `BUNDLE_`, `NPM_CONFIG_`, `LUA_`, `XDG_`, `DIRENV_` or `MURK_`
 
 The match ignores case, and `NODE_ENV` is not reserved. [Environment variables](https://murk.interrupted.sh/concepts/env-vars/#variable-names-a-vault-may-not-set) has the full list. Review who added the key, then pass `--allow-reserved` if you mean it. The MCP `murk_exec` tool never allows them.
 

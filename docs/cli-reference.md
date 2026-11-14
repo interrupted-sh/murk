@@ -101,7 +101,7 @@ Encrypted secrets manager for developers: one file, age encryption, git-friendly
 * `doctor` — Check the surrounding repo for hygiene issues
 * `scan` — Scan files for leaked secret values
 * `diff` — Show secret and access changes vs a git ref (experimental)
-* `setup-merge-driver` — Configure git to use murk's merge driver for .murk files (experimental)
+* `setup-merge-driver` — Configure git to use murk's merge driver for vault files named `*.murk` or `.murk.*` (experimental)
 * `completion` — Generate or install shell completions
 
 
@@ -117,6 +117,8 @@ Initialize a vault or reuse its existing key
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
+* `--reuse-key` — When another vault in this directory already has a key stored on this machine, store that key for this vault too, without asking
+* `--separate-key` — When another vault in this directory already has a key stored on this machine, make a new key for this vault, without asking
 
 
 
@@ -945,7 +947,9 @@ Lists recipients, signer, signing keys, policy, grants and group members that ch
 
 ## `murk setup-merge-driver`
 
-Configure git to use murk's merge driver for .murk files (experimental)
+Configure git to use murk's merge driver for vault files named `*.murk` or `.murk.*` (experimental)
+
+Adds `*.murk merge=murk` and `.murk.* merge=murk` to the `.gitattributes` at the root of the working tree, and sets `merge.murk.*` in git config. A file that matches but is not a vault is merged as text.
 
 **Usage:** `murk setup-merge-driver`
 
