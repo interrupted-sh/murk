@@ -727,6 +727,35 @@ describe("grant changes from a thread", () => {
     expect(existsSync(path.join(agentKeysDir(), `${grantId}.key`))).toBe(false);
   });
 
+  it("refuses a thread's revoke --forget of a pending grant, in every argument order", async () => {
+    const mint = await host.harness.behavior.runCli(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], {
+      cwd: worktree,
+      projectId: PROJECT_ID,
+    });
+    expect(mint.exitCode, mint.stderr).toBe(0);
+    const grantId = mint.stdout.match(/minted grant (g[0-9a-f]{8})/)![1];
+    // A stale keyFile makes the vault step fail: the grant is REVOKE-PENDING,
+    // the one state from which --forget would clear it.
+    await host.harness.behavior.setSettings({ keyFile: path.join(tmpRoot, "moved-away.key") });
+    try {
+      expect((await host.harness.behavior.runCli(["grant", "revoke", grantId], {})).exitCode).toBe(1);
+    } finally {
+      await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    }
+    const pending = new RegExp(`^${grantId}  REVOKE-PENDING  `, "m");
+    expect((await host.harness.behavior.runCli(["grant", "list"], {})).stdout).toMatch(pending);
+
+    for (const args of [["--forget", grantId], [grantId, "--forget"]]) {
+      const refused = await host.harness.behavior.runCli(["grant", "revoke", ...args], { threadId: THREAD_ID });
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain("bb murk grant revoke is refused from a bb thread");
+      expect((await host.harness.behavior.runCli(["grant", "list"], {})).stdout).toMatch(pending);
+    }
+
+    const revoked = await host.harness.behavior.runCli(["grant", "revoke", grantId], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+  });
+
   it("still lists grants for a thread: the list holds no values", async () => {
     const result = await host.harness.behavior.runCli(["grant", "list"], { threadId: THREAD_ID });
     expect(result.exitCode).toBe(0);
@@ -834,7 +863,7 @@ describe("grant store", () => {
     expect(isExpired(new Date(Date.now() + 60_000).toISOString())).toBe(false);
   });
 
-  it("activeFor filters revoked, expired, other-project, and other-thread grants", () => {
+  it("activeFor filters revoked, forgotten, expired, other-project, and other-thread grants", () => {
     const db = new Database(":memory:");
     for (const statement of GRANT_MIGRATIONS) db.exec(statement);
     const store = new GrantStore(db);
@@ -852,6 +881,8 @@ describe("grant store", () => {
     store.create({ ...base, id: "gaaaaaaa5", murkName: "bb-5", projectId: "p1", threadId: null, expiresAt: "2000-01-01T00:00:00Z" });
     store.create({ ...base, id: "gaaaaaaa6", murkName: "bb-6", projectId: "p1", threadId: null });
     store.markRevoked("gaaaaaaa6");
+    store.create({ ...base, id: "gaaaaaaa7", murkName: "bb-7", projectId: "p1", threadId: null });
+    store.markForgotten("gaaaaaaa7");
 
     const active = store.activeFor("p1", "t1").map((grant) => grant.id).sort();
     expect(active).toEqual(["gaaaaaaa1", "gaaaaaaa2"]);
