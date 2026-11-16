@@ -150,7 +150,7 @@ fn run_editor(editor: &str, path: &Path) -> Result<ExitStatus, EditAbort> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
 
     let tty = terminal();
-    let handoff = tty.filter(|&fd| in_foreground(fd));
+    let handoff = tty.filter(|&fd| signals::in_foreground(fd));
 
     let mut cmd = process::Command::new("sh");
     cmd.arg("-c")
@@ -166,7 +166,7 @@ fn run_editor(editor: &str, path: &Path) -> Result<ExitStatus, EditAbort> {
         cmd.pre_exec(move || {
             libc::setpgid(0, 0);
             if let Some(fd) = handoff {
-                give_terminal(fd, libc::getpid());
+                signals::give_terminal(fd, libc::getpid());
             }
             Ok(())
         });
@@ -182,13 +182,13 @@ fn run_editor(editor: &str, path: &Path) -> Result<ExitStatus, EditAbort> {
         libc::setpgid(pgid, pgid);
     }
     if let Some(fd) = handoff {
-        give_terminal(fd, pgid);
+        signals::give_terminal(fd, pgid);
     }
     signals::set_group(pgid);
 
     let waited = wait_leader(pgid, tty);
     if let Some(fd) = tty {
-        take_terminal(fd, pgid);
+        signals::take_terminal(fd, pgid);
     }
     end_group(pgid);
     signals::clear();
@@ -215,21 +215,7 @@ fn wait_leader(pgid: libc::pid_t, tty: Option<libc::c_int>) -> std::io::Result<l
         if !libc::WIFSTOPPED(status) {
             return Ok(status);
         }
-        if let Some(fd) = tty {
-            take_terminal(fd, pgid);
-        }
-        // SAFETY: plain syscalls. SIGTSTP stops murk until the shell resumes
-        // it; then the editor gets the terminal back if murk has it.
-        unsafe {
-            libc::raise(libc::SIGTSTP);
-        }
-        if let Some(fd) = tty.filter(|&fd| in_foreground(fd)) {
-            give_terminal(fd, pgid);
-        }
-        // SAFETY: plain syscall on our own child's group.
-        unsafe {
-            libc::kill(-pgid, libc::SIGCONT);
-        }
+        signals::suspend(pgid, tty);
     }
 }
 
@@ -269,36 +255,4 @@ fn terminal() -> Option<libc::c_int> {
     [0, 1, 2]
         .into_iter()
         .find(|&fd| unsafe { libc::isatty(fd) } == 1)
-}
-
-/// Whether murk's process group owns the terminal (murk is a foreground job).
-#[cfg(unix)]
-fn in_foreground(fd: libc::c_int) -> bool {
-    // SAFETY: plain syscalls.
-    unsafe { libc::tcgetpgrp(fd) == libc::getpgrp() }
-}
-
-/// Give the terminal back to murk's group, if the editor's group has it.
-#[cfg(unix)]
-fn take_terminal(fd: libc::c_int, pgid: libc::pid_t) {
-    // SAFETY: plain syscalls.
-    if unsafe { libc::tcgetpgrp(fd) } == pgid {
-        give_terminal(fd, unsafe { libc::getpgrp() });
-    }
-}
-
-/// Make `pgid` the terminal's foreground group. SIGTTOU is blocked meanwhile:
-/// a background process calling tcsetpgrp would otherwise be stopped by it.
-#[cfg(unix)]
-fn give_terminal(fd: libc::c_int, pgid: libc::pid_t) {
-    // SAFETY: plain, async-signal-safe syscalls on stack-local signal sets.
-    unsafe {
-        let mut block: libc::sigset_t = std::mem::zeroed();
-        let mut old: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&raw mut block);
-        libc::sigaddset(&raw mut block, libc::SIGTTOU);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &raw const block, &raw mut old);
-        libc::tcsetpgrp(fd, pgid);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, std::ptr::null_mut());
-    }
 }
