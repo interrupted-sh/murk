@@ -5253,6 +5253,27 @@ fn setup_merge_driver_prints_git_config_errors_safely() {
     assert!(stderr.contains("g\\u{202e}it"), "{stderr}");
 }
 
+/// Run setup in `dir`: it must refuse, name each of `lines` (`FILE:N: TEXT`),
+/// and configure no driver.
+fn assert_setup_refuses_attribute(dir: &std::path::Path, lines: &[&str]) {
+    let out = murk_bin(dir)
+        .args(["setup-merge-driver"])
+        .current_dir(dir)
+        .timeout(std::time::Duration::from_secs(120))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("already set a merge attribute") && stderr.contains("changed nothing"),
+        "{stderr}"
+    );
+    for line in lines {
+        assert!(stderr.contains(line), "{line}: {stderr}");
+    }
+    assert!(driver_values(dir).is_empty(), "{stderr}");
+}
+
 #[test]
 fn setup_merge_driver_leaves_a_custom_merge_attribute_alone() {
     // Appending `*.murk merge=murk` would silently override these (the last
@@ -5261,34 +5282,76 @@ fn setup_merge_driver_leaves_a_custom_merge_attribute_alone() {
         (
             ".gitattributes",
             "*.murk merge=custom\n",
-            ".murk merge=custom",
+            ".gitattributes:1: *.murk merge=custom",
         ),
         (
             ".gitattributes",
             "# mine\n.murk.* merge=union",
-            ".murk.x merge=union",
+            ".gitattributes:2: .murk.* merge=union",
         ),
-        (".gitattributes", "*.murk binary\n", ".murk -merge"),
+        (
+            ".gitattributes",
+            "*.murk binary\n",
+            ".gitattributes:1: *.murk binary",
+        ),
         (
             ".git/info/attributes",
             "*.murk merge=custom\n",
-            ".murk merge=custom",
+            ".git/info/attributes:1: *.murk merge=custom",
         ),
-        // Names more specific than the two samples.
         (
             ".gitattributes",
             "prod.murk merge=custom\n",
-            "prod.murk merge=custom",
+            ".gitattributes:1: prod.murk merge=custom",
         ),
         (
             ".gitattributes",
             "/config/.murk.prod merge=custom\n",
-            "config/.murk.prod merge=custom",
+            ".gitattributes:1: /config/.murk.prod merge=custom",
         ),
         (
             ".gitattributes",
             "[ps]rod.murk -merge\n",
-            "prod.murk -merge",
+            ".gitattributes:1: [ps]rod.murk -merge",
+        ),
+        (
+            ".gitattributes",
+            "[attr]keep -merge\nprod.murk keep\n",
+            ".gitattributes:2: prod.murk keep",
+        ),
+        (
+            ".gitattributes",
+            "prod.murk !merge\n",
+            ".gitattributes:1: prod.murk !merge",
+        ),
+        // A leading `*` that names a driver also covers `.murk.prod`.
+        (
+            ".gitattributes",
+            "*.prod merge=custom\n",
+            ".gitattributes:1: *.prod merge=custom",
+        ),
+        // git decodes `\155` to `m`: this is `prod.murk`.
+        (
+            ".gitattributes",
+            "\"prod.\\155urk\" merge=custom\n",
+            ".gitattributes:1: \"prod.\\155urk\" merge=custom",
+        ),
+        // A directory glob with no vault in it yet, a quoted name and a
+        // negated class.
+        (
+            ".gitattributes",
+            "secrets/** merge=custom\n",
+            ".gitattributes:1: secrets/** merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "\"prod.murk\" merge=custom\n",
+            ".gitattributes:1: \"prod.murk\" merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "[!a]rod.murk merge=custom\n",
+            ".gitattributes:1: [!a]rod.murk merge=custom",
         ),
     ] {
         let dir = TempDir::new().unwrap();
@@ -5296,30 +5359,17 @@ fn setup_merge_driver_leaves_a_custom_merge_attribute_alone() {
         let path = dir.path().join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, contents).unwrap();
-        murk_bin(dir.path())
-            .args(["setup-merge-driver"])
-            .current_dir(dir.path())
-            .assert()
-            .failure()
-            .stderr(
-                predicate::str::contains(format!(
-                    "already give vault files a merge attribute murk did not write: {shown}"
-                ))
-                .and(predicate::str::contains("changed nothing")),
-            );
+        assert_setup_refuses_attribute(dir.path(), &[shown]);
         assert_eq!(fs::read_to_string(&path).unwrap(), contents, "{file}");
         if file != ".gitattributes" {
             assert!(!dir.path().join(".gitattributes").exists());
         }
-        assert!(driver_values(dir.path()).is_empty(), "{contents}");
     }
 }
 
 #[test]
 fn setup_merge_driver_leaves_a_custom_attribute_from_other_sources_alone() {
-    // core.attributesFile names a vault, and a tracked vault matches a
-    // pattern no sample path can stand for: the appended lines would
-    // override both.
+    // core.attributesFile, and a .gitattributes in a subdirectory.
     let dir = TempDir::new().unwrap();
     git_ok(dir.path(), &["init", "-q"]);
     let global = dir.path().join("attributes");
@@ -5328,34 +5378,102 @@ fn setup_merge_driver_leaves_a_custom_attribute_from_other_sources_alone() {
         dir.path(),
         &["config", "core.attributesFile", global.to_str().unwrap()],
     );
-    murk_bin(dir.path())
-        .args(["setup-merge-driver"])
-        .current_dir(dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "murk did not write: staging.murk merge=custom",
-        ));
+    assert_setup_refuses_attribute(dir.path(), &["attributes:1: staging.murk merge=custom"]);
     assert!(!dir.path().join(".gitattributes").exists());
 
     let dir = TempDir::new().unwrap();
     git_ok(dir.path(), &["init", "-q"]);
-    fs::write(dir.path().join(".gitattributes"), "prod.* merge=custom\n").unwrap();
-    fs::write(dir.path().join("prod.murk"), "{}\n").unwrap();
-    git_ok(dir.path(), &["add", "prod.murk"]);
+    fs::create_dir_all(dir.path().join("config")).unwrap();
+    fs::write(
+        dir.path().join("config/.gitattributes"),
+        "*.murk merge=custom\n",
+    )
+    .unwrap();
+    assert_setup_refuses_attribute(
+        dir.path(),
+        &["config/.gitattributes:1: *.murk merge=custom"],
+    );
+    assert!(!dir.path().join(".gitattributes").exists());
+}
+
+#[test]
+fn setup_merge_driver_judges_attribute_patterns_by_what_they_could_match() {
+    // A wildcard, a quoted pattern and a negated class each match a vault
+    // name. Whether that vault is tracked, untracked or absent, appending
+    // murk's lines would override the attribute, so setup refuses.
+    for (line, vault) in [
+        ("prod.* merge=custom", "prod.murk"),
+        ("\"my vault.murk\" merge=custom", "my vault.murk"),
+        ("[!x].murk merge=custom", "a.murk"),
+    ] {
+        for state in ["tracked", "untracked", "absent"] {
+            let dir = TempDir::new().unwrap();
+            git_ok(dir.path(), &["init", "-q"]);
+            let attributes = format!("{line}\n");
+            fs::write(dir.path().join(".gitattributes"), &attributes).unwrap();
+            if state != "absent" {
+                fs::write(dir.path().join(vault), "{}\n").unwrap();
+            }
+            if state == "tracked" {
+                git_ok(dir.path(), &["add", "--", vault]);
+            }
+            assert_setup_refuses_attribute(dir.path(), &[&format!(".gitattributes:1: {line}")]);
+            assert_eq!(
+                fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+                attributes,
+                "{line} ({state})"
+            );
+        }
+    }
+    // Lines that cannot touch a vault's merge attribute do not stop setup.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let attributes = "prod.txt merge=union\n*.png binary\n*.png -merge\n*.jpg !merge\n*.murk diff\n[!.]murk -merge\n";
+    fs::write(dir.path().join(".gitattributes"), attributes).unwrap();
     murk_bin(dir.path())
         .args(["setup-merge-driver"])
         .current_dir(dir.path())
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "murk did not write: prod.murk merge=custom",
-        ));
+        .success();
     assert_eq!(
         fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
-        "prod.* merge=custom\n"
+        format!("{attributes}*.murk merge=murk\n.murk.* merge=murk\n")
     );
-    assert!(driver_values(dir.path()).is_empty());
+}
+
+#[test]
+fn setup_merge_driver_finishes_quickly_in_a_large_repository() {
+    // 20000 tracked vault-named paths, more than a pipe holds: setup must
+    // not do per-path work that can block.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let blob = std::process::Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&blob.stdout).trim().to_string();
+    let index: String = (0..20_000)
+        .map(|n| format!("100644 {blob}\tvaults/dir{}/v{n}.murk\n", n % 100))
+        .collect();
+    let mut child = std::process::Command::new("git")
+        .args(["update-index", "--index-info"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), index.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let start = std::time::Instant::now();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
 }
 
 #[test]

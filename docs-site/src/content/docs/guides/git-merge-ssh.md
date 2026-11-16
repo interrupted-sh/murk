@@ -34,11 +34,14 @@ This command does two things:
 
 Setup changes nothing when another merge driver is in place. This is the
 case when git config already sets `merge.murk.driver` to a command that murk
-did not write. It is also the case when the git attributes
-(`.gitattributes`, `.git/info/attributes` or `core.attributesFile`) already
-give vault files another `merge` attribute. The message names what setup
-found. Setup changes git config before `.gitattributes`. If git config
-fails, `.gitattributes` stays unchanged.
+did not write. It is also the case when a line in any attributes file git
+reads (each `.gitattributes`, `.git/info/attributes`, `core.attributesFile`
+or the system file) gives files that murk's lines would cover another
+`merge` setting. A line such as `*.prod merge=custom` counts, because it
+covers a `.murk.prod` vault. A line such as `*.png binary` does not stop
+setup. The message names each line with its file and line number. Setup
+changes git config before `.gitattributes`. If git config fails,
+`.gitattributes` stays unchanged.
 
 The definition is `murk merge-driver -- %O %A %B %P`, and git runs `murk`
 from your `PATH`. git runs the driver during a merge or rebase in which
