@@ -41,6 +41,13 @@ RUN set -eu; \
 The checksum catches a corrupt download. To check the build provenance as
 well, see [Verifying releases](https://github.com/interrupted-sh/murk/blob/main/VERIFYING.md).
 
+In your own image, pin the base image by digest
+(`debian:bookworm-slim@sha256:<digest>`), so that a rebuild uses the image you
+tested. A tool such as Dependabot can update the digest. The agent isolation
+recipe's
+[`Dockerfile`](https://github.com/interrupted-sh/murk/blob/main/scripts/agent-isolation/Dockerfile)
+does this.
+
 ## Rules for the grant key file
 
 murk refuses a key file in two cases. Both apply inside a container:

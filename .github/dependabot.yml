@@ -62,9 +62,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  # Hash-pinned zig toolchain used by the node musl cross-compile job.
+  # Hash-pinned zig toolchain used by cargo-zigbuild in the node musl
+  # cross-compile job and the x86_64 Linux release build.
   - package-ecosystem: pip
     directory: /.github/requirements
+    schedule:
+      interval: weekly
+  # Base image of the agent isolation recipe, pinned by digest. The tag
+  # (bookworm-slim) is not a version, so Dependabot updates only the digest.
+  - package-ecosystem: docker
+    directory: /scripts/agent-isolation
     schedule:
       interval: weekly
   # Node bindings package. Grouped so a routine minor/patch bump doesn't
