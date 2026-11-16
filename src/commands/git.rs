@@ -4,6 +4,7 @@
 use super::*;
 use colored::Colorize;
 use murk_cli::{DiffKind, MergeDriverSetupStep, vault};
+use serde::de::IgnoredAny;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -23,24 +24,31 @@ pub(crate) fn cmd_merge_driver(
         read("ours", ours_path),
         read("theirs", theirs_path),
     ];
+    let target = Target::new(vault_path);
+    if !target.known {
+        eprintln!(
+            "{} this merge driver line predates murk 0.14 and does not pass the file name (%P)\n  run murk setup-merge-driver again, so that messages name the file",
+            "warn".yellow().bold()
+        );
+    }
+    let (shown, arg) = (&target.name, &target.arg);
     // murk never merges a vault as text, and never exits 0 with a file it
     // cannot read. Three vaults it reads are merged as vaults. Inputs none of
     // which is or could be a vault (`.murk.bak` holding notes, matched by
     // `.murk.*`) merge as text, as git does without a driver. Everything else
     // is refused with both sides between conflict markers, so a routine
     // `git add` cannot commit one side as the resolution.
-    let shown = murk_cli::terminal_text(vault_path.unwrap_or(".murk"), false).to_string();
     let parses = sides.each_ref().map(|side| parses_as_vault(side));
     if parses != [true; 3] {
         // Both branches created the vault (`murk init --vault .murk.staging`
         // on each): two separate vaults, which no merge can combine.
         if sides[0].iter().all(u8::is_ascii_whitespace) && parses[1] && parses[2] {
-            refuse_add_add(ours_path, &sides[1], &sides[2], &shown);
+            refuse_add_add(ours_path, &sides[1], &sides[2], &target);
         }
         if !sides.iter().any(|side| could_be_vault(side)) {
-            merge_as_text(base_path, ours_path, theirs_path, &sides, &shown);
+            merge_as_text(base_path, ours_path, theirs_path, &sides, &target);
         }
-        refuse_unreadable(ours_path, &sides, &shown);
+        refuse_unreadable(ours_path, &sides, &target, parses.contains(&true));
     }
     let (ours_bytes, theirs_bytes) = (sides[1].clone(), sides[2].clone());
     let [base_contents, ours_contents, theirs_contents] = sides.map(|side| {
@@ -61,6 +69,9 @@ pub(crate) fn cmd_merge_driver(
         ),
         "committing it as it is drops their changes".to_string(),
     ];
+    let keep_ours_or_theirs = format!(
+        "to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg})"
+    );
     let output = murk_cli::run_merge_driver(
         &base_contents,
         &ours_contents,
@@ -70,9 +81,7 @@ pub(crate) fn cmd_merge_driver(
     .unwrap_or_else(|e| {
         let mut lines = vec![e];
         lines.extend(ours_unchanged.iter().cloned());
-        lines.push(format!(
-            "to finish: keep ours (git checkout --ours -- {shown}) and redo their changes with murk, or take theirs (git checkout --theirs -- {shown})"
-        ));
+        lines.push(keep_ours_or_theirs.clone());
         die(&lines.join("\n"), 1)
     });
 
@@ -113,7 +122,7 @@ pub(crate) fn cmd_merge_driver(
             eprintln!("  {line}");
         }
         eprintln!(
-            "  to finish: keep ours (git checkout --ours -- {shown}) and redo their changes with murk, or take theirs (git checkout --theirs -- {shown}) and redo ours"
+            "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
         );
         process::exit(1);
     }
@@ -125,21 +134,34 @@ pub(crate) fn cmd_merge_driver(
         );
     }
 
-    // Write merged result to ours path (%A).
-    vault::write(Path::new(ours_path), &output.result.vault)
-        .unwrap_or_else(|e| die(&format_args!("writing merged vault: {e}"), 1));
+    // Write merged result to ours path (%A). The write replaces the file
+    // atomically, so a failed write normally leaves ours as it was; say what
+    // the working file holds either way.
+    if let Err(e) = vault::write(Path::new(ours_path), &output.result.vault) {
+        let mut lines = vec![format!("writing merged vault: {e}")];
+        if fs::read(ours_path).is_ok_and(|now| now == ours_bytes) {
+            lines.extend(ours_unchanged.iter().cloned());
+        } else {
+            lines.push(format!(
+                "the working file {shown} may hold part of the merge, and theirs was NOT merged"
+            ));
+            lines.push("do not commit it as it is".into());
+        }
+        lines.push(keep_ours_or_theirs);
+        die(&lines.join("\n"), 1);
+    }
 
     if output.result.conflicts.is_empty() {
         // Final guard: exit 0 only with a file murk reads as a vault.
-        if !fs::read(ours_path).is_ok_and(|merged| parses_as_vault(&merged)) {
+        if !reads_back_as_vault(Path::new(ours_path)) {
             refuse_with_markers(
                 ours_path,
                 &ours_bytes,
                 &theirs_bytes,
-                &shown,
+                &target,
                 &[
                     format!("the merged {shown} does not read back as a vault; nothing was merged"),
-                    format!("keep one side: git checkout --ours -- {shown} (or --theirs)"),
+                    format!("keep one side: git checkout --ours -- {arg} (or --theirs)"),
                 ],
             );
         }
@@ -168,9 +190,50 @@ pub(crate) fn cmd_merge_driver(
             "  it keeps ours' integrity data, so it does not load if it differs from ours; do not commit it as it is"
         );
         eprintln!(
-            "  to finish: take one side (git checkout --ours -- {shown} or --theirs) and redo the other side's changes with murk"
+            "  to finish: take one side (git checkout --ours -- {arg} or --theirs) and redo the other side's changes with murk"
         );
         process::exit(1);
+    }
+}
+
+/// How the driver names the file it merges.
+struct Target {
+    /// In prose: the path git passed as `%P`, made safe for the terminal, or a
+    /// description when git passed none.
+    name: String,
+    /// In a command line to type: the path, or the placeholder `<file>`.
+    arg: String,
+    /// Whether git passed the path. A driver line written before 0.14 does
+    /// not, and then no message names a file it cannot know.
+    known: bool,
+}
+
+impl Target {
+    fn new(vault_path: Option<&str>) -> Self {
+        match vault_path {
+            Some(path) => {
+                let path = murk_cli::terminal_text(path, false).into_owned();
+                Self {
+                    name: path.clone(),
+                    arg: path,
+                    known: true,
+                }
+            }
+            None => Self {
+                name: "the file git is merging (see git status)".into(),
+                arg: "<file>".into(),
+                known: false,
+            },
+        }
+    }
+
+    /// The conflict-marker label of `side`: `ours:PATH`, or `ours` alone.
+    fn label(&self, side: &str) -> String {
+        if self.known {
+            format!("{side}:{}", self.name)
+        } else {
+            side.to_string()
+        }
     }
 }
 
@@ -179,23 +242,74 @@ fn parses_as_vault(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).is_ok_and(|text| vault::parse(text).is_ok())
 }
 
-/// Whether `bytes` is, or could be, a vault: after a BOM and surrounding
-/// whitespace, it starts with `{`, or it names a top-level vault key
-/// anywhere. Deliberately loose: a vault an editor re-saved with a BOM, with
-/// a stray line, or with a renamed key must never be merged as text.
+/// Whether the file at `path` now reads as a vault. The last check before
+/// the driver exits 0 with a merged vault.
+fn reads_back_as_vault(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|merged| parses_as_vault(&merged))
+}
+
+/// Top-level keys that only a vault has, in any format version. `version`
+/// is not one: ordinary JSON files have it too.
+const VAULT_KEYS: [&str; 5] = ["recipients", "secrets", "meta", "vault_name", "vault_id"];
+
+/// Whether `bytes` is, or could be, a vault. Valid JSON could be one only
+/// when it is an object with a top-level [`VAULT_KEYS`] key, so an ordinary
+/// `.murk.json` merges as text. Anything else could be one when, after a BOM
+/// and whitespace, it starts with `{`, or when it uses a vault key as a JSON
+/// key (`"secrets":`) anywhere. A vault an editor re-saved with a BOM, as
+/// UTF-16, with a stray line, or with a renamed key is never merged as text;
+/// notes that merely quote a key name (`the "secrets" field`) are.
 fn could_be_vault(bytes: &[u8]) -> bool {
-    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-    if bytes.trim_ascii_start().starts_with(b"{") {
-        return true;
+    if let Some(text) = utf16_text(bytes) {
+        return could_be_vault(text.as_bytes());
     }
-    [
-        &b"\"version\""[..],
-        b"\"recipients\"",
-        b"\"secrets\"",
-        b"\"meta\"",
-    ]
-    .iter()
-    .any(|key| bytes.windows(key.len()).any(|w| w == *key))
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    // Only the top-level keys are kept: no input is ever loaded into an
+    // untyped JSON tree.
+    if let Ok(keys) = serde_json::from_slice::<HashMap<String, IgnoredAny>>(bytes) {
+        return VAULT_KEYS.iter().any(|key| keys.contains_key(*key));
+    }
+    if serde_json::from_slice::<IgnoredAny>(bytes).is_ok() {
+        return false;
+    }
+    bytes.trim_ascii_start().starts_with(b"{") || VAULT_KEYS.iter().any(|key| names_key(bytes, key))
+}
+
+/// Whether `bytes` uses `key` as a JSON key: `"key"`, then optional
+/// whitespace, then `:`.
+fn names_key(bytes: &[u8], key: &str) -> bool {
+    let quoted = format!("\"{key}\"");
+    let quoted = quoted.as_bytes();
+    bytes.windows(quoted.len()).enumerate().any(|(at, window)| {
+        window == quoted
+            && bytes[at + quoted.len()..]
+                .trim_ascii_start()
+                .starts_with(b":")
+    })
+}
+
+/// Whether `bytes` starts with a UTF-16 byte-order mark.
+fn is_utf16(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\xff\xfe") || bytes.starts_with(b"\xfe\xff")
+}
+
+/// The text of `bytes` when it starts with a UTF-16 byte-order mark, without
+/// the mark. Text that is not valid UTF-16 is decoded with replacement
+/// characters; this is only for judging what the file is.
+fn utf16_text(bytes: &[u8]) -> Option<String> {
+    let unit: fn([u8; 2]) -> u16 = match bytes.get(..2)? {
+        b"\xff\xfe" => u16::from_le_bytes,
+        b"\xfe\xff" => u16::from_be_bytes,
+        _ => return None,
+    };
+    let units = bytes[2..]
+        .chunks(2)
+        .map(|pair| unit([pair[0], pair.get(1).copied().unwrap_or(0)]));
+    Some(
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
 }
 
 /// The secret names a vault file lists, sorted (not yet terminal-safe). Read
@@ -217,13 +331,13 @@ fn refuse_with_markers(
     ours_path: &str,
     ours: &[u8],
     theirs: &[u8],
-    name: &str,
+    target: &Target,
     lines: &[String],
 ) -> ! {
-    let mut text = format!("<<<<<<< ours:{name}\n").into_bytes();
+    let mut text = format!("<<<<<<< {}\n", target.label("ours")).into_bytes();
     for (side, marker) in [
         (ours, "=======\n".to_string()),
-        (theirs, format!(">>>>>>> theirs:{name}\n")),
+        (theirs, format!(">>>>>>> {}\n", target.label("theirs"))),
     ] {
         text.extend_from_slice(side);
         if !side.ends_with(b"\n") {
@@ -245,7 +359,8 @@ fn refuse_with_markers(
 /// Both branches created the same vault: two separate vaults, with their own
 /// ids, recipients and keys, which no merge can combine. Say how to keep one
 /// side and which secrets to redo.
-fn refuse_add_add(ours_path: &str, ours: &[u8], theirs: &[u8], shown: &str) -> ! {
+fn refuse_add_add(ours_path: &str, ours: &[u8], theirs: &[u8], target: &Target) -> ! {
+    let (shown, arg) = (&target.name, &target.arg);
     let (ours_names, theirs_names) = (secret_names(ours), secret_names(theirs));
     let only = |a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>| {
         let names: Vec<String> = a
@@ -262,15 +377,15 @@ fn refuse_add_add(ours_path: &str, ours: &[u8], theirs: &[u8], shown: &str) -> !
         ours_path,
         ours,
         theirs,
-        shown,
+        target,
         &[
             format!("both branches created {shown} as a new vault; murk cannot merge two separate vaults"),
             format!(
-                "keep ours: git checkout --ours -- {shown}, then redo theirs' secrets with murk add --vault {shown}: {}",
+                "keep ours: git checkout --ours -- {arg}, then redo theirs' secrets with murk add --vault {arg}: {}",
                 only(&theirs_names, &ours_names)
             ),
             format!(
-                "or keep theirs: git checkout --theirs -- {shown}, then redo ours' secrets: {}",
+                "or keep theirs: git checkout --theirs -- {arg}, then redo ours' secrets: {}",
                 only(&ours_names, &theirs_names)
             ),
             "secrets on both sides may differ in value; recipients the other side authorized must be authorized again"
@@ -280,12 +395,15 @@ fn refuse_add_add(ours_path: &str, ours: &[u8], theirs: &[u8], shown: &str) -> !
 }
 
 /// Some input is or could be a vault, but not every side is a vault murk
-/// reads: a vault re-saved with a BOM or a stray line, a renamed key, a
-/// newer format, a vault emptied or replaced on one branch. murk never merges
-/// a vault as text, so name the sides it cannot read and refuse.
-fn refuse_unreadable(ours_path: &str, sides: &[Vec<u8>; 3], shown: &str) -> ! {
+/// reads: a vault re-saved with a BOM, as UTF-16 or with a stray line, a
+/// renamed key, a newer format, a vault emptied or replaced on one branch.
+/// murk never merges a vault as text, so name the sides it cannot read and
+/// refuse. `is_vault`: some side is a vault murk reads. Without one the file
+/// only may be a vault, and the advice covers both cases.
+fn refuse_unreadable(ours_path: &str, sides: &[Vec<u8>; 3], target: &Target, is_vault: bool) -> ! {
+    let (shown, arg) = (&target.name, &target.arg);
     // Each side murk cannot read, with the reason: the parser's error, or
-    // "empty" / "not UTF-8 text".
+    // "empty" / "UTF-16 text" / "not UTF-8 text".
     let unreadable: Vec<(&str, String)> = ["base", "ours", "theirs"]
         .into_iter()
         .zip(sides.iter())
@@ -294,6 +412,9 @@ fn refuse_unreadable(ours_path: &str, sides: &[Vec<u8>; 3], shown: &str) -> ! {
                 "empty".to_string()
             } else {
                 match std::str::from_utf8(side) {
+                    Err(_) if is_utf16(side) => {
+                        "UTF-16 text, but murk reads only UTF-8".to_string()
+                    }
                     Err(_) => "not UTF-8 text".to_string(),
                     Ok(text) => vault::parse(text).err()?.to_string(),
                 }
@@ -303,7 +424,8 @@ fn refuse_unreadable(ours_path: &str, sides: &[Vec<u8>; 3], shown: &str) -> ! {
         .collect();
     let labels: Vec<&str> = unreadable.iter().map(|(label, _)| *label).collect();
     let mut lines = vec![format!(
-        "{shown} is a vault, but murk cannot read it on {}; murk never merges a vault as text",
+        "{shown} {} a vault, but murk cannot read it on {}; murk never merges a vault as text",
+        if is_vault { "is" } else { "may be" },
         labels.join(", ")
     )];
     lines.extend(
@@ -311,13 +433,23 @@ fn refuse_unreadable(ours_path: &str, sides: &[Vec<u8>; 3], shown: &str) -> ! {
             .iter()
             .map(|(label, reason)| format!("{label}: {}", murk_cli::terminal_text(reason, false))),
     );
-    lines.push(format!(
-        "keep one side: git checkout --ours -- {shown} (or --theirs)"
-    ));
-    lines.push(format!(
-        "check it with murk verify --vault {shown}, then redo the other side's changes with murk"
-    ));
-    refuse_with_markers(ours_path, &sides[1], &sides[2], shown, &lines)
+    if is_vault {
+        lines.push(format!(
+            "keep one side: git checkout --ours -- {arg} (or --theirs)"
+        ));
+        lines.push(format!(
+            "check it with murk verify --vault {arg}, then redo the other side's changes with murk"
+        ));
+    } else {
+        lines.push(
+            "if it is not a vault, merge it by hand: edit the file, which holds both sides between conflict markers, then git add it"
+                .into(),
+        );
+        lines.push(format!(
+            "if it is a vault, keep one side: git checkout --ours -- {arg} (or --theirs)"
+        ));
+    }
+    refuse_with_markers(ours_path, &sides[1], &sides[2], target, &lines)
 }
 
 /// Merge inputs none of which is or could be a vault, as git would without a
@@ -332,15 +464,16 @@ fn merge_as_text(
     ours_path: &str,
     theirs_path: &str,
     sides: &[Vec<u8>; 3],
-    name: &str,
+    target: &Target,
 ) -> ! {
+    let name = &target.name;
     let status = murk_cli::git_command()
         .args(["merge-file", "-L"])
-        .arg(format!("ours:{name}"))
+        .arg(target.label("ours"))
         .arg("-L")
-        .arg(format!("base:{name}"))
+        .arg(target.label("base"))
         .arg("-L")
-        .arg(format!("theirs:{name}"))
+        .arg(target.label("theirs"))
         .args([ours_path, base_path, theirs_path])
         .status()
         .unwrap_or_else(|e| die(&format_args!("running git merge-file: {e}"), 1));
@@ -350,7 +483,19 @@ fn merge_as_text(
         Some(0) => {
             let merged = fs::read(ours_path).unwrap_or_default();
             if could_be_vault(&merged) && !parses_as_vault(&merged) {
-                refuse_unreadable(ours_path, sides, name);
+                refuse_with_markers(
+                    ours_path,
+                    &sides[1],
+                    &sides[2],
+                    target,
+                    &[
+                        format!(
+                            "merged as text, {name} may be a vault, but murk cannot read it; murk never merges a vault as text"
+                        ),
+                        "merge it by hand: edit the file, which holds both sides between conflict markers, then git add it"
+                            .into(),
+                    ],
+                );
             }
             process::exit(0)
         }
@@ -837,4 +982,24 @@ fn structural_changes(
         }
     }
     changes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_read_back_refuses_a_file_that_is_not_a_vault() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("merged.murk");
+        assert!(!reads_back_as_vault(&path), "missing file");
+        let vault = include_str!("../../tests/fixtures/v0_13_rollback_staging.murk");
+        fs::write(&path, vault).unwrap();
+        assert!(reads_back_as_vault(&path));
+        let trailing = format!("{vault}x");
+        for corrupt in [&vault[..vault.len() / 2], "", &trailing] {
+            fs::write(&path, corrupt).unwrap();
+            assert!(!reads_back_as_vault(&path), "{corrupt:?}");
+        }
+    }
 }

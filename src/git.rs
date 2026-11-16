@@ -147,62 +147,219 @@ fn check_existing_driver() -> Result<(), String> {
     Err(lines.join("\n"))
 }
 
+/// Whether the lines setup adds may match `path`: `*.murk` and `.murk.*`
+/// have no slash, so git matches them against the file name at any depth,
+/// ignoring case when `core.ignorecase` is set. A path kept here that git
+/// does not match costs only a `check-attr` line.
+fn vault_pattern_matches(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).as_bytes();
+    let suffix = name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".murk");
+    let prefix = name.len() >= 6 && name[..6].eq_ignore_ascii_case(b".murk.");
+    suffix || prefix
+}
+
+/// A path that the attribute pattern `pattern` matches, or `None` for a
+/// negative, quoted or directory pattern. Wildcards become `x`, a bracket
+/// expression its first character.
+fn pattern_sample(pattern: &str) -> Option<String> {
+    if pattern.starts_with(['!', '"']) || pattern.ends_with('/') {
+        return None;
+    }
+    let pattern = pattern.trim_start_matches('/').replace("**/", "");
+    let mut path = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' | '?' => path.push('x'),
+            '\\' => path.extend(chars.next()),
+            '[' => {
+                let class: String = chars.by_ref().take_while(|&c| c != ']').collect();
+                path.extend(class.trim_start_matches(['!', '^']).chars().next());
+            }
+            c => path.push(c),
+        }
+    }
+    Some(path)
+}
+
+/// The attribute files whose lines the appended `merge=murk` lines could
+/// override, or that could override them: the root `.gitattributes`,
+/// `.git/info/attributes` and `core.attributesFile` (default
+/// `$XDG_CONFIG_HOME/git/attributes`). Files that do not exist are left out.
+fn attribute_files(root: &Path) -> Vec<PathBuf> {
+    let git = |args: &[&str]| {
+        git_command()
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim_end_matches(['\n', '\r'])
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+    };
+    let mut files = vec![root.join(".gitattributes")];
+    files.extend(git(&["rev-parse", "--git-path", "info/attributes"]).map(|p| root.join(p)));
+    let global = git(&["config", "--type=path", "--get", "core.attributesFile"])
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .map(|d| d.join("git").join("attributes"))
+        });
+    files.extend(global);
+    files
+}
+
+/// Paths to ask git about: one per line setup adds (`*.murk` matches
+/// `.murk`, `.murk.*` matches `.murk.x`), one per attribute line in
+/// [`attribute_files`] (so `prod.murk merge=custom` gives `prod.murk`), and
+/// every tracked file, each kept only when the lines setup adds match it.
+fn candidate_vault_paths(root: &Path) -> Vec<String> {
+    let mut paths = vec![".murk".to_string(), ".murk.x".to_string()];
+    for file in attribute_files(root) {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        paths.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("[attr]"))
+                .filter_map(|l| l.split_whitespace().next())
+                .filter_map(pattern_sample),
+        );
+    }
+    if let Ok(out) = git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+    {
+        paths.extend(
+            String::from_utf8_lossy(&out.stdout)
+                .split('\0')
+                .map(str::to_string),
+        );
+    }
+    let mut seen = BTreeSet::new();
+    paths.retain(|p| vault_pattern_matches(p) && seen.insert(p.clone()));
+    paths
+}
+
+/// Refuse to override a `merge` attribute that the attributes git reads here
+/// (`.gitattributes`, `.git/info/attributes`, `core.attributesFile`) already
+/// give a vault file: the lines setup appends would replace the user's
+/// choice, or, from `.git/info/attributes` or a subdirectory, would
+/// themselves be overridden. `merge=murk` and no `merge` attribute at all
+/// are fine.
+fn check_existing_attribute(root: &Path) -> Result<(), String> {
+    let paths = candidate_vault_paths(root);
+    let mut child = git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["check-attr", "-z", "--stdin", "merge"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("running git check-attr: {e}"))?;
+    let input: Vec<u8> = paths
+        .iter()
+        .flat_map(|p| [p.as_bytes(), b"\0"])
+        .flatten()
+        .copied()
+        .collect();
+    // A write error shows as git's failure below.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&input);
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("running git check-attr: {e}"))?;
+    if !out.status.success() {
+        let git_said =
+            crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true).into_owned();
+        return Err(format!(
+            "git check-attr failed: {git_said}\nmurk setup-merge-driver changed nothing"
+        ));
+    }
+    // `-z`: path NUL attribute NUL value NUL, for each path.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = stdout.split('\0').collect();
+    let others: Vec<String> = fields
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter_map(|f| {
+            let attribute = match f[2] {
+                "murk" | "unspecified" => return None,
+                "set" => "merge".to_string(),
+                "unset" => "-merge".to_string(),
+                value => format!("merge={value}"),
+            };
+            Some(crate::terminal_text(&format!("{} {attribute}", f[0]), false).into_owned())
+        })
+        .collect();
+    if others.is_empty() {
+        return Ok(());
+    }
+    Err([
+        format!(
+            "the git attributes here already give vault files a merge attribute murk did not write: {}",
+            others.join(", ")
+        ),
+        "murk setup-merge-driver changed nothing".into(),
+        "to use murk's driver, remove that attribute (from .gitattributes, a .gitattributes in a subdirectory, .git/info/attributes or core.attributesFile), then run murk setup-merge-driver again".into(),
+    ]
+    .join("\n"))
+}
+
 /// Configure git to use murk's custom merge driver for vault files.
 ///
-/// 1. Ensures the `.gitattributes` at the root of the working tree contains
+/// Refuses, writing nothing, outside a working tree, when git's working tree
+/// does not contain the current directory, when git config already sets a
+/// `merge.murk.driver` murk did not write, or when the attributes git reads
+/// already give vault files another `merge` attribute. Otherwise:
+///
+/// 1. Runs `git config merge.murk.name` and `git config merge.murk.driver`,
+///    replacing a driver line an older murk wrote. When this fails,
+///    `.gitattributes` is untouched.
+/// 2. Ensures the `.gitattributes` at the root of the working tree contains
 ///    `*.murk merge=murk` and `.murk.* merge=murk`, appending whichever is
-///    missing. Outside a working tree, or when git's working tree does not
-///    contain the current directory, it fails before writing anything.
-/// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`,
-///    replacing a driver line an older murk wrote.
+///    missing.
 pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
-    let mut steps = Vec::new();
-
-    // 1. Write .gitattributes entry, at the root of the working tree: a
-    // `.gitattributes` in a subdirectory only covers that subdirectory.
-    let gitattributes_path = working_tree_root()?.join(".gitattributes");
+    // The `.gitattributes` at the root of the working tree: one in a
+    // subdirectory only covers that subdirectory.
+    let root = working_tree_root()?;
+    let gitattributes_path = root.join(".gitattributes");
     let gitattributes = gitattributes_path.as_path();
-    // Before anything is written: never replace someone else's driver.
+    // Before anything is written: never replace someone else's driver or
+    // attribute.
     check_existing_driver()?;
+    check_existing_attribute(&root)?;
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
-
-    if gitattributes.exists() {
-        let contents = fs::read_to_string(gitattributes)
-            .map_err(|e| format!("reading .gitattributes: {e}"))?;
-        let missing: Vec<&str> = GITATTRIBUTES_LINES
-            .into_iter()
-            .filter(|line| !contents.lines().any(|l| l.trim() == *line))
-            .collect();
-        if missing.is_empty() {
-            steps.push(MergeDriverSetupStep::GitattributesAlreadyExists);
-        } else {
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(gitattributes)
-                .map_err(|e| format!("writing .gitattributes: {e}"))?;
-            // Never glue the first new line onto an unterminated last line.
-            let mut text = String::new();
-            if !contents.is_empty() && !contents.ends_with('\n') {
-                text.push('\n');
-            }
-            for line in missing {
-                text.push_str(line);
-                text.push('\n');
-            }
-            file.write_all(text.as_bytes())
-                .map_err(|e| format!("writing .gitattributes: {e}"))?;
-            steps.push(MergeDriverSetupStep::GitattributesAppended);
-        }
+    // Read what is there before git config changes, so a read error changes
+    // nothing.
+    let contents = if gitattributes.exists() {
+        Some(
+            fs::read_to_string(gitattributes)
+                .map_err(|e| format!("reading .gitattributes: {e}"))?,
+        )
     } else {
-        fs::write(gitattributes, GITATTRIBUTES_LINES.join("\n") + "\n")
-            .map_err(|e| format!("writing .gitattributes: {e}"))?;
-        steps.push(MergeDriverSetupStep::GitattributesCreated);
-    }
+        None
+    };
 
-    // 2. Configure git merge driver. `--` ends the options, so a vault named
-    // like a flag (`-h.murk`) reaches the driver as a path. Setting the key
-    // replaces a driver line an older murk wrote.
+    // 1. Configure git merge driver first: if git config fails, no attribute
+    // names a driver git does not have. `--` ends the options, so a vault
+    // named like a flag (`-h.murk`) reaches the driver as a path. Setting the
+    // key replaces a driver line an older murk wrote.
     let configs = [
         (GIT_CONFIG_MERGE_NAME, "murk vault merge"),
         (GIT_CONFIG_MERGE_DRIVER, MERGE_DRIVER_COMMAND),
@@ -217,14 +374,51 @@ pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
         if !out.status.success() {
             let git_said = crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true)
                 .into_owned();
-            return Err(format!("git config {key} failed: {git_said}"));
+            return Err(format!(
+                "git config {key} failed: {git_said}\n.gitattributes was not changed\nfix the error, then run murk setup-merge-driver again"
+            ));
         }
     }
-    steps.push(MergeDriverSetupStep::GitConfigured);
+
+    // 2. Write the .gitattributes entries.
+    let written_after_config = |e: std::io::Error| {
+        format!(
+            "writing .gitattributes: {e}\ngit config already names murk's merge driver, but .gitattributes may lack its lines\nfix the error, then run murk setup-merge-driver again"
+        )
+    };
+    let attributes_step = if let Some(contents) = contents {
+        let missing: Vec<&str> = GITATTRIBUTES_LINES
+            .into_iter()
+            .filter(|line| !contents.lines().any(|l| l.trim() == *line))
+            .collect();
+        if missing.is_empty() {
+            MergeDriverSetupStep::GitattributesAlreadyExists
+        } else {
+            // Never glue the first new line onto an unterminated last line.
+            let mut text = String::new();
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                text.push('\n');
+            }
+            for line in missing {
+                text.push_str(line);
+                text.push('\n');
+            }
+            fs::OpenOptions::new()
+                .append(true)
+                .open(gitattributes)
+                .and_then(|mut file| file.write_all(text.as_bytes()))
+                .map_err(written_after_config)?;
+            MergeDriverSetupStep::GitattributesAppended
+        }
+    } else {
+        fs::write(gitattributes, GITATTRIBUTES_LINES.join("\n") + "\n")
+            .map_err(written_after_config)?;
+        MergeDriverSetupStep::GitattributesCreated
+    };
 
     Ok(MergeDriverSetup {
         gitattributes: gitattributes_path,
-        steps,
+        steps: vec![attributes_step, MergeDriverSetupStep::GitConfigured],
     })
 }
 
