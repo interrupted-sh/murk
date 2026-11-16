@@ -200,21 +200,38 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "FISH_FUNCTION_PATH",
     "FISH_COMPLETE_PATH",
     "FISH_USER_PATHS",
-    // Interpreter and build hooks outside the prefix families: compilers that
-    // make and cargo build scripts run, Node's TLS switch and REPL module,
-    // irb/gem/PHP start-up files.
+    // Interpreter and build hooks outside the prefix families: compilers,
+    // linkers and flags that make and cargo build scripts use (a flag such as
+    // `-fplugin=` loads code), extra makefiles and make flags, Erlang/Elixir
+    // flags (`-eval` runs code) and code paths, Node's TLS switch and REPL
+    // module, irb/gem/PHP start-up files.
     "CC",
     "CXX",
+    "CPP",
+    "LD",
+    "AR",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "MAKEFILES",
+    "MAKEFLAGS",
+    "GNUMAKEFLAGS",
+    "ERL_AFLAGS",
+    "ERL_FLAGS",
+    "ERL_ZFLAGS",
+    "ERL_LIBS",
+    "ELIXIR_ERL_OPTIONS",
     "NODE_TLS_REJECT_UNAUTHORIZED",
     "NODE_REPL_EXTERNAL_MODULE",
     "IRBRC",
     "GEMRC",
     "PHPRC",
     "PHP_INI_SCAN_DIR",
-    // Where package managers download code from, and which toolchain they
-    // fetch. Exact names: `GO`, `UV_`, `YARN_` and `HOMEBREW_` prefixes would
-    // catch application secrets such as GOOGLE_API_KEY, YARN_NPM_AUTH_TOKEN or
-    // HOMEBREW_GITHUB_API_TOKEN.
+    // Where package managers download code from, which toolchain or
+    // interpreter they run, and which files they load. Exact names: `GO`,
+    // `UV_`, `YARN_` and `HOMEBREW_` prefixes would catch application secrets
+    // such as GOOGLE_API_KEY, YARN_NPM_AUTH_TOKEN or HOMEBREW_GITHUB_API_TOKEN.
     "GOPROXY",
     "GOSUMDB",
     "GONOSUMDB",
@@ -230,6 +247,22 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "UV_INSECURE_HOST",
     "UV_CONFIG_FILE",
     "UV_PYTHON_INSTALL_MIRROR",
+    "UV_PYPY_INSTALL_MIRROR",
+    "UV_GRAALPY_INSTALL_MIRROR",
+    "UV_PYODIDE_INSTALL_MIRROR",
+    "UV_PYTHON_DOWNLOADS_JSON_URL",
+    "UV_ASTRAL_MIRROR_URL",
+    "UV_DOWNLOAD_URL",
+    "UV_INSTALLER_GITHUB_BASE_URL",
+    "UV_INSTALLER_GHE_BASE_URL",
+    "UV_PYTHON",
+    "UV_PYTHON_DOWNLOADS",
+    "UV_PYTHON_PREFERENCE",
+    "UV_PYTHON_SEARCH_PATH",
+    "UV_PYTHON_INSTALL_DIR",
+    "UV_PYTHON_CACHE_DIR",
+    "UV_TOOL_DIR",
+    "UV_ENV_FILE",
     "YARN_YARN_PATH",
     "YARN_RC_FILENAME",
     "YARN_NPM_REGISTRY_SERVER",
@@ -281,6 +314,23 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "BROWSER",
     "SSH_ASKPASS",
     "SUDO_ASKPASS",
+    "SUDO_EDITOR",
+    "SYSTEMD_EDITOR",
+    // Windows: the home and profile directories (murk falls back to
+    // USERPROFILE for its key store and signer pins), the shell, executable
+    // extensions, system directories and PowerShell's module path. Except for
+    // PSMODULEPATH, `--clean-env` keeps these names on Windows.
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PATHEXT",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "PSMODULEPATH",
 ];
 
 /// Reserved name prefixes: the dynamic loader (`LD_`, `DYLD_`), git (every

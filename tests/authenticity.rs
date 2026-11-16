@@ -1575,6 +1575,131 @@ fn shell_hooks_and_tool_redirects_are_reserved() {
     }
 }
 
+/// Build flags and extra makefiles, Erlang flags, uv's interpreter and
+/// download settings, editors that sudo and systemctl run, and the Windows
+/// profile, shell and system names: each runs vault-chosen code or moves
+/// where a nested murk keeps its keys and signer pins. `murk add` warns, and
+/// export (shell and JSON), exec and agent exec refuse every one of them in
+/// any case unless `--allow-reserved` is passed. Ordinary secrets that share
+/// a stem stay exportable.
+#[test]
+fn build_tools_interpreters_and_windows_profile_names_are_reserved() {
+    const RESERVED: &[&str] = &[
+        "MAKEFILES",
+        "MAKEFLAGS",
+        "GNUMAKEFLAGS",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "LD",
+        "AR",
+        "CPP",
+        "ERL_AFLAGS",
+        "ERL_FLAGS",
+        "ERL_ZFLAGS",
+        "ERL_LIBS",
+        "ELIXIR_ERL_OPTIONS",
+        "UV_PYTHON",
+        "UV_PYTHON_DOWNLOADS",
+        "UV_PYTHON_DOWNLOADS_JSON_URL",
+        "UV_PYTHON_INSTALL_DIR",
+        "UV_PYTHON_SEARCH_PATH",
+        "UV_PYPY_INSTALL_MIRROR",
+        "UV_ASTRAL_MIRROR_URL",
+        "UV_TOOL_DIR",
+        "UV_ENV_FILE",
+        "SUDO_EDITOR",
+        "SYSTEMD_EDITOR",
+        "UserProfile",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LocalAppData",
+        "PATHEXT",
+        "ComSpec",
+        "SystemRoot",
+        "windir",
+        "PSModulePath",
+    ];
+    const ORDINARY: &[&str] = &[
+        "LDAP_PASSWORD",
+        "ERLANG_COOKIE",
+        "SUDO_PASSWORD",
+        "UV_THREADPOOL_SIZE",
+        "MAKE_API_KEY",
+        "USER_PROFILE_URL",
+    ];
+    let base = TempDir::new().unwrap();
+    let (alice, repo) = alice_repo(base.path());
+    for name in RESERVED {
+        alice
+            .murk(&repo)
+            .args(["add", name])
+            .write_stdin("-eval os:cmd(\"touch pwned\")\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("reserved environment name"));
+    }
+
+    let mut agent_exec = vec!["agent", "exec", "--allow-operator-key"];
+    for name in RESERVED {
+        agent_exec.extend(["--only", name]);
+    }
+    agent_exec.extend(["--", "true"]);
+    for args in [
+        &["export"][..],
+        &["export", "--json"][..],
+        &["exec", "--", "true"][..],
+        &agent_exec[..],
+    ] {
+        let out = alice.murk(&repo).args(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?} accepted reserved names");
+        assert!(out.stdout.is_empty(), "{args:?} printed before refusing");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        let refused: Vec<&str> = stderr
+            .split_once("refusing to set ")
+            .and_then(|(_, rest)| rest.split_once(" from the vault"))
+            .map(|(names, _)| names.split(", ").collect())
+            .unwrap_or_default();
+        for name in RESERVED {
+            assert!(
+                refused.contains(name),
+                "{args:?} did not name {name}: {stderr}"
+            );
+        }
+    }
+
+    let out = alice
+        .murk(&repo)
+        .args(["export", "--allow-reserved"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for name in RESERVED {
+        assert!(stdout.contains(&format!("export {name}=")), "{stdout}");
+    }
+
+    let base = TempDir::new().unwrap();
+    let (alice, repo) = alice_repo(base.path());
+    for name in ORDINARY {
+        alice
+            .murk(&repo)
+            .args(["add", name])
+            .write_stdin("value\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("reserved").not());
+    }
+    let out = alice.murk(&repo).arg("export").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for name in ORDINARY {
+        assert!(stdout.contains(&format!("export {name}=")), "{stdout}");
+    }
+}
+
 /// MURK_* names are reserved too: a vault must not switch off a nested
 /// murk's strict mode or choose its trusted signers.
 #[test]
