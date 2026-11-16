@@ -1,6 +1,8 @@
 # Zig toolchain used by cargo-zigbuild for the musl cross-compile job in
-# .github/workflows/node.yaml. Installed with --require-hashes so the wheel is
-# verified before it runs in CI.
+# .github/workflows/node.yaml and the x86_64 Linux release build
+# (.github/workflows/release.yaml, and its reproducible-build check in
+# ci.yaml). Installed with --require-hashes so the wheel is verified before it
+# runs in CI.
 #
 # Regenerate after a version bump (both Linux runner architectures):
 #   curl -s https://pypi.org/pypi/ziglang/<version>/json \
