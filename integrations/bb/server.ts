@@ -35,6 +35,7 @@ const PRIMARY_HOST_TTL_MS = 60_000;
 
 const TOOL_IDS = ["murk_plan", "murk_get"];
 const SKILL_IDS = ["murk"];
+const REVOKE_USAGE = "usage: bb murk grant revoke [--forget] <grantId>";
 
 interface ThreadTarget {
   worktree: string;
@@ -488,10 +489,14 @@ export default async function plugin(bb: BbPluginApi) {
         const rest = argv.slice(2);
         if ((sub === "mint" || sub === "revoke") && ctx.threadId) return refuseFromThread(sub, ctx.threadId);
         if (sub === "mint") return await cliMint(rest, ctx.cwd, ctx.projectId);
-        if (sub === "list") return await cliList(rest.includes("--all"));
+        if (sub === "list") return await cliList(rest.includes("--all"), Boolean(ctx.threadId));
         if (sub === "revoke") {
-          const forget = rest.includes("--forget");
-          return await cliRevoke(rest.filter((arg) => arg !== "--forget")[0], forget);
+          const forget = rest[0] === "--forget" || rest[1] === "--forget";
+          const ids = rest.filter((arg) => arg !== "--forget");
+          if (rest.length !== (forget ? 2 : 1) || ids.length !== 1 || ids[0].startsWith("-")) {
+            return { exitCode: 1, stderr: REVOKE_USAGE };
+          }
+          return await serializedRevoke(ids[0], () => cliRevoke(ids[0], forget));
         }
         return { exitCode: 1, stderr: "usage: bb murk grant <mint|list|revoke> …" };
       } catch (error) {
@@ -654,8 +659,17 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function cliList(includeRevoked: boolean): Promise<{ exitCode: number; stdout: string }> {
-    const grants = store.list({ includeRevoked });
+  /**
+   * `fromThread`: the call came from a bb thread. A thread does not see
+   * REVOKE-PENDING or FORGOTTEN grants: both may still be live in the vault,
+   * and that tells an agent a copied key still reads it. Not a security
+   * boundary: like the mint and revoke refusal, it keys on the thread id the
+   * bb CLI reports.
+   */
+  async function cliList(includeRevoked: boolean, fromThread: boolean): Promise<{ exitCode: number; stdout: string }> {
+    const grants = store
+      .list({ includeRevoked })
+      .filter((grant) => !fromThread || grant.revokedAt || (!grant.revokePendingAt && !grant.forgottenAt));
     if (grants.length === 0) return { exitCode: 0, stdout: "no grants" };
     const lines = grants.map((grant) => {
       const scope = scopeLabel(grant);
@@ -674,11 +688,24 @@ export default async function plugin(bb: BbPluginApi) {
     return { exitCode: 0, stdout: lines.join("\n") };
   }
 
-  async function cliRevoke(
-    id: string | undefined,
-    forget = false,
-  ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
-    if (!id) return { exitCode: 1, stderr: "usage: bb murk grant revoke [--forget] <grantId>" };
+  /**
+   * Runs one revoke of grant `id` at a time. Without this, two concurrent
+   * revokes both run murk; the second finds the grant already gone and
+   * reports that it may still be live in the vault.
+   */
+  const revokesInFlight = new Map<string, Promise<unknown>>();
+  async function serializedRevoke<T>(id: string, run: () => Promise<T>): Promise<T> {
+    const result = (revokesInFlight.get(id) ?? Promise.resolve()).then(run, run);
+    const settled = result.catch(() => {});
+    revokesInFlight.set(id, settled);
+    try {
+      return await result;
+    } finally {
+      if (revokesInFlight.get(id) === settled) revokesInFlight.delete(id);
+    }
+  }
+
+  async function cliRevoke(id: string, forget: boolean): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
     const grant = store.get(id);
     if (!grant) return { exitCode: 1, stderr: `murk: no grant ${id}` };
     if (grant.revokedAt) return { exitCode: 0, stdout: `grant ${id} is already revoked` };
@@ -696,9 +723,10 @@ export default async function plugin(bb: BbPluginApi) {
       // file is gone for good, or you removed the grant from the vault
       // yourself. Never for an active grant: revoke that first.
       if (!grant.revokePendingAt && existsSync(grant.vaultPath)) {
+        const state = isExpired(grant.expiresAt) ? "has expired but is not revoked" : "is active";
         return {
           exitCode: 1,
-          stderr: `murk: grant ${id} is active and its vault exists; run bb murk grant revoke ${id} without --forget`,
+          stderr: `murk: grant ${id} ${state}, and its vault exists; run bb murk grant revoke ${id} without --forget`,
         };
       }
       rmSync(grant.keyPath, { force: true });

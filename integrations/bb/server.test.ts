@@ -756,9 +756,49 @@ describe("grant changes from a thread", () => {
     expect(revoked.exitCode, revoked.stderr).toBe(0);
   });
 
-  it("still lists grants for a thread: the list holds no values", async () => {
-    const result = await host.harness.behavior.runCli(["grant", "list"], { threadId: THREAD_ID });
-    expect(result.exitCode).toBe(0);
+  it("lists grants for a thread without the pending or forgotten ones, which may still be live in the vault", async () => {
+    const run = (argv: string[], ctx: Record<string, unknown> = {}) => host.harness.behavior.runCli(argv, ctx as never);
+    const mintOne = async () => {
+      const mint = await run(["grant", "mint", "--keys", "TEST_API_KEY", "--ttl", "1h"], { cwd: worktree, projectId: PROJECT_ID });
+      expect(mint.exitCode, mint.stderr).toBe(0);
+      return mint.stdout.match(/minted grant (g[0-9a-f]{8})/)![1];
+    };
+    const active = await mintOne();
+    const pending = await mintOne();
+    const forgotten = await mintOne();
+    await host.harness.behavior.setSettings({ keyFile: path.join(tmpRoot, "moved-away.key") });
+    try {
+      expect((await run(["grant", "revoke", pending])).exitCode).toBe(1);
+    } finally {
+      await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    }
+    // Forgotten without a failed revoke first: its vault file was gone.
+    const vaultFile = path.join(worktree, ".murk");
+    const vault = readFileSync(vaultFile);
+    rmSync(vaultFile);
+    try {
+      expect((await run(["grant", "revoke", "--forget", forgotten])).exitCode).toBe(0);
+    } finally {
+      writeFileSync(vaultFile, vault);
+    }
+
+    for (const args of [["grant", "list"], ["grant", "list", "--all"]]) {
+      const operator = await run(args);
+      expect(operator.stdout).toMatch(new RegExp(`^${pending}  REVOKE-PENDING  `, "m"));
+      expect(operator.stdout).toMatch(new RegExp(`^${forgotten}  FORGOTTEN \\(vault not revoked\\)  `, "m"));
+
+      const thread = await run(args, { threadId: THREAD_ID });
+      expect(thread.exitCode).toBe(0);
+      expect(thread.stdout).toMatch(new RegExp(`^${active}  active  `, "m"));
+      for (const hidden of [pending, forgotten, "REVOKE-PENDING", "FORGOTTEN"]) {
+        expect(thread.stdout, args.join(" ")).not.toContain(hidden);
+      }
+    }
+
+    for (const id of [active, pending, forgotten]) {
+      const revoked = await run(["grant", "revoke", id]);
+      expect(revoked.exitCode, revoked.stderr).toBe(0);
+    }
   });
 });
 
