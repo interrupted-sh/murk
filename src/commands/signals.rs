@@ -11,9 +11,12 @@
 //! knows the child's pid.
 //!
 //! A child that leads its own group and holds the terminal (the editor, or
-//! on macOS agent exec's command when murk is a foreground job, see
-//! `foreground_job`) gets the terminal's keys alone, so whatever reaches
-//! murk is forwarded, and the child gets each signal once. A child sharing murk's
+//! on macOS agent exec's command when murk is alone in a foreground job,
+//! see `foreground_job`) gets the terminal's keys alone, so whatever
+//! reaches murk is forwarded, and the child gets each signal once. Being
+//! outside the job's group, such a child also outlives a `kill -9 %1` that
+//! the shell sends the job (agent exec does this on macOS only). A child
+//! sharing murk's
 //! process group already got what the terminal sends that group, so on
 //! Linux a signal the terminal generated while that group holds the
 //! terminal (or as its session leader exits) is not forwarded to it again.
@@ -339,20 +342,47 @@ pub(crate) fn wait_exited(pid: u32, job: Option<libc::c_int>) {
     CHILD.store(0, Ordering::SeqCst);
 }
 
-/// murk's terminal, if murk is a foreground job there: it leads its process
-/// group (a shell's job, or the session), and that group holds the
-/// terminal. A child murk runs can then lead a group of its own and take
-/// the terminal, so a key like Ctrl-C reaches the child alone, once. Used on
-/// macOS only, where murk cannot tell a terminal key from a `kill`.
+/// murk's terminal, if murk is a foreground job there alone: it leads its
+/// process group (a shell's job, or the session), no other process is in
+/// that group, the group holds the terminal, and stdin, stdout and stderr
+/// are all that terminal. A child murk runs can then lead a group of its
+/// own and take the terminal, so a key like Ctrl-C reaches the child alone,
+/// once. Used on macOS only, where murk cannot tell a terminal key from a
+/// `kill`.
 ///
-/// Not when murk shares its group with its parent (a script): taking the
-/// terminal from that group would keep a Ctrl-C from the script.
+/// In any doubtful case murk keeps the terminal, because another process
+/// may need the job's access to it: murk shares its group with its parent
+/// (a script, which would no longer get Ctrl-C), or murk is part of a
+/// pipeline (`murk agent exec -- app | less`, whose reader would be stopped
+/// for reading a terminal its group no longer holds). A pipeline member
+/// always has stdin or stdout on a pipe, so the fd check catches it even if
+/// the shell has not started the other members yet; the group check
+/// catches one whose standard streams were all redirected to the terminal.
 #[cfg(target_os = "macos")]
 pub(crate) fn foreground_job() -> Option<libc::c_int> {
     let tty = TTY.load(Ordering::SeqCst);
-    // SAFETY: plain syscalls on this process.
-    let leads_group = unsafe { libc::getpgrp() == libc::getpid() };
-    (tty >= 0 && leads_group && in_foreground(tty)).then_some(tty)
+    // `tcgetpgrp` fails on anything but murk's controlling terminal, so
+    // this holds only if stdin, stdout and stderr are all that terminal and
+    // murk's group holds it.
+    let all_terminal = [0, 1, 2].into_iter().all(in_foreground);
+    (tty >= 0 && all_terminal && alone_in_group()).then_some(tty)
+}
+
+/// Whether murk leads its process group and is its only member.
+#[cfg(target_os = "macos")]
+fn alone_in_group() -> bool {
+    // SAFETY: plain syscalls; proc_listpgrppids writes at most `size` bytes
+    // into `pids` and returns how many pids it wrote.
+    unsafe {
+        let me = libc::getpid();
+        if libc::getpgrp() != me {
+            return false;
+        }
+        let mut pids: [libc::pid_t; 4] = [0; 4];
+        let size = std::mem::size_of_val(&pids) as libc::c_int;
+        let n = libc::proc_listpgrppids(me, pids.as_mut_ptr().cast(), size);
+        n == 1 && pids[0] == me
+    }
 }
 
 /// The child group `pgid`, murk's job, stopped (Ctrl-Z): take the terminal
