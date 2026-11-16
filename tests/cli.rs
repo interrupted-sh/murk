@@ -3186,11 +3186,19 @@ fn prompted_writes_refuse_a_vault_changed_on_disk_while_waiting() {
             .spawn()
             .unwrap();
         wait_for_vault_lock(&vault);
-        // What a pull brings in: here, any other bytes.
+        // What a pull brings in: here, any other bytes. git replaces the
+        // file, so the child reads the old or the new bytes, never a
+        // truncated file; `fs::write` here could hand it an empty vault.
         let mut pulled = fs::read(&vault).unwrap();
         pulled.push(b'\n');
-        fs::write(&vault, &pulled).unwrap();
-        child.stdin.take().unwrap().write_all(b"s1\n").unwrap();
+        let staged = dir.path().join("pulled.tmp");
+        fs::write(&staged, &pulled).unwrap();
+        fs::rename(&staged, &vault).unwrap();
+        // If the child exits before it reads the value, the write fails with
+        // a broken pipe. The assertions below still require the refusal.
+        if let Err(e) = child.stdin.take().unwrap().write_all(b"s1\n") {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{args:?}: {e}");
+        }
         let out = child.wait_with_output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
