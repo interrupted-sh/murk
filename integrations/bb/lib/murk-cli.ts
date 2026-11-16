@@ -82,15 +82,32 @@ export function runMurk(
   return promise;
 }
 
-/** Lines murk writes into every grant key file (`src/agents.rs`), never into an operator key. */
+/**
+ * Lines murk writes only into grant key files (`src/agents.rs`): the grant id,
+ * and the trusted signers the grant checks the vault against. murk reads
+ * trusted-signer lines only from a grant key, so an operator key file has no
+ * use for one, and a file that has one is refused too.
+ */
 const GRANT_KEY_MARKERS = ["# murk-grant-id:", "# murk-trusted-signer:"];
 
-function isGrantKeyText(text: string): boolean {
-  return text.split(/\r?\n/).some((line) => GRANT_KEY_MARKERS.some((marker) => line.trim().startsWith(marker)));
+/** The grant key marker that starts a line of `text` (murk trims each line), or null. */
+function grantKeyMarker(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const marker = GRANT_KEY_MARKERS.find((m) => line.trim().startsWith(m));
+    if (marker) return marker;
+  }
+  return null;
 }
 
-function grantKeyRefusal(source: string): Error {
-  return new Error(`the operator key must be a full recipient key, not an agent grant: ${source} names a grant key`);
+/** Throws when `text` has a grant key line. `source` names where the key came from. */
+function refuseGrantKey(text: string, source: string): void {
+  const marker = grantKeyMarker(text);
+  if (marker) {
+    throw new Error(
+      `the operator key must be a full recipient key, not an agent grant: ${source} names a grant key ` +
+        `(it has a ${marker} line, which murk writes only into grant key files)`,
+    );
+  }
 }
 
 /**
@@ -100,22 +117,21 @@ function grantKeyRefusal(source: string): Error {
  * key murk stored for the vault (see `runMurk`). The vault's .env is never
  * read: it sits in a worktree that an agent can edit.
  *
- * A key file with grant key lines is refused, a common mistake that would
- * only fail later. This is a guard, not a guarantee: murk also accepts a bare
- * grant key with no such lines.
+ * A key file with a grant key line is refused, a common mistake that would
+ * only fail later. This is a guard, not a guarantee: it does not detect a
+ * grant key with neither line, such as a bare AGE-SECRET-KEY-1 line copied
+ * out of a grant key file.
  */
 export function resolveOperatorKey(setting: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const keyFile = setting.trim();
   if (keyFile) {
     if (!path.isAbsolute(keyFile)) throw new Error(`the keyFile setting must be an absolute path, got ${keyFile}`);
     if (!existsSync(keyFile)) throw new Error(`the keyFile setting points at ${keyFile}, which does not exist`);
-    if (isGrantKeyText(readKeyText(keyFile))) throw grantKeyRefusal("the keyFile setting");
+    refuseGrantKey(readKeyText(keyFile), "the keyFile setting");
     return keyFile;
   }
-  if (env.MURK_KEY && isGrantKeyText(env.MURK_KEY)) throw grantKeyRefusal("MURK_KEY on the bb server");
-  if (env.MURK_KEY_FILE && isGrantKeyText(readKeyText(env.MURK_KEY_FILE))) {
-    throw grantKeyRefusal("MURK_KEY_FILE on the bb server");
-  }
+  if (env.MURK_KEY) refuseGrantKey(env.MURK_KEY, "MURK_KEY on the bb server");
+  if (env.MURK_KEY_FILE) refuseGrantKey(readKeyText(env.MURK_KEY_FILE), "MURK_KEY_FILE on the bb server");
   return null;
 }
 
