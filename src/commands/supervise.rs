@@ -15,18 +15,23 @@
 //! - **murk waits for both streams to close**, not only for the child to exit.
 //!   A background process that keeps the pipes open keeps murk running; its
 //!   output is masked too.
-//! - **Signals.** On macOS, when murk is a foreground job on its terminal (it
-//!   leads its process group, as under an interactive shell), the child gets
-//!   a process group of its own and murk makes it the terminal's foreground
-//!   group, as a shell does with a job. A key the terminal turns into a
-//!   signal (Ctrl-C, Ctrl-\) then reaches the child alone, once. Ctrl-Z stops
-//!   the child; murk then takes the terminal back and stops itself, so the
-//!   shell sees the job stop, and resumes the child when it resumes.
-//!   Otherwise (Linux, or on macOS no terminal, murk in the background, or
-//!   murk sharing its parent's group, as under a script) the child stays in
-//!   murk's group, so both get what the terminal sends that group. Linux
-//!   tells such a signal apart and does not forward it again. macOS cannot,
-//!   so there the child gets it twice (see `signals`). Either way, SIGINT,
+//! - **Signals.** On macOS, when murk is alone in a foreground job on its
+//!   terminal (it leads its process group and no other process is in it,
+//!   and stdin, stdout and stderr are all the terminal, as for a plain
+//!   command at an interactive prompt), the child gets a process group of
+//!   its own and murk makes it the terminal's foreground group, as a shell
+//!   does with a job. A key the terminal turns into a signal (Ctrl-C,
+//!   Ctrl-\) then reaches the child alone, once. Ctrl-Z stops the child;
+//!   murk then takes the terminal back and stops itself, so the shell sees
+//!   the job stop, and resumes the child when it resumes. Because the child
+//!   leaves the job's group, a `kill -9 %1` from the shell kills murk only
+//!   and leaves the child running.
+//!   Otherwise (Linux; or on macOS no terminal, murk in the background, in a
+//!   pipeline, with a stream redirected, or sharing its parent's group, as
+//!   under a script) the child stays in murk's group, so both get what the
+//!   terminal sends that group. Linux tells such a signal apart and does
+//!   not forward it again. macOS cannot, so there the child gets it twice
+//!   (see `signals`). Either way, SIGINT,
 //!   SIGTERM, SIGHUP and SIGQUIT sent to murk by another process
 //!   (`kill <pid>`, a harness timeout, `docker stop` when murk is a
 //!   container's PID 1) are forwarded to the child, or to its whole group

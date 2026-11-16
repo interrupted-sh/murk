@@ -4,7 +4,9 @@
 //! `murk agent exec` under a real controlling terminal. Every signal must
 //! reach the app exactly once, on Linux and on macOS: a key the terminal
 //! turns into a signal (Ctrl-C, Ctrl-\), a signal another process sends
-//! murk, and a hangup. Job control (Ctrl-Z, then `fg`) must keep working.
+//! murk, and a hangup. Job control (Ctrl-Z, then `fg`) must keep working,
+//! and in a pipeline the other commands must keep their access to the
+//! terminal.
 //!
 //! The app is this test binary, run as the `app_helper` test: it logs every
 //! signal it gets, one line each, as soon as it gets it. A shell would merge
@@ -16,7 +18,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use assert_fs::TempDir;
@@ -136,10 +140,7 @@ fn shell_helper() {
         _ => Shell::Stays,
     };
     let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .env_remove(SHELL_VAR)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.args(&argv[1..]).env_remove(SHELL_VAR);
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -237,12 +238,31 @@ fn murk_argv() -> Vec<String> {
     .to_vec()
 }
 
+/// The master side of a pseudo-terminal. A thread reads and discards what
+/// the processes on it write, so a writer never blocks on a full buffer
+/// and, on macOS, a session leader's exit never waits for its output to
+/// drain. Dropping it hangs the terminal up.
+struct Pty {
+    master: OwnedFd,
+    stop: Arc<AtomicBool>,
+    drain: Option<JoinHandle<()>>,
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(drain) = self.drain.take() {
+            drain.join().unwrap();
+        }
+    }
+}
+
 /// A new pseudo-terminal: (master, slave).
-fn open_pty() -> (OwnedFd, OwnedFd) {
+fn open_pty() -> (Pty, OwnedFd) {
     // ptsname returns a shared buffer, and tests run on several threads.
     static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // SAFETY: plain libc calls; each returned fd is checked and owned once.
-    unsafe {
+    let (master, slave) = unsafe {
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
         assert!(master >= 0, "posix_openpt failed");
         let master = OwnedFd::from_raw_fd(master);
@@ -258,18 +278,50 @@ fn open_pty() -> (OwnedFd, OwnedFd) {
         let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
         drop(guard);
         assert!(slave >= 0, "opening the pty slave failed");
-        // No echo: nobody reads the master, and on macOS a session leader's
-        // exit waits for unread terminal output to drain.
+        // No echo: keys typed for a reader stay out of the output.
         let mut termios: libc::termios = std::mem::zeroed();
         assert_eq!(libc::tcgetattr(slave, &raw mut termios), 0);
         termios.c_lflag &= !(libc::ECHO | libc::ECHOCTL);
         assert_eq!(libc::tcsetattr(slave, libc::TCSANOW, &raw const termios), 0);
         (master, OwnedFd::from_raw_fd(slave))
-    }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let fd = master.as_raw_fd();
+    let drain = {
+        let stop = Arc::clone(&stop);
+        // The fd stays open until `Pty::drop` has joined this thread.
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while !stop.load(Ordering::SeqCst) {
+                let mut poll = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: poll and read on a live fd into live buffers.
+                unsafe {
+                    if libc::poll(&raw mut poll, 1, 50) > 0
+                        && libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) <= 0
+                    {
+                        // Every slave fd is closed (EIO on Linux, EOF on
+                        // macOS): nothing is left to drain.
+                        break;
+                    }
+                }
+            }
+        })
+    };
+    let pty = Pty {
+        master,
+        stop,
+        drain: Some(drain),
+    };
+    (pty, slave)
 }
 
 /// Run `program args` as the leader of a new session whose controlling
-/// terminal is `slave` (its stdin), in `dir`, with the grant key and HOME set.
+/// terminal is `slave` (its stdin, stdout and stderr), in `dir`, with the
+/// grant key and HOME set.
 fn spawn_in_session(cmd: &mut Command, dir: &TempDir, key: &str, slave: &OwnedFd) -> Child {
     for var in MURK_CONTEXT_VARS {
         cmd.env_remove(var);
@@ -280,8 +332,8 @@ fn spawn_in_session(cmd: &mut Command, dir: &TempDir, key: &str, slave: &OwnedFd
         .env("TERM", APP_TERM)
         .env("MURK_KEY", key)
         .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -295,7 +347,7 @@ fn spawn_in_session(cmd: &mut Command, dir: &TempDir, key: &str, slave: &OwnedFd
 }
 
 /// murk as the session leader on a fresh terminal, running the app.
-fn spawn_murk_on_terminal(dir: &TempDir, key: &str) -> (Child, OwnedFd) {
+fn spawn_murk_on_terminal(dir: &TempDir, key: &str) -> (Child, Pty) {
     let (master, slave) = open_pty();
     let argv = murk_argv();
     let mut cmd = Command::new(&argv[0]);
@@ -308,11 +360,45 @@ fn spawn_murk_on_terminal(dir: &TempDir, key: &str) -> (Child, OwnedFd) {
 /// murk as the foreground job of [`shell_helper`] on a fresh terminal,
 /// running the app: (shell, master, slave). The caller keeps the slave open
 /// or drops it.
-fn spawn_murk_under_shell(dir: &TempDir, key: &str, mode: Shell) -> (Child, OwnedFd, OwnedFd) {
+fn spawn_murk_under_shell(dir: &TempDir, key: &str, mode: Shell) -> (Child, Pty, OwnedFd) {
     let (master, slave) = open_pty();
     let mut cmd = shell_command(dir, mode);
     let shell = spawn_in_session(&mut cmd, dir, key, &slave);
     (shell, master, slave)
+}
+
+/// `script` run by `shell` (`bash` or `zsh`) with job control on, as at an
+/// interactive prompt, as the session leader on a fresh terminal: (shell,
+/// master, slave). `{murk}` in the script stands for murk running the app.
+/// None if `shell` is not installed. zsh hands the terminal to a job only
+/// when interactive (`-i`); bash does with `set -m`.
+fn spawn_shell_script(
+    dir: &TempDir,
+    key: &str,
+    shell: &str,
+    script: &str,
+) -> Option<(Child, Pty, OwnedFd)> {
+    let installed = Command::new(shell)
+        .args(["-c", "exit 0"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !installed {
+        eprintln!("{shell} is not installed; skipped");
+        return None;
+    }
+    let murk: Vec<String> = murk_argv()
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', r"'\''")))
+        .collect();
+    let script = script.replace("{murk}", &murk.join(" "));
+    let (master, slave) = open_pty();
+    let mut cmd = Command::new(shell);
+    match shell {
+        "zsh" => cmd.args(["-f", "-i", "-c", &script]),
+        _ => cmd.args(["--norc", "--noprofile", "-c", &format!("set -m\n{script}")]),
+    };
+    let child = spawn_in_session(&mut cmd, dir, key, &slave);
+    Some((child, master, slave))
 }
 
 /// [`shell_helper`] running murk in `mode`, as a command.
@@ -358,13 +444,27 @@ fn wait_exit(child: &mut Child) {
 }
 
 /// Type `keys` at the terminal, one at a time.
-fn type_keys(master: &OwnedFd, keys: &[u8]) {
+fn type_keys(pty: &Pty, keys: &[u8]) {
     for key in keys {
         // SAFETY: writes one byte from a live buffer to the pty master.
-        let written = unsafe { libc::write(master.as_raw_fd(), std::ptr::from_ref(key).cast(), 1) };
+        let written =
+            unsafe { libc::write(pty.master.as_raw_fd(), std::ptr::from_ref(key).cast(), 1) };
         assert_eq!(written, 1);
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// The contents of `path` once it exists, or None after `limit`.
+fn read_within(path: &Path, limit: Duration) -> Option<String> {
+    let deadline = Instant::now() + limit;
+    while !path.exists() {
+        if Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    Some(fs::read_to_string(path).unwrap())
 }
 
 /// Send each of `signals` to `pid`, one at a time.
@@ -498,4 +598,85 @@ fn a_hangup_when_the_session_leader_exits_reaches_the_app_once() {
     drop(slave);
     assert!(shell.wait().unwrap().success());
     assert_eq!(signals_after_settling(&dir), "HUP\n");
+}
+
+/// `murk agent exec -- app | reader` at an interactive prompt, where the
+/// reader reads the terminal (as `less` or a prompt does). murk shares its
+/// job's process group with the reader, so it must leave the terminal to
+/// that group: the reader must not be stopped, and the keys typed for it
+/// must reach it.
+fn a_pipeline_reader_gets_the_terminal(shell: &str) {
+    let dir = TempDir::new().unwrap();
+    let key = grant_vault(&dir);
+    let script = r#"{murk} | sh -c 'read x </dev/tty; echo "got=$x" >"$HOME/reader"'
+echo $? >"$HOME/status""#;
+    let Some((mut shell, pty, _slave)) = spawn_shell_script(&dir, &key, shell, script) else {
+        return;
+    };
+    wait_for(&dir.path().join("ready"), "the app starting");
+    std::thread::sleep(Duration::from_millis(300));
+    // Not `type_keys`: if the reader was stopped, the shell may have exited
+    // and hung up the terminal, and the assertions below say what happened.
+    // SAFETY: writes from a live buffer to the pty master.
+    unsafe {
+        libc::write(pty.master.as_raw_fd(), b"typed\n".as_ptr().cast(), 6);
+    }
+    let reader = read_within(&dir.path().join("reader"), Duration::from_secs(5));
+    fs::write(dir.path().join("stop"), "").unwrap();
+    wait_exit(&mut shell);
+    assert_eq!(
+        reader.as_deref(),
+        Some("got=typed\n"),
+        "what the reader got"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("status")).unwrap(),
+        "0\n",
+        "pipeline status (148 to 150: stopped)"
+    );
+    assert_eq!(app_group(&dir), "murk's");
+}
+
+/// `murk agent exec -- app | cat` at an interactive prompt: the pipeline
+/// runs to the end, never stopped, and `cat` gets the app's output.
+fn a_pipeline_to_cat_runs_through(shell: &str) {
+    let dir = TempDir::new().unwrap();
+    let key = grant_vault(&dir);
+    let script = r#"{murk} | cat >"$HOME/cat-out"
+echo $? >"$HOME/status""#;
+    let Some((mut shell, _pty, _slave)) = spawn_shell_script(&dir, &key, shell, script) else {
+        return;
+    };
+    wait_for(&dir.path().join("ready"), "the app starting");
+    std::thread::sleep(Duration::from_millis(300));
+    fs::write(dir.path().join("stop"), "").unwrap();
+    wait_exit(&mut shell);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("status")).unwrap(),
+        "0\n",
+        "pipeline status (148 to 150: stopped)"
+    );
+    let out = fs::read_to_string(dir.path().join("cat-out")).unwrap();
+    assert!(out.contains("app_helper"), "cat got: {out:?}");
+    assert_eq!(app_group(&dir), "murk's");
+}
+
+#[test]
+fn a_pipeline_reader_gets_the_terminal_under_bash() {
+    a_pipeline_reader_gets_the_terminal("bash");
+}
+
+#[test]
+fn a_pipeline_reader_gets_the_terminal_under_zsh() {
+    a_pipeline_reader_gets_the_terminal("zsh");
+}
+
+#[test]
+fn a_pipeline_to_cat_runs_through_under_bash() {
+    a_pipeline_to_cat_runs_through("bash");
+}
+
+#[test]
+fn a_pipeline_to_cat_runs_through_under_zsh() {
+    a_pipeline_to_cat_runs_through("zsh");
 }
