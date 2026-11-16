@@ -5434,6 +5434,43 @@ fn setup_merge_driver_judges_attribute_patterns_by_what_they_could_match() {
 }
 
 #[test]
+fn setup_merge_driver_follows_gits_case_rules_for_classes() {
+    // With core.ignorecase=false git matches case-sensitively, so `[!M]`
+    // matches `m`; with it, refusing is the safe side. `.[!m]urk` cannot
+    // match `.murk` in either mode.
+    for ignorecase in ["false", "true"] {
+        for line in [
+            ".[!M]urk merge=custom",
+            ".[^M]urk merge=custom",
+            ".[!A-Z]urk merge=custom",
+            ".[!M]urk.prod merge=custom",
+            ".[a-z]urk merge=custom",
+        ] {
+            let dir = TempDir::new().unwrap();
+            git_ok(dir.path(), &["init", "-q"]);
+            git_ok(dir.path(), &["config", "core.ignorecase", ignorecase]);
+            let attributes = format!("{line}\n");
+            fs::write(dir.path().join(".gitattributes"), &attributes).unwrap();
+            assert_setup_refuses_attribute(dir.path(), &[&format!(".gitattributes:1: {line}")]);
+            assert_eq!(
+                fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+                attributes,
+                "{line} (ignorecase={ignorecase})"
+            );
+        }
+        let dir = TempDir::new().unwrap();
+        git_ok(dir.path(), &["init", "-q"]);
+        git_ok(dir.path(), &["config", "core.ignorecase", ignorecase]);
+        fs::write(dir.path().join(".gitattributes"), ".[!m]urk merge=custom\n").unwrap();
+        murk_bin(dir.path())
+            .args(["setup-merge-driver"])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+}
+
+#[test]
 fn setup_merge_driver_finishes_quickly_in_a_large_repository() {
     // 20000 tracked vault-named paths, more than a pipe holds: setup must
     // not do per-path work that can block.

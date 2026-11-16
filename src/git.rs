@@ -148,8 +148,10 @@ fn check_existing_driver() -> Result<(), String> {
 }
 
 /// What a glob character can stand for, as far as the names `*.murk` and
-/// `.murk.*` care: one of `.`, `m`, `u`, `r`, `k` (in either case), or some
-/// other character that is not `/`.
+/// `.murk.*` care: one of the lower-case characters `.`, `m`, `u`, `r`, `k`,
+/// or some other character that is not `/`. With `core.ignorecase` git
+/// lower-cases the file name before it matches, so lower case covers every
+/// name; without it `*.murk` matches only lower case, and `M` is "other".
 const VAULT_NAME_CHARS: [char; 5] = ['.', 'm', 'u', 'r', 'k'];
 const OTHER_CHAR: usize = VAULT_NAME_CHARS.len();
 
@@ -169,9 +171,11 @@ impl GlobToken {
         }
     }
 
-    fn literal(c: char) -> Self {
+    /// A literal character; `fold` lower-cases it, as git does with
+    /// `core.ignorecase`.
+    fn literal(c: char, fold: bool) -> Self {
         let mut can = [false; VAULT_NAME_CHARS.len() + 1];
-        let c = c.to_ascii_lowercase();
+        let c = if fold { c.to_ascii_lowercase() } else { c };
         match VAULT_NAME_CHARS.iter().position(|&v| v == c) {
             Some(i) => can[i] = true,
             None => can[OTHER_CHAR] = c != '/',
@@ -183,7 +187,10 @@ impl GlobToken {
 /// Parse a bracket expression after its `[`. `None` when it never closes:
 /// git then matches nothing, and treating `[` as a literal errs toward
 /// refusal only where a vault name could still match.
-fn parse_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<GlobToken> {
+fn parse_class(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    fold: bool,
+) -> Option<GlobToken> {
     let mut rest = chars.clone();
     let negated = matches!(rest.peek(), Some('!' | '^'));
     if negated {
@@ -237,19 +244,31 @@ fn parse_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<G
     }
     let member = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
     let mut can = [false; VAULT_NAME_CHARS.len() + 1];
-    // Case folds inside a class too: with `core.ignorecase` git folds both
-    // sides, and without it `*.murk` itself matches only lower case.
     for (i, &v) in VAULT_NAME_CHARS.iter().enumerate() {
-        let hit = member(v) || member(v.to_ascii_uppercase());
-        can[i] = hit != negated;
+        can[i] = if !fold {
+            // Case-sensitive, as git's wildmatch: `[!M]` matches `m`.
+            member(v) != negated
+        } else if negated {
+            // The name is lower case. git may compare a class member with
+            // it as written or folded; `!member(v)` holds in either case,
+            // so it errs toward refusal.
+            !member(v)
+        } else {
+            member(v) || member(v.to_ascii_uppercase())
+        };
     }
-    // Some member is neither `/` nor a vault-name character in either case.
-    let specials: Vec<char> = VAULT_NAME_CHARS
+    // Some member is neither `/` nor a vault-name character (in either case
+    // when folding).
+    let specials: BTreeSet<char> = VAULT_NAME_CHARS
         .iter()
-        .flat_map(|c| [*c, c.to_ascii_uppercase()])
+        .flat_map(|c| {
+            if fold {
+                vec![*c, c.to_ascii_uppercase()]
+            } else {
+                vec![*c]
+            }
+        })
         .chain(['/'])
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect();
     can[OTHER_CHAR] = negated
         || ranges.iter().any(|&(lo, hi)| {
@@ -263,7 +282,7 @@ fn parse_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<G
 /// The last path component of an attribute pattern as glob tokens. Earlier
 /// components never matter here: `*.murk` and `.murk.*` match a file name
 /// in any directory.
-fn glob_tokens(pattern: &str) -> Vec<GlobToken> {
+fn glob_tokens(pattern: &str, fold: bool) -> Vec<GlobToken> {
     let last = pattern.rsplit('/').next().unwrap_or(pattern);
     let last = if last == "**" { "*" } else { last };
     let mut tokens = Vec::new();
@@ -277,19 +296,19 @@ fn glob_tokens(pattern: &str) -> Vec<GlobToken> {
                 GlobToken::any(true)
             }
             '?' => GlobToken::any(false),
-            '[' => parse_class(&mut chars).unwrap_or_else(|| GlobToken::literal('[')),
-            '\\' => GlobToken::literal(chars.next().unwrap_or('\\')),
-            c => GlobToken::literal(c),
+            '[' => parse_class(&mut chars, fold).unwrap_or_else(|| GlobToken::literal('[', fold)),
+            '\\' => GlobToken::literal(chars.next().unwrap_or('\\'), fold),
+            c => GlobToken::literal(c, fold),
         });
     }
     tokens
 }
 
 /// Whether some file name that the glob `pattern` matches is also matched by
-/// `*.murk` (when `suffix`) or `.murk.*` (when `prefix`). Case is ignored, as
-/// git ignores it with `core.ignorecase`. Walks the product of the glob with
-/// a small automaton for each name shape.
-fn glob_may_match_vault(pattern: &str, suffix: bool, prefix: bool) -> bool {
+/// `*.murk` (when `suffix`) or `.murk.*` (when `prefix`). `fold`: git's
+/// `core.ignorecase`, under which git ignores case on both sides. Walks the
+/// product of the glob with a small automaton for each name shape.
+fn glob_may_match_vault(pattern: &str, suffix: bool, prefix: bool, fold: bool) -> bool {
     const NAME: [usize; 6] = [0, 1, 2, 3, 4, 0]; // ".murk." as VAULT_NAME_CHARS indexes
     const DEAD: usize = 7;
     // `*.murk`: how much of ".murk" the name ends with (5 = all).
@@ -306,7 +325,7 @@ fn glob_may_match_vault(pattern: &str, suffix: bool, prefix: bool) -> bool {
         _ if c == NAME[p] => p + 1,
         _ => DEAD,
     };
-    let tokens = glob_tokens(pattern);
+    let tokens = glob_tokens(pattern, fold);
     let mut seen = BTreeSet::new();
     let mut todo = vec![(0usize, 0usize, 0usize)];
     while let Some(state) = todo.pop() {
@@ -329,6 +348,24 @@ fn glob_may_match_vault(pattern: &str, suffix: bool, prefix: bool) -> bool {
         }
     }
     false
+}
+
+/// The case modes to judge patterns in: git's `core.ignorecase` for this
+/// repository (unset is false). When git cannot say, both, so that a
+/// pattern counts if it counts in either.
+fn case_modes(root: &Path) -> Vec<bool> {
+    let out = git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--type=bool", "--get", "core.ignorecase"])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            vec![String::from_utf8_lossy(&out.stdout).trim() == "true"]
+        }
+        Ok(out) if out.status.code() == Some(1) => vec![false],
+        _ => vec![false, true],
+    }
 }
 
 /// Undo git's C-style quoting of a pattern (`"my vault.murk"`), as git does
@@ -511,6 +548,7 @@ fn check_existing_attribute(
         return Ok(());
     }
     let files = attribute_files(root, root_contents)?;
+    let modes = case_modes(root);
     // Macros that touch merge, `binary` built in; a macro may use another.
     let mut macros = BTreeSet::from(["binary".to_string()]);
     loop {
@@ -552,7 +590,9 @@ fn check_existing_attribute(
             });
             let prefix = prefix && (!name.starts_with('*') || names_driver);
             if tokens.iter().any(|t| touches_merge(t, &macros))
-                && glob_may_match_vault(&pattern, suffix, prefix)
+                && modes
+                    .iter()
+                    .any(|&fold| glob_may_match_vault(&pattern, suffix, prefix, fold))
             {
                 found.push(format!(
                     "{}:{}: {}",
@@ -1396,7 +1436,8 @@ mod tests {
 
     #[test]
     fn attribute_patterns_that_could_name_a_vault_are_found() {
-        // (pattern, may match *.murk, may match .murk.*)
+        // (pattern, may match *.murk, may match .murk.*), the same with and
+        // without core.ignorecase.
         for (pattern, suffix, prefix) in [
             ("*.murk", true, true),
             (".murk.*", true, true),
@@ -1406,7 +1447,6 @@ mod tests {
             ("prod.*", true, false),
             ("prod.murk", true, false),
             ("/config/.murk.prod", false, true),
-            ("PROD.MURK", true, false),
             ("[!x].murk", true, false),
             ("[ps]rod.murk", true, false),
             ("*.mur?", true, true),
@@ -1423,15 +1463,155 @@ mod tests {
             ("prod.mur[!k]", false, false),
             ("*.murk/x", false, false),
             ("?", false, false),
+            (".[a-z]urk", true, false),
+            (".[!m]urk", false, false),
         ] {
-            assert_eq!(
-                (
-                    glob_may_match_vault(pattern, true, false),
-                    glob_may_match_vault(pattern, false, true)
-                ),
-                (suffix, prefix),
-                "{pattern}"
-            );
+            for fold in [false, true] {
+                assert_eq!(
+                    (
+                        glob_may_match_vault(pattern, true, false, fold),
+                        glob_may_match_vault(pattern, false, true, fold)
+                    ),
+                    (suffix, prefix),
+                    "{pattern} fold={fold}"
+                );
+            }
+        }
+        // Case matters: (pattern, (*.murk, .murk.*) without core.ignorecase,
+        // the same with it).
+        for (pattern, exact, folded) in [
+            ("PROD.MURK", (false, false), (true, false)),
+            (".[!M]urk", (true, false), (true, false)),
+            (".[^M]urk", (true, false), (true, false)),
+            (".[!A-Z]urk", (true, false), (true, false)),
+            (".[!M]urk.prod", (false, true), (false, true)),
+            (".[M]urk", (false, false), (true, false)),
+            (".[A-Z]urk", (false, false), (true, false)),
+        ] {
+            for (fold, want) in [(false, exact), (true, folded)] {
+                assert_eq!(
+                    (
+                        glob_may_match_vault(pattern, true, false, fold),
+                        glob_may_match_vault(pattern, false, true, fold)
+                    ),
+                    want,
+                    "{pattern} fold={fold}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attribute_pattern_judgement_covers_everything_git_matches() {
+        // git is the oracle: for each pattern and case mode, every name in
+        // the table that git gives both the pattern's attribute and one of
+        // murk's lines must be one the matcher reports.
+        let patterns = [
+            ".[!M]urk",
+            ".[^M]urk",
+            ".[!A-Z]urk",
+            ".[!M]urk.prod",
+            ".[!m]urk",
+            ".[a-z]urk",
+            ".[A-Z]urk",
+            ".[M]urk",
+            "[!a]rod.murk",
+            "[!x].murk",
+            "prod.*",
+            "*.prod",
+            "PROD.MURK",
+            ".MURK",
+            ".Murk.*",
+            "*.MURK",
+            "*.mur[!k]",
+            "*.mur[!K]",
+            "[[:upper:]]*.murk",
+            "secrets/**",
+            "?murk",
+            "*urk",
+            ".mur[a-l]",
+        ];
+        let names = [
+            ".murk",
+            ".Murk",
+            ".MURK",
+            ".mUrk",
+            ".murK",
+            "prod.murk",
+            "Prod.murk",
+            "prod.MURK",
+            "arod.murk",
+            "xrod.murk",
+            "a.murk",
+            "x.murk",
+            ".murk.prod",
+            ".Murk.prod",
+            ".MURK.PROD",
+            ".murk.PROD",
+            "secrets/a.murk",
+            "Q.murk",
+            ".murk.murk",
+            "murk.murk",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[String]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_ATTR_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init".to_string(), "-q".to_string()]);
+        for pattern in patterns {
+            fs::write(
+                dir.path().join(".gitattributes"),
+                format!("*.murk vs\n.murk.* vp\n{pattern} merge=custom\n"),
+            )
+            .unwrap();
+            for fold in [false, true] {
+                let mut args: Vec<String> = [
+                    "-c",
+                    &format!("core.ignorecase={fold}"),
+                    "check-attr",
+                    "-z",
+                    "vs",
+                    "vp",
+                    "merge",
+                    "--",
+                ]
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+                args.extend(names.iter().map(ToString::to_string));
+                let out = git(&args);
+                let fields: Vec<&str> = out.split('\0').collect();
+                let mut attrs = std::collections::HashMap::new();
+                for f in fields.as_chunks::<3>().0 {
+                    attrs.insert((f[0], f[1]), f[2]);
+                }
+                for name in names {
+                    if attrs[&(name, "merge")] != "custom" {
+                        continue;
+                    }
+                    if attrs[&(name, "vs")] == "set" {
+                        assert!(
+                            glob_may_match_vault(pattern, true, false, fold),
+                            "{pattern} fold={fold}: git matches {name} (*.murk)"
+                        );
+                    }
+                    if attrs[&(name, "vp")] == "set" {
+                        assert!(
+                            glob_may_match_vault(pattern, false, true, fold),
+                            "{pattern} fold={fold}: git matches {name} (.murk.*)"
+                        );
+                    }
+                }
+            }
         }
     }
 
