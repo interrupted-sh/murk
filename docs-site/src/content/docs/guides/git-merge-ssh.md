@@ -32,6 +32,17 @@ This command does two things:
   configuration, which does not go with the repository. Everyone who works
   on the vault runs `murk setup-merge-driver` once in their own clone.
 
+Setup changes nothing when another merge driver is in place. This is the
+case when git config already sets `merge.murk.driver` to a command that murk
+did not write. It is also the case when a line in any attributes file git
+reads (each `.gitattributes`, `.git/info/attributes`, `core.attributesFile`
+or the system file) gives files that murk's lines would cover another
+`merge` setting. A line such as `*.prod merge=custom` counts, because it
+covers a `.murk.prod` vault. A line such as `*.png binary` does not stop
+setup. The message names each line with its file and line number. Setup
+changes git config before `.gitattributes`. If git config fails,
+`.gitattributes` stays unchanged.
+
 The definition is `murk merge-driver -- %O %A %B %P`, and git runs `murk`
 from your `PATH`. git runs the driver during a merge or rebase in which
 both branches changed `.murk`. Without it, git does a text three-way merge
@@ -53,15 +64,31 @@ stored key of the vault being merged. The driver finds the stored key of
 `.murk.prod` or `prod.murk` as `--vault` does, so a vault with its own key
 merges with no setup.
 
-The driver never merges a vault as text. A file that matches the pattern
-but plainly is not a vault (`.murk.bak` holding notes) is merged as text,
-with conflict markers where both sides changed the same lines. When a side
-is or could be a vault but murk cannot read it, for example a vault re-saved
-with a byte-order mark, a stray line, or a vault overwritten on one branch,
-the driver stops. It puts ours and theirs in the file between conflict
-markers and names the side it cannot read. Keep one side with `git checkout
---ours` or `--theirs`, check it with `murk verify`, and redo the other
-side's changes.
+The driver never merges a vault as text. It merges as vaults only when murk
+reads all three sides as vaults. A file that matches the pattern but cannot
+be a vault is merged as text, with conflict markers where both sides changed
+the same lines. Examples are `.murk.bak` holding notes, or a `.murk.json`
+without vault keys. A file could be a vault when:
+
+- it is valid JSON with a top-level `recipients`, `secrets`, `meta`,
+  `vault_name` or `vault_id` key,
+- it is not valid JSON and starts with `{`, after a byte-order mark and
+  whitespace, or
+- it is not valid JSON and uses one of those names as a JSON key
+  (`"secrets":`).
+
+The driver reads a UTF-16 file as its text. Notes that only quote a name
+(`the "secrets" field`) cannot be a vault.
+
+When a side is or could be a vault but murk cannot read every side, the
+driver stops. Examples are a vault re-saved with a byte-order mark, as UTF-16
+or with a stray line, and a vault overwritten on one branch. The driver puts
+ours and theirs in the file between conflict markers and names each side it
+cannot read. When a side is a vault that murk reads, keep one side with `git
+checkout --ours` or `--theirs`, check it with `murk verify`, and redo the
+other side's changes. When no side reads as a vault, the message says that
+the file may be a vault. If it is not a vault, edit the file to merge it by
+hand, then `git add` it.
 
 When both branches created the same vault, for example `murk init --vault
 .murk.staging` on each, there are two separate vaults, and no merge can
@@ -171,15 +198,18 @@ vault's trust pin nor its stored key. Such a vault then merges only with
 each clone: it replaces the old line with `murk merge-driver -- %O %A %B %P`.
 It replaces only lines that murk wrote. If `merge.murk.driver` runs your own
 command, for example a wrapper script, setup changes nothing and tells you
-to remove the line first.
+to remove the line first. Until you run setup again, the driver warns that
+its configuration is old. Its messages then say "the file git is merging"
+instead of a file name, because git does not pass the name.
 
 ### When the driver stops
 
 Some refusals leave the file as ours, without conflict markers: no key, a
-save counter at its limit, or an agent grant key. The message says that
-nothing was written and theirs was not merged. Do not commit the file as it
-is, because that drops their changes. Set your key and run the merge again,
-or keep one side and redo the other side's changes with murk.
+save counter at its limit, an agent grant key, or a failed write of the
+merged vault. The message says that nothing was written and theirs was not
+merged. Do not commit the file as it is, because that drops their changes.
+Set your key and run the merge again, or keep one side and redo the other
+side's changes with murk.
 
 ### Merges that never run the driver
 

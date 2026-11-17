@@ -372,7 +372,7 @@ fn merge_driver_empty_files() {
         .failure()
         .stderr(predicate::str::contains("never merges a vault as text"));
     let merged = fs::read_to_string(dir.path().join("test.murk")).unwrap();
-    assert!(merged.starts_with("<<<<<<< ours:") && merged.contains(ours.trim_end()));
+    assert!(merged.starts_with("<<<<<<< ours\n") && merged.contains(ours.trim_end()));
 }
 
 #[test]

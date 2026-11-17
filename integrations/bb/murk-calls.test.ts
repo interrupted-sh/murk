@@ -664,7 +664,7 @@ describe("a revoke that fails at the vault step", () => {
     const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
     const refused = await runCli(["grant", "revoke", "--forget", id], {});
     expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toContain("is active and its vault exists");
+    expect(refused.stderr).toContain(`grant ${id} is active, and its vault exists`);
     expect(await status(id)).toBe("active");
 
     const good = readFileSync(vaultFile);
@@ -684,6 +684,89 @@ describe("a revoke that fails at the vault step", () => {
     // Nothing was revoked in a vault: the restored file still holds the grant.
     expect(vaultGrants()).toContain(`bb-${id}`);
     spawnSync("murk", ["agent", "revoke", `bb-${id}`], { cwd: worktree, env: { ...process.env, MURK_KEY_FILE: operatorKeyFile } });
+  });
+
+  it("--forget clears a grant whose vault file is gone, with the id before or after the flag, and deletes its key file", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const vaultFile = path.join(worktree, ".murk");
+    const ids = [await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT }), await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT })];
+    const good = readFileSync(vaultFile);
+    rmSync(vaultFile);
+    try {
+      for (const [id, args] of [
+        [ids[0], [ids[0], "--forget"]],
+        [ids[1], ["--forget", ids[1]]],
+      ] as const) {
+        // Never revoked first: the grant is active and its key file is still there.
+        expect(await status(id)).toBe("active");
+        expect(existsSync(keyPath(id))).toBe(true);
+        clearCalls();
+        const forgot = await runCli(["grant", "revoke", ...args], {});
+        expect(forgot.exitCode, forgot.stderr).toBe(0);
+        expect(forgot.stdout).toContain("deleted its key file; nothing was revoked in a vault");
+        expect(existsSync(keyPath(id))).toBe(false);
+        expect(calls()).toEqual([]);
+        expect(await status(id)).toBe("FORGOTTEN (vault not revoked)");
+      }
+    } finally {
+      writeFileSync(vaultFile, good);
+    }
+    for (const id of ids) spawnSync("murk", ["agent", "revoke", `bb-${id}`], { cwd: worktree, env: { ...process.env, MURK_KEY_FILE: operatorKeyFile } });
+  });
+
+  it("--forget of an expired grant whose vault exists says it is expired, not active, and changes nothing", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    host.bb.storage.database().prepare("UPDATE grants SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00Z", id);
+    expect(await status(id)).toBe("EXPIRED");
+    const refused = await runCli(["grant", "revoke", "--forget", id], {});
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).not.toContain("is active");
+    expect(refused.stderr).toContain(`grant ${id} has expired but is not revoked, and its vault exists`);
+    expect(refused.stderr).toContain(`run bb murk grant revoke ${id} without --forget`);
+    expect(existsSync(keyPath(id))).toBe(true);
+    expect(await status(id)).toBe("EXPIRED");
+    const revoked = await runCli(["grant", "revoke", id], {});
+    expect(revoked.exitCode, revoked.stderr).toBe(0);
+    expect(vaultGrants()).not.toContain(`bb-${id}`);
+  });
+
+  it("revoke takes exactly one grant id and no flag but --forget: anything else prints the usage and changes nothing", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const a = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const b = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    const usage = "usage: bb murk grant revoke [--forget] <grantId>";
+    for (const args of [[], ["--force"], ["--forget", "-x"], [a, "--forget=1"], ["--forget=1", a], [a, b, "--forget"], ["--forget", a, b], [a, b], [a, "--force"], ["--forget", "--forget", a]]) {
+      clearCalls();
+      const result = await runCli(["grant", "revoke", ...args], {});
+      expect(result.exitCode, args.join(" ")).toBe(1);
+      expect(result.stderr, args.join(" ")).toContain(usage);
+      expect(calls(), args.join(" ")).toEqual([]);
+      for (const id of [a, b]) {
+        expect(await status(id), args.join(" ")).toBe("active");
+        expect(existsSync(keyPath(id)), args.join(" ")).toBe(true);
+      }
+    }
+    expect(vaultGrants()).toContain(`bb-${a}`);
+    for (const id of [a, b]) expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
+  });
+
+  it("two concurrent revokes of one grant: one revokes it, the other reports it revoked, and neither says it may still be live", async () => {
+    await host.harness.behavior.setSettings({ keyFile: operatorKeyFile });
+    const id = await mintedId(mintArgs, { cwd: worktree, projectId: PROJECT });
+    clearCalls();
+    const results = await Promise.all([runCli(["grant", "revoke", id], {}), runCli(["grant", "revoke", id], {})]);
+    for (const result of results) {
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stderr ?? "").not.toContain("may still be live");
+    }
+    expect(results.map((result) => result.stdout.split("\n")[0]).sort()).toEqual([
+      `grant ${id} is already revoked`,
+      `revoked grant ${id} (bb-${id}) and deleted its key file`,
+    ]);
+    expect(revokeCalls()).toBe(1);
+    expect(vaultGrants()).not.toContain(`bb-${id}`);
+    expect(await status(id)).toBe("revoked");
   });
 });
 
@@ -725,5 +808,13 @@ describe("tool errors redact every key path they may carry", () => {
     host.bb.storage.database().prepare("UPDATE grants SET key_path = ? WHERE id = ?").run(elsewhere, id);
     expect(await planError(`x${elsewhere}`)).not.toContain(elsewhere);
     expect((await runCli(["grant", "revoke", id], {})).exitCode).toBe(0);
+    // Still redacted once the grant is revoked: a copy of its key may still exist.
+    expect(await planError(`x${elsewhere}`)).not.toContain(elsewhere);
+
+    // Any entry of the plugin's grant key directory, recorded or not.
+    const unrecorded = keyPath("g00000000");
+    const inKeyDir = await planError(`x${unrecorded}`);
+    expect(inKeyDir).toContain("<key file>");
+    expect(inKeyDir).not.toContain("agent-keys");
   });
 });

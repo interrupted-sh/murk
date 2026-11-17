@@ -8,16 +8,25 @@
 //! sent by another process (`kill <pid>`) is forwarded to the child, or to the
 //! child's whole process group once [`set_group`] names one. A signal the
 //! child sends murk is not echoed back to it, even one sent before murk
-//! knows the child's pid. A child sharing murk's process group already got
-//! what the terminal sends that group, so on Linux a signal the terminal
-//! generated while that group holds the terminal (or as its session leader
-//! exits) is not forwarded to it again. Any other signal with no sender pid,
-//! such as one `docker stop` sends to murk as a container's PID 1, is
-//! forwarded. On macOS a terminal signal carries the pid of the process that
-//! writes to the terminal (the terminal emulator, sshd), so murk forwards it
-//! and the child gets a terminal Ctrl-C or Ctrl-\ twice. [`stop_forwarding`]
-//! restores the default actions and re-raises a signal caught while no child
-//! was running.
+//! knows the child's pid.
+//!
+//! A child that leads its own group and holds the terminal (the editor, or
+//! on macOS agent exec's command when murk is alone in a foreground job,
+//! see `foreground_job`) gets the terminal's keys alone, so whatever
+//! reaches murk is forwarded, and the child gets each signal once. Being
+//! outside the job's group, such a child also outlives a `kill -9 %1` that
+//! the shell sends the job (agent exec does this on macOS only). A child
+//! sharing murk's
+//! process group already got what the terminal sends that group, so on
+//! Linux a signal the terminal generated while that group holds the
+//! terminal (or as its session leader exits) is not forwarded to it again.
+//! Any other signal with no sender pid, such as one `docker stop` sends to
+//! murk as a container's PID 1, is forwarded. On macOS a terminal signal
+//! carries the pid of the process that writes to the terminal (the terminal
+//! emulator, sshd), so murk cannot tell it from a `kill` and forwards it: a
+//! child sharing murk's group then gets a terminal Ctrl-C or Ctrl-\ twice.
+//! [`stop_forwarding`] restores the default actions and re-raises a signal
+//! caught while no child was running.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
@@ -287,24 +296,144 @@ fn set_target(target: libc::pid_t) {
 }
 
 /// Block until the child has exited, without reaping it, so the pid stays
-/// ours until forwarding is turned off.
-pub(crate) fn wait_exited(pid: u32) {
+/// ours until forwarding is turned off. `job` is the terminal when the child
+/// leads its own process group as murk's foreground job (see
+/// `foreground_job`, macOS only): a stop (Ctrl-Z) then suspends murk too, as
+/// [`suspend`] describes. A stop is consumed either way, since macOS reports
+/// one even to a `waitid` that asks for exits only.
+pub(crate) fn wait_exited(pid: u32, job: Option<libc::c_int>) {
     loop {
         // SAFETY: waitid writes into `info`, which outlives the call.
-        let rc = unsafe {
+        let (rc, code) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let rc = libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &raw mut info,
+                libc::WEXITED | libc::WSTOPPED | libc::WNOWAIT,
+            );
+            (rc, info.si_code)
+        };
+        if rc != 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if code != libc::CLD_STOPPED {
+            break;
+        }
+        // Consume the stop, so the next wait blocks. WNOHANG: the child may
+        // have been continued or killed since.
+        // SAFETY: as above.
+        unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             libc::waitid(
                 libc::P_PID,
                 pid as libc::id_t,
                 &raw mut info,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            break;
+                libc::WSTOPPED | libc::WNOHANG,
+            );
+        }
+        if job.is_some() {
+            suspend(pid as libc::pid_t, job);
         }
     }
     CHILD.store(0, Ordering::SeqCst);
+}
+
+/// murk's terminal, if murk is a foreground job there alone: it leads its
+/// process group (a shell's job, or the session), no other process is in
+/// that group, the group holds the terminal, and stdin, stdout and stderr
+/// are all that terminal. A child murk runs can then lead a group of its
+/// own and take the terminal, so a key like Ctrl-C reaches the child alone,
+/// once. Used on macOS only, where murk cannot tell a terminal key from a
+/// `kill`.
+///
+/// In any doubtful case murk keeps the terminal, because another process
+/// may need the job's access to it: murk shares its group with its parent
+/// (a script, which would no longer get Ctrl-C), or murk is part of a
+/// pipeline (`murk agent exec -- app | less`, whose reader would be stopped
+/// for reading a terminal its group no longer holds). A pipeline member
+/// always has stdin or stdout on a pipe, so the fd check catches it even if
+/// the shell has not started the other members yet; the group check
+/// catches one whose standard streams were all redirected to the terminal.
+#[cfg(target_os = "macos")]
+pub(crate) fn foreground_job() -> Option<libc::c_int> {
+    let tty = TTY.load(Ordering::SeqCst);
+    // `tcgetpgrp` fails on anything but murk's controlling terminal, so
+    // this holds only if stdin, stdout and stderr are all that terminal and
+    // murk's group holds it.
+    let all_terminal = [0, 1, 2].into_iter().all(in_foreground);
+    (tty >= 0 && all_terminal && alone_in_group()).then_some(tty)
+}
+
+/// Whether murk leads its process group and is its only member.
+#[cfg(target_os = "macos")]
+fn alone_in_group() -> bool {
+    // SAFETY: plain syscalls; proc_listpgrppids writes at most `size` bytes
+    // into `pids` and returns how many pids it wrote.
+    unsafe {
+        let me = libc::getpid();
+        if libc::getpgrp() != me {
+            return false;
+        }
+        let mut pids: [libc::pid_t; 4] = [0; 4];
+        let size = std::mem::size_of_val(&pids) as libc::c_int;
+        let n = libc::proc_listpgrppids(me, pids.as_mut_ptr().cast(), size);
+        n == 1 && pids[0] == me
+    }
+}
+
+/// The child group `pgid`, murk's job, stopped (Ctrl-Z): take the terminal
+/// back and stop murk, so the shell sees the job stop. Once the shell
+/// resumes murk (`fg` or `bg`), give the terminal back to the child's group
+/// if murk has it, and continue that group.
+pub(crate) fn suspend(pgid: libc::pid_t, tty: Option<libc::c_int>) {
+    if let Some(fd) = tty {
+        take_terminal(fd, pgid);
+    }
+    // SAFETY: plain syscalls. SIGTSTP stops murk until the shell resumes it.
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
+    if let Some(fd) = tty.filter(|&fd| in_foreground(fd)) {
+        give_terminal(fd, pgid);
+    }
+    // SAFETY: plain syscall on our own child's group.
+    unsafe {
+        libc::kill(-pgid, libc::SIGCONT);
+    }
+}
+
+/// Whether murk's process group holds the terminal `fd`.
+pub(crate) fn in_foreground(fd: libc::c_int) -> bool {
+    // SAFETY: plain syscalls.
+    unsafe { libc::tcgetpgrp(fd) == libc::getpgrp() }
+}
+
+/// Give the terminal back to murk's group, if the child group `pgid` has it.
+pub(crate) fn take_terminal(fd: libc::c_int, pgid: libc::pid_t) {
+    // SAFETY: plain syscalls.
+    if unsafe { libc::tcgetpgrp(fd) } == pgid {
+        give_terminal(fd, unsafe { libc::getpgrp() });
+    }
+}
+
+/// Make `pgid` the terminal's foreground group. SIGTTOU is blocked meanwhile:
+/// a background process calling tcsetpgrp would otherwise be stopped by it.
+/// Async-signal-safe, so a child may call it between fork and exec.
+pub(crate) fn give_terminal(fd: libc::c_int, pgid: libc::pid_t) {
+    // SAFETY: plain, async-signal-safe syscalls on stack-local signal sets.
+    unsafe {
+        let mut block: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&raw mut block);
+        libc::sigaddset(&raw mut block, libc::SIGTTOU);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &raw const block, &raw mut old);
+        libc::tcsetpgrp(fd, pgid);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, std::ptr::null_mut());
+    }
 }
 
 /// The child is reaped: give the forwarded signals their default action

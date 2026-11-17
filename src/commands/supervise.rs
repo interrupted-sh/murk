@@ -15,14 +15,28 @@
 //! - **murk waits for both streams to close**, not only for the child to exit.
 //!   A background process that keeps the pipes open keeps murk running; its
 //!   output is masked too.
-//! - **Signals.** The child stays in murk's process group, so a key the terminal
-//!   turns into a signal (Ctrl-C, Ctrl-\, a hangup) reaches both directly, as it
-//!   did before. SIGINT, SIGTERM, SIGHUP and SIGQUIT sent to murk alone by
-//!   another process (`kill <pid>`, a harness timeout, `docker stop` when murk
-//!   is a container's PID 1) are forwarded to the child. On Linux, a signal the
-//!   terminal generated while murk's group holds it is not forwarded, so the
-//!   child does not see a Ctrl-C twice. On macOS it is, so the child can (see
-//!   `signals`). Once the child has exited, these signals get their
+//! - **Signals.** On macOS, when murk is alone in a foreground job on its
+//!   terminal (it leads its process group and no other process is in it,
+//!   and stdin, stdout and stderr are all the terminal, as for a plain
+//!   command at an interactive prompt), the child gets a process group of
+//!   its own and murk makes it the terminal's foreground group, as a shell
+//!   does with a job. A key the terminal turns into a signal (Ctrl-C,
+//!   Ctrl-\) then reaches the child alone, once. Ctrl-Z stops the child;
+//!   murk then takes the terminal back and stops itself, so the shell sees
+//!   the job stop, and resumes the child when it resumes. Because the child
+//!   leaves the job's group, a `kill -9 %1` from the shell kills murk only
+//!   and leaves the child running.
+//!   Otherwise (Linux; or on macOS no terminal, murk in the background, in a
+//!   pipeline, with a stream redirected, or sharing its parent's group, as
+//!   under a script) the child stays in murk's group, so both get what the
+//!   terminal sends that group. Linux tells such a signal apart and does
+//!   not forward it again. macOS cannot, so there the child gets it twice
+//!   (see `signals`). Either way, SIGINT,
+//!   SIGTERM, SIGHUP and SIGQUIT sent to murk by another process
+//!   (`kill <pid>`, a harness timeout, `docker stop` when murk is a
+//!   container's PID 1) are forwarded to the child, or to its whole group
+//!   when it has one of its own, also after a Ctrl-Z and `fg`. Once the child
+//!   has exited, murk takes the terminal back and these signals get their
 //!   default action back (one caught in between is re-raised), so murk stays
 //!   killable while a background process still holds the pipes.
 //! - **Exit status.** murk exits with the child's code. If the child died from
@@ -52,6 +66,26 @@ pub(crate) fn run_masked(mut cmd: Command, masker: &Masker) -> ! {
 
     #[cfg(unix)]
     signals::install();
+    // macOS only: there murk cannot tell a terminal key from a `kill`, so the
+    // app gets the terminal to itself. Linux tells them apart by the sender.
+    #[cfg(target_os = "macos")]
+    let job = signals::foreground_job();
+    #[cfg(not(target_os = "macos"))]
+    let job: Option<i32> = None;
+    #[cfg(target_os = "macos")]
+    if let Some(tty) = job {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the hook runs between fork and exec and makes only
+        // async-signal-safe calls (setpgid, getpid, pthread_sigmask,
+        // tcsetpgrp).
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::setpgid(0, 0);
+                signals::give_terminal(tty, libc::getpid());
+                Ok(())
+            });
+        }
+    }
 
     let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd
@@ -60,7 +94,25 @@ pub(crate) fn run_masked(mut cmd: Command, masker: &Masker) -> ! {
     // The env block in `cmd` holds plaintext values; it is not needed any more.
     drop(cmd);
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    if let Some(tty) = job {
+        let pgid = child.id() as libc::pid_t;
+        // Repeat both steps here, as a shell does, so it doesn't matter
+        // whether the parent or the child gets there first.
+        // SAFETY: plain syscall on our own child.
+        unsafe {
+            libc::setpgid(pgid, pgid);
+        }
+        signals::give_terminal(tty, pgid);
+        // murk now writes the output from the background. Blocked, SIGTTOU
+        // cannot stop it there (`stty tostop`); the output threads inherit
+        // the mask, and the child already has its own.
+        block_sigttou();
+        signals::set_group(pgid);
+    } else {
+        signals::set_child(child.id());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     signals::set_child(child.id());
 
     let child_out = child.stdout.take().expect("stdout is piped");
@@ -71,10 +123,22 @@ pub(crate) fn run_masked(mut cmd: Command, masker: &Masker) -> ! {
     let status = std::thread::scope(|s| {
         s.spawn(|| pump(child_out, io::stdout(), masker));
         s.spawn(|| pump(child_err, io::stderr(), masker));
-        wait(&mut child)
+        wait(&mut child, job)
     });
 
     exit_like(status)
+}
+
+/// Block SIGTTOU on this thread, and so on the threads it starts.
+#[cfg(target_os = "macos")]
+fn block_sigttou() {
+    // SAFETY: plain syscalls on a stack-local signal set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&raw mut set);
+        libc::sigaddset(&raw mut set, libc::SIGTTOU);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut());
+    }
 }
 
 /// Copy `src` to `dst` through a [`MaskStream`](murk_cli::mask::MaskStream),
@@ -104,10 +168,19 @@ fn pump(mut src: impl Read, mut dst: impl Write, masker: &Masker) {
 
 /// Wait for the child. On Unix, stop forwarding signals before it is reaped,
 /// so a forwarded signal can never reach a recycled pid, then hand the
-/// forwarded signals back their default action.
-fn wait(child: &mut process::Child) -> ExitStatus {
+/// forwarded signals back their default action. If the child had the
+/// terminal (`job`), murk takes it back first, so a Ctrl-C reaches murk
+/// while a background process still holds the output pipes.
+fn wait(child: &mut process::Child, job: Option<i32>) -> ExitStatus {
     #[cfg(unix)]
-    signals::wait_exited(child.id());
+    {
+        signals::wait_exited(child.id(), job);
+        if let Some(tty) = job {
+            signals::take_terminal(tty, child.id() as libc::pid_t);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = job;
     let status = child
         .wait()
         .unwrap_or_else(|e| die(&format_args!("waiting for the command: {e}"), 1));

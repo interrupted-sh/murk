@@ -147,62 +147,526 @@ fn check_existing_driver() -> Result<(), String> {
     Err(lines.join("\n"))
 }
 
+/// What a glob character can stand for, as far as the names `*.murk` and
+/// `.murk.*` care: one of the lower-case characters `.`, `m`, `u`, `r`, `k`,
+/// or some other character that is not `/`. With `core.ignorecase` git
+/// lower-cases the file name before it matches, so lower case covers every
+/// name; without it `*.murk` matches only lower case, and `M` is "other".
+const VAULT_NAME_CHARS: [char; 5] = ['.', 'm', 'u', 'r', 'k'];
+const OTHER_CHAR: usize = VAULT_NAME_CHARS.len();
+
+/// One element of a glob over a single path component.
+struct GlobToken {
+    /// `*`: any number of characters.
+    repeat: bool,
+    /// Which of [`VAULT_NAME_CHARS`] (then [`OTHER_CHAR`]) it can match.
+    can: [bool; VAULT_NAME_CHARS.len() + 1],
+}
+
+impl GlobToken {
+    fn any(repeat: bool) -> Self {
+        Self {
+            repeat,
+            can: [true; VAULT_NAME_CHARS.len() + 1],
+        }
+    }
+
+    /// A literal character; `fold` lower-cases it, as git does with
+    /// `core.ignorecase`.
+    fn literal(c: char, fold: bool) -> Self {
+        let mut can = [false; VAULT_NAME_CHARS.len() + 1];
+        let c = if fold { c.to_ascii_lowercase() } else { c };
+        match VAULT_NAME_CHARS.iter().position(|&v| v == c) {
+            Some(i) => can[i] = true,
+            None => can[OTHER_CHAR] = c != '/',
+        }
+        Self { repeat: false, can }
+    }
+}
+
+/// Parse a bracket expression after its `[`. `None` when it never closes:
+/// git then matches nothing, and treating `[` as a literal errs toward
+/// refusal only where a vault name could still match.
+fn parse_class(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    fold: bool,
+) -> Option<GlobToken> {
+    let mut rest = chars.clone();
+    let negated = matches!(rest.peek(), Some('!' | '^'));
+    if negated {
+        rest.next();
+    }
+    let mut ranges: Vec<(char, char)> = Vec::new();
+    let mut posix = false;
+    let mut first = true;
+    loop {
+        let mut c = rest.next()?;
+        if c == ']' && !first {
+            break;
+        }
+        first = false;
+        if c == '[' && rest.peek() == Some(&':') {
+            // `[:alpha:]` and friends: assume it can match anything, and
+            // skip to its closing `:]`.
+            posix = true;
+            let mut last = ' ';
+            loop {
+                let next = rest.next()?;
+                if last == ':' && next == ']' {
+                    break;
+                }
+                last = next;
+            }
+            continue;
+        }
+        if c == '\\' {
+            c = rest.next()?;
+        }
+        let mut hi = c;
+        if rest.peek() == Some(&'-') {
+            let mut ahead = rest.clone();
+            ahead.next();
+            if let Some(&end) = ahead.peek()
+                && end != ']'
+            {
+                rest = ahead;
+                hi = rest.next()?;
+                if hi == '\\' {
+                    hi = rest.next()?;
+                }
+            }
+        }
+        ranges.push((c, hi));
+    }
+    *chars = rest;
+    if posix {
+        return Some(GlobToken::any(false));
+    }
+    let member = |c: char| ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+    let mut can = [false; VAULT_NAME_CHARS.len() + 1];
+    for (i, &v) in VAULT_NAME_CHARS.iter().enumerate() {
+        can[i] = if !fold {
+            // Case-sensitive, as git's wildmatch: `[!M]` matches `m`.
+            member(v) != negated
+        } else if negated {
+            // The name is lower case. git may compare a class member with
+            // it as written or folded; `!member(v)` holds in either case,
+            // so it errs toward refusal.
+            !member(v)
+        } else {
+            member(v) || member(v.to_ascii_uppercase())
+        };
+    }
+    // Some member is neither `/` nor a vault-name character (in either case
+    // when folding).
+    let specials: BTreeSet<char> = VAULT_NAME_CHARS
+        .iter()
+        .flat_map(|c| {
+            if fold {
+                vec![*c, c.to_ascii_uppercase()]
+            } else {
+                vec![*c]
+            }
+        })
+        .chain(['/'])
+        .collect();
+    can[OTHER_CHAR] = negated
+        || ranges.iter().any(|&(lo, hi)| {
+            let size = u64::from(hi).saturating_sub(u64::from(lo)) + 1;
+            let inside = specials.iter().filter(|&&c| lo <= c && c <= hi).count() as u64;
+            lo <= hi && size > inside
+        });
+    Some(GlobToken { repeat: false, can })
+}
+
+/// The last path component of an attribute pattern as glob tokens. Earlier
+/// components never matter here: `*.murk` and `.murk.*` match a file name
+/// in any directory.
+fn glob_tokens(pattern: &str, fold: bool) -> Vec<GlobToken> {
+    let last = pattern.rsplit('/').next().unwrap_or(pattern);
+    let last = if last == "**" { "*" } else { last };
+    let mut tokens = Vec::new();
+    let mut chars = last.chars().peekable();
+    while let Some(c) = chars.next() {
+        tokens.push(match c {
+            '*' => {
+                while chars.peek() == Some(&'*') {
+                    chars.next();
+                }
+                GlobToken::any(true)
+            }
+            '?' => GlobToken::any(false),
+            '[' => parse_class(&mut chars, fold).unwrap_or_else(|| GlobToken::literal('[', fold)),
+            '\\' => GlobToken::literal(chars.next().unwrap_or('\\'), fold),
+            c => GlobToken::literal(c, fold),
+        });
+    }
+    tokens
+}
+
+/// Whether some file name that the glob `pattern` matches is also matched by
+/// `*.murk` (when `suffix`) or `.murk.*` (when `prefix`). `fold`: git's
+/// `core.ignorecase`, under which git ignores case on both sides. Walks the
+/// product of the glob with a small automaton for each name shape.
+fn glob_may_match_vault(pattern: &str, suffix: bool, prefix: bool, fold: bool) -> bool {
+    const NAME: [usize; 6] = [0, 1, 2, 3, 4, 0]; // ".murk." as VAULT_NAME_CHARS indexes
+    const DEAD: usize = 7;
+    // `*.murk`: how much of ".murk" the name ends with (5 = all).
+    let step_suffix = |s: usize, c: usize| {
+        if s < 5 && c == NAME[s] {
+            s + 1
+        } else {
+            usize::from(c == 0)
+        }
+    };
+    // `.murk.*`: how much of ".murk." the name starts with (6 = all).
+    let step_prefix = |p: usize, c: usize| match p {
+        6 | DEAD => p,
+        _ if c == NAME[p] => p + 1,
+        _ => DEAD,
+    };
+    let tokens = glob_tokens(pattern, fold);
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![(0usize, 0usize, 0usize)];
+    while let Some(state) = todo.pop() {
+        if !seen.insert(state) {
+            continue;
+        }
+        let (i, s, p) = state;
+        let Some(token) = tokens.get(i) else {
+            if (suffix && s == 5) || (prefix && p == 6) {
+                return true;
+            }
+            continue;
+        };
+        if token.repeat {
+            todo.push((i + 1, s, p));
+        }
+        let next = if token.repeat { i } else { i + 1 };
+        for c in (0..token.can.len()).filter(|&c| token.can[c]) {
+            todo.push((next, step_suffix(s, c), step_prefix(p, c)));
+        }
+    }
+    false
+}
+
+/// The case modes to judge patterns in: git's `core.ignorecase` for this
+/// repository (unset is false). When git cannot say, both, so that a
+/// pattern counts if it counts in either.
+fn case_modes(root: &Path) -> Vec<bool> {
+    let out = git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--type=bool", "--get", "core.ignorecase"])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            vec![String::from_utf8_lossy(&out.stdout).trim() == "true"]
+        }
+        Ok(out) if out.status.code() == Some(1) => vec![false],
+        _ => vec![false, true],
+    }
+}
+
+/// Undo git's C-style quoting of a pattern (`"my vault.murk"`), as git does
+/// before it matches the pattern: `\"`, `\\`, the control escapes and
+/// three-digit octal bytes (`\155` is `m`). Returns the pattern and the rest
+/// of the line, or `None` when the quoting is invalid, a line git ignores.
+fn unquote_pattern(line: &str) -> Option<(String, &str)> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 1;
+    while at < bytes.len() {
+        let b = bytes[at];
+        at += 1;
+        match b {
+            b'"' => return Some((String::from_utf8_lossy(&out).into_owned(), &line[at..])),
+            b'\\' => {
+                let e = *bytes.get(at)?;
+                at += 1;
+                out.push(match e {
+                    b'"' | b'\\' => e,
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b'f' => 0x0c,
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'v' => 0x0b,
+                    b'0'..=b'3' => {
+                        let digits = bytes.get(at..at + 2)?;
+                        if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                            return None;
+                        }
+                        at += 2;
+                        ((e - b'0') << 6) | ((digits[0] - b'0') << 3) | (digits[1] - b'0')
+                    }
+                    _ => return None,
+                });
+            }
+            b => out.push(b),
+        }
+    }
+    None
+}
+
+/// One line of an attributes file: the pattern (`None` for a macro
+/// definition `[attr]name`) and the attribute tokens.
+fn parse_attribute_line(line: &str) -> Option<(Option<String>, Vec<&str>)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if let Some(def) = line.strip_prefix("[attr]") {
+        let mut words = def.split_whitespace();
+        words.next()?;
+        return Some((None, words.collect()));
+    }
+    let (pattern, rest) = if line.starts_with('"') {
+        // An unclosed quote: git ignores the line, so do the same.
+        unquote_pattern(line)?
+    } else {
+        let end = line.find(char::is_whitespace).unwrap_or(line.len());
+        (line[..end].to_string(), &line[end..])
+    };
+    Some((Some(pattern), rest.split_whitespace().collect()))
+}
+
+/// Whether the attribute token `token` sets, unsets or resets `merge` to
+/// anything but `murk`, directly or through one of `macros`.
+fn touches_merge(token: &str, macros: &BTreeSet<String>) -> bool {
+    let name = token.trim_start_matches(['-', '!']);
+    let (name, value) = name
+        .split_once('=')
+        .map_or((name, None), |(n, v)| (n, Some(v)));
+    if name == "merge" {
+        return token.starts_with(['-', '!']) || value != Some("murk");
+    }
+    macros.contains(name)
+}
+
+/// Every attributes file git reads for this working tree that exists, with
+/// the name to show for it: the system file, `core.attributesFile`, the
+/// `.gitattributes` files in the tree (tracked or not) and
+/// `.git/info/attributes`. The root `.gitattributes` is passed in, read
+/// already.
+fn attribute_files(
+    root: &Path,
+    root_contents: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let git = |args: &[&str]| {
+        git_command()
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let line = |args: &[&str]| {
+        git(args)
+            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let mut paths: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(system) = line(&["var", "GIT_ATTR_SYSTEM"]) {
+        paths.push((system.clone(), PathBuf::from(system)));
+    }
+    let global = line(&["config", "--type=path", "--get", "core.attributesFile"])
+        .or_else(|| line(&["var", "GIT_ATTR_GLOBAL"]))
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .map(|d| d.join("git").join("attributes"))
+        });
+    if let Some(global) = global {
+        paths.push((global.display().to_string(), global));
+    }
+    // Nested .gitattributes files, tracked or not. One ls-files run whose
+    // output git writes and murk only reads: no per-path work.
+    let nested = git(&[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        ":(glob)**/.gitattributes",
+    ])
+    .unwrap_or_default();
+    let mut nested: Vec<&str> = nested
+        .split('\0')
+        .filter(|p| !p.is_empty() && *p != ".gitattributes")
+        .collect();
+    nested.sort_unstable();
+    nested.dedup();
+    paths.extend(nested.into_iter().map(|p| (p.to_string(), root.join(p))));
+    if let Some(info) = line(&["rev-parse", "--git-path", "info/attributes"]) {
+        paths.push((info.clone(), root.join(info)));
+    }
+
+    let mut files = Vec::new();
+    if let Some(text) = root_contents {
+        files.push((".gitattributes".to_string(), text.to_string()));
+    }
+    for (shown, path) in paths {
+        match fs::read(&path) {
+            Ok(bytes) => files.push((shown, String::from_utf8_lossy(&bytes).into_owned())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // git would read it: refuse rather than guess what it says.
+            Err(e) => {
+                return Err(format!(
+                    "reading {}: {e}\nmurk setup-merge-driver changed nothing",
+                    crate::terminal_text(&shown, false)
+                ));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Refuse to override a `merge` attribute the user gave vault files. Every
+/// line, in every attributes file git reads here, that sets, unsets or
+/// resets `merge` (also through a macro such as `binary`) to anything but
+/// `murk`, for a pattern that could match a file name the `missing` lines
+/// would match, is reported with its file and line number. Decided from
+/// the lines alone, so it covers files that do not exist yet. A line in
+/// `.git/info/attributes` or a subdirectory would override murk's line
+/// instead; it is refused too, since murk's driver would then not run.
+fn check_existing_attribute(
+    root: &Path,
+    root_contents: Option<&str>,
+    missing: &[&str],
+) -> Result<(), String> {
+    let suffix = missing.contains(&GITATTRIBUTES_LINES[0]);
+    let prefix = missing.contains(&GITATTRIBUTES_LINES[1]);
+    if !suffix && !prefix {
+        return Ok(());
+    }
+    let files = attribute_files(root, root_contents)?;
+    let modes = case_modes(root);
+    // Macros that touch merge, `binary` built in; a macro may use another.
+    let mut macros = BTreeSet::from(["binary".to_string()]);
+    loop {
+        let before = macros.len();
+        for (_, text) in &files {
+            for line in text.lines() {
+                if let Some((None, tokens)) = parse_attribute_line(line)
+                    && tokens.iter().any(|t| touches_merge(t, &macros))
+                    && let Some(name) = line.trim()["[attr]".len()..].split_whitespace().next()
+                {
+                    macros.insert(name.to_string());
+                }
+            }
+        }
+        if macros.len() == before {
+            break;
+        }
+    }
+    let mut found = Vec::new();
+    for (shown, text) in &files {
+        for (n, line) in text.lines().enumerate() {
+            let Some((Some(pattern), tokens)) = parse_attribute_line(line) else {
+                continue;
+            };
+            // git ignores negative patterns and patterns for directories.
+            if pattern.starts_with('!') || pattern.ends_with('/') {
+                continue;
+            }
+            // A name pattern that starts with `*` reaches `.murk.*` names only
+            // through the wildcard. For those names it counts only when it
+            // names a merge driver (`*.prod merge=custom` would override a
+            // `.murk.prod` vault). `-merge`, `!merge` and macros such as
+            // `binary` there describe a file type (`*.png binary`), not
+            // vaults. Against `*.murk` every merge setting counts.
+            let name = pattern.rsplit('/').next().unwrap_or(&pattern);
+            let names_driver = tokens.iter().any(|t| {
+                t.strip_prefix("merge=")
+                    .is_some_and(|driver| driver != "murk")
+            });
+            let prefix = prefix && (!name.starts_with('*') || names_driver);
+            if tokens.iter().any(|t| touches_merge(t, &macros))
+                && modes
+                    .iter()
+                    .any(|&fold| glob_may_match_vault(&pattern, suffix, prefix, fold))
+            {
+                found.push(format!(
+                    "{}:{}: {}",
+                    crate::terminal_text(shown, false),
+                    n + 1,
+                    crate::terminal_text(line.trim(), false)
+                ));
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    let mut lines = vec![
+        "git attributes already set a merge attribute for files that murk's .gitattributes lines would cover:".to_string(),
+    ];
+    lines.extend(found);
+    lines.push("murk setup-merge-driver changed nothing".into());
+    lines.push(
+        "to use murk's driver, remove the merge attribute from those lines, then run murk setup-merge-driver again"
+            .into(),
+    );
+    Err(lines.join("\n"))
+}
+
 /// Configure git to use murk's custom merge driver for vault files.
 ///
-/// 1. Ensures the `.gitattributes` at the root of the working tree contains
+/// Refuses, writing nothing, outside a working tree, when git's working tree
+/// does not contain the current directory, when git config already sets a
+/// `merge.murk.driver` murk did not write, or when an attributes line gives
+/// files that the lines setup adds would cover another `merge` attribute.
+/// Otherwise:
+///
+/// 1. Runs `git config merge.murk.name` and `git config merge.murk.driver`,
+///    replacing a driver line an older murk wrote. When this fails,
+///    `.gitattributes` is untouched.
+/// 2. Ensures the `.gitattributes` at the root of the working tree contains
 ///    `*.murk merge=murk` and `.murk.* merge=murk`, appending whichever is
-///    missing. Outside a working tree, or when git's working tree does not
-///    contain the current directory, it fails before writing anything.
-/// 2. Runs `git config merge.murk.name` and `git config merge.murk.driver`,
-///    replacing a driver line an older murk wrote.
+///    missing.
 pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
-    let mut steps = Vec::new();
-
-    // 1. Write .gitattributes entry, at the root of the working tree: a
-    // `.gitattributes` in a subdirectory only covers that subdirectory.
-    let gitattributes_path = working_tree_root()?.join(".gitattributes");
+    // The `.gitattributes` at the root of the working tree: one in a
+    // subdirectory only covers that subdirectory.
+    let root = working_tree_root()?;
+    let gitattributes_path = root.join(".gitattributes");
     let gitattributes = gitattributes_path.as_path();
     // Before anything is written: never replace someone else's driver.
     check_existing_driver()?;
 
     crate::env::reject_symlink(gitattributes, ".gitattributes")?;
-
-    if gitattributes.exists() {
-        let contents = fs::read_to_string(gitattributes)
-            .map_err(|e| format!("reading .gitattributes: {e}"))?;
-        let missing: Vec<&str> = GITATTRIBUTES_LINES
-            .into_iter()
-            .filter(|line| !contents.lines().any(|l| l.trim() == *line))
-            .collect();
-        if missing.is_empty() {
-            steps.push(MergeDriverSetupStep::GitattributesAlreadyExists);
-        } else {
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(gitattributes)
-                .map_err(|e| format!("writing .gitattributes: {e}"))?;
-            // Never glue the first new line onto an unterminated last line.
-            let mut text = String::new();
-            if !contents.is_empty() && !contents.ends_with('\n') {
-                text.push('\n');
-            }
-            for line in missing {
-                text.push_str(line);
-                text.push('\n');
-            }
-            file.write_all(text.as_bytes())
-                .map_err(|e| format!("writing .gitattributes: {e}"))?;
-            steps.push(MergeDriverSetupStep::GitattributesAppended);
-        }
+    // Read what is there before git config changes, so a read error changes
+    // nothing.
+    let contents = if gitattributes.exists() {
+        Some(
+            fs::read_to_string(gitattributes)
+                .map_err(|e| format!("reading .gitattributes: {e}"))?,
+        )
     } else {
-        fs::write(gitattributes, GITATTRIBUTES_LINES.join("\n") + "\n")
-            .map_err(|e| format!("writing .gitattributes: {e}"))?;
-        steps.push(MergeDriverSetupStep::GitattributesCreated);
-    }
+        None
+    };
+    let missing: Vec<&str> = GITATTRIBUTES_LINES
+        .into_iter()
+        .filter(|line| {
+            !contents
+                .as_deref()
+                .is_some_and(|c| c.lines().any(|l| l.trim() == *line))
+        })
+        .collect();
+    // Never override someone else's merge attribute.
+    check_existing_attribute(&root, contents.as_deref(), &missing)?;
 
-    // 2. Configure git merge driver. `--` ends the options, so a vault named
-    // like a flag (`-h.murk`) reaches the driver as a path. Setting the key
-    // replaces a driver line an older murk wrote.
+    // 1. Configure git merge driver first: if git config fails, no attribute
+    // names a driver git does not have. `--` ends the options, so a vault
+    // named like a flag (`-h.murk`) reaches the driver as a path. Setting the
+    // key replaces a driver line an older murk wrote.
     let configs = [
         (GIT_CONFIG_MERGE_NAME, "murk vault merge"),
         (GIT_CONFIG_MERGE_DRIVER, MERGE_DRIVER_COMMAND),
@@ -217,14 +681,47 @@ pub fn setup_merge_driver() -> Result<MergeDriverSetup, String> {
         if !out.status.success() {
             let git_said = crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true)
                 .into_owned();
-            return Err(format!("git config {key} failed: {git_said}"));
+            return Err(format!(
+                "git config {key} failed: {git_said}\n.gitattributes was not changed\nfix the error, then run murk setup-merge-driver again"
+            ));
         }
     }
-    steps.push(MergeDriverSetupStep::GitConfigured);
+
+    // 2. Write the .gitattributes entries.
+    let written_after_config = |e: std::io::Error| {
+        format!(
+            "writing .gitattributes: {e}\ngit config already names murk's merge driver, but .gitattributes may lack its lines\nfix the error, then run murk setup-merge-driver again"
+        )
+    };
+    let attributes_step = if let Some(contents) = contents {
+        if missing.is_empty() {
+            MergeDriverSetupStep::GitattributesAlreadyExists
+        } else {
+            // Never glue the first new line onto an unterminated last line.
+            let mut text = String::new();
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                text.push('\n');
+            }
+            for line in missing {
+                text.push_str(line);
+                text.push('\n');
+            }
+            fs::OpenOptions::new()
+                .append(true)
+                .open(gitattributes)
+                .and_then(|mut file| file.write_all(text.as_bytes()))
+                .map_err(written_after_config)?;
+            MergeDriverSetupStep::GitattributesAppended
+        }
+    } else {
+        fs::write(gitattributes, GITATTRIBUTES_LINES.join("\n") + "\n")
+            .map_err(written_after_config)?;
+        MergeDriverSetupStep::GitattributesCreated
+    };
 
     Ok(MergeDriverSetup {
         gitattributes: gitattributes_path,
-        steps,
+        steps: vec![attributes_step, MergeDriverSetupStep::GitConfigured],
     })
 }
 
@@ -936,6 +1433,224 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::testutil::CWD_LOCK;
+
+    #[test]
+    fn attribute_patterns_that_could_name_a_vault_are_found() {
+        // (pattern, may match *.murk, may match .murk.*), the same with and
+        // without core.ignorecase.
+        for (pattern, suffix, prefix) in [
+            ("*.murk", true, true),
+            (".murk.*", true, true),
+            ("*", true, true),
+            ("**", true, true),
+            ("a/**", true, true),
+            ("prod.*", true, false),
+            ("prod.murk", true, false),
+            ("/config/.murk.prod", false, true),
+            ("[!x].murk", true, false),
+            ("[ps]rod.murk", true, false),
+            ("*.mur?", true, true),
+            ("*.[l-n]urk", true, true),
+            ("*[[:alpha:]]", true, true),
+            (".murk.prod", false, true),
+            (".murk", true, false),
+            ("*.txt", false, true),
+            ("prod.txt", false, false),
+            ("*.murkx", false, true),
+            ("[!.]murk", false, false),
+            ("*.mur[!k]", false, true),
+            ("x.murk.*", true, false),
+            ("prod.mur[!k]", false, false),
+            ("*.murk/x", false, false),
+            ("?", false, false),
+            (".[a-z]urk", true, false),
+            (".[!m]urk", false, false),
+        ] {
+            for fold in [false, true] {
+                assert_eq!(
+                    (
+                        glob_may_match_vault(pattern, true, false, fold),
+                        glob_may_match_vault(pattern, false, true, fold)
+                    ),
+                    (suffix, prefix),
+                    "{pattern} fold={fold}"
+                );
+            }
+        }
+        // Case matters: (pattern, (*.murk, .murk.*) without core.ignorecase,
+        // the same with it).
+        for (pattern, exact, folded) in [
+            ("PROD.MURK", (false, false), (true, false)),
+            (".[!M]urk", (true, false), (true, false)),
+            (".[^M]urk", (true, false), (true, false)),
+            (".[!A-Z]urk", (true, false), (true, false)),
+            (".[!M]urk.prod", (false, true), (false, true)),
+            (".[M]urk", (false, false), (true, false)),
+            (".[A-Z]urk", (false, false), (true, false)),
+        ] {
+            for (fold, want) in [(false, exact), (true, folded)] {
+                assert_eq!(
+                    (
+                        glob_may_match_vault(pattern, true, false, fold),
+                        glob_may_match_vault(pattern, false, true, fold)
+                    ),
+                    want,
+                    "{pattern} fold={fold}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attribute_pattern_judgement_covers_everything_git_matches() {
+        // git is the oracle: for each pattern and case mode, every name in
+        // the table that git gives both the pattern's attribute and one of
+        // murk's lines must be one the matcher reports.
+        let patterns = [
+            ".[!M]urk",
+            ".[^M]urk",
+            ".[!A-Z]urk",
+            ".[!M]urk.prod",
+            ".[!m]urk",
+            ".[a-z]urk",
+            ".[A-Z]urk",
+            ".[M]urk",
+            "[!a]rod.murk",
+            "[!x].murk",
+            "prod.*",
+            "*.prod",
+            "PROD.MURK",
+            ".MURK",
+            ".Murk.*",
+            "*.MURK",
+            "*.mur[!k]",
+            "*.mur[!K]",
+            "[[:upper:]]*.murk",
+            "secrets/**",
+            "?murk",
+            "*urk",
+            ".mur[a-l]",
+        ];
+        let names = [
+            ".murk",
+            ".Murk",
+            ".MURK",
+            ".mUrk",
+            ".murK",
+            "prod.murk",
+            "Prod.murk",
+            "prod.MURK",
+            "arod.murk",
+            "xrod.murk",
+            "a.murk",
+            "x.murk",
+            ".murk.prod",
+            ".Murk.prod",
+            ".MURK.PROD",
+            ".murk.PROD",
+            "secrets/a.murk",
+            "Q.murk",
+            ".murk.murk",
+            "murk.murk",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[String]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_ATTR_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init".to_string(), "-q".to_string()]);
+        for pattern in patterns {
+            fs::write(
+                dir.path().join(".gitattributes"),
+                format!("*.murk vs\n.murk.* vp\n{pattern} merge=custom\n"),
+            )
+            .unwrap();
+            for fold in [false, true] {
+                let mut args: Vec<String> = [
+                    "-c",
+                    &format!("core.ignorecase={fold}"),
+                    "check-attr",
+                    "-z",
+                    "vs",
+                    "vp",
+                    "merge",
+                    "--",
+                ]
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+                args.extend(names.iter().map(ToString::to_string));
+                let out = git(&args);
+                let fields: Vec<&str> = out.split('\0').collect();
+                let mut attrs = std::collections::HashMap::new();
+                for f in fields.as_chunks::<3>().0 {
+                    attrs.insert((f[0], f[1]), f[2]);
+                }
+                for name in names {
+                    if attrs[&(name, "merge")] != "custom" {
+                        continue;
+                    }
+                    if attrs[&(name, "vs")] == "set" {
+                        assert!(
+                            glob_may_match_vault(pattern, true, false, fold),
+                            "{pattern} fold={fold}: git matches {name} (*.murk)"
+                        );
+                    }
+                    if attrs[&(name, "vp")] == "set" {
+                        assert!(
+                            glob_may_match_vault(pattern, false, true, fold),
+                            "{pattern} fold={fold}: git matches {name} (.murk.*)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attribute_lines_that_touch_merge_are_found() {
+        let macros = BTreeSet::from(["binary".to_string(), "mine".to_string()]);
+        for token in [
+            "merge",
+            "-merge",
+            "!merge",
+            "merge=custom",
+            "binary",
+            "-mine",
+        ] {
+            assert!(touches_merge(token, &macros), "{token}");
+        }
+        for token in ["merge=murk", "text", "-diff", "diff=merge"] {
+            assert!(!touches_merge(token, &macros), "{token}");
+        }
+        assert_eq!(
+            parse_attribute_line(r#""my vault.murk" merge=custom"#),
+            Some((Some("my vault.murk".to_string()), vec!["merge=custom"]))
+        );
+        assert_eq!(
+            parse_attribute_line("[attr]mine -merge -text"),
+            Some((None, vec!["-merge", "-text"]))
+        );
+        assert_eq!(parse_attribute_line("  # note"), None);
+        assert_eq!(
+            parse_attribute_line(r#""prod.\155urk" merge=custom"#),
+            Some((Some("prod.murk".to_string()), vec!["merge=custom"]))
+        );
+        assert_eq!(
+            parse_attribute_line(r#""a\\b\"c" -merge"#),
+            Some((Some("a\\b\"c".to_string()), vec!["-merge"]))
+        );
+        // Invalid quoting: git ignores the line.
+        assert_eq!(parse_attribute_line(r#""a\qb" merge=x"#), None);
+    }
 
     #[test]
     fn a_case_folded_head_maps_to_the_stored_branch_where_git_ignores_case() {

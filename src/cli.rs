@@ -527,7 +527,17 @@ pub enum Command {
     ///
     /// Adds `*.murk merge=murk` and `.murk.* merge=murk` to the `.gitattributes`
     /// at the root of the working tree, and sets `merge.murk.*` in git config.
-    /// A file that matches but is not a vault is merged as text.
+    /// Changes nothing when git config already sets a `merge.murk.driver` that
+    /// murk did not write, or when the git attributes already give vault files
+    /// another `merge` attribute.
+    ///
+    /// The driver merges three sides that murk reads as vaults. It merges a file
+    /// that cannot be a vault as text. When a side is or could be a vault but
+    /// murk cannot read every side, the driver exits 1 and writes both sides into
+    /// the file between conflict markers. Valid JSON could be a vault only when it
+    /// has a top-level `recipients`, `secrets`, `meta`, `vault_name` or `vault_id`
+    /// key. Other text could be a vault when it starts with `{` or uses one of
+    /// these names as a JSON key.
     #[command(name = "setup-merge-driver")]
     SetupMergeDriver,
 

@@ -24,7 +24,7 @@ Download a release binary and check it against the release's `SHA256SUMS`:
 
 ```dockerfile
 FROM debian:bookworm-slim
-ARG MURK_VERSION=v0.15.0
+ARG MURK_VERSION=v0.15.1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
@@ -40,6 +40,13 @@ RUN set -eu; \
 
 The checksum catches a corrupt download. To check the build provenance as
 well, see [Verifying releases](https://github.com/interrupted-sh/murk/blob/main/VERIFYING.md).
+
+In your own image, pin the base image by digest
+(`debian:bookworm-slim@sha256:<digest>`), so that a rebuild uses the image you
+tested. A tool such as Dependabot can update the digest. The agent isolation
+recipe's
+[`Dockerfile`](https://github.com/interrupted-sh/murk/blob/main/scripts/agent-isolation/Dockerfile)
+does this.
 
 ## Rules for the grant key file
 

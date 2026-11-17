@@ -3186,11 +3186,19 @@ fn prompted_writes_refuse_a_vault_changed_on_disk_while_waiting() {
             .spawn()
             .unwrap();
         wait_for_vault_lock(&vault);
-        // What a pull brings in: here, any other bytes.
+        // What a pull brings in: here, any other bytes. git replaces the
+        // file, so the child reads the old or the new bytes, never a
+        // truncated file; `fs::write` here could hand it an empty vault.
         let mut pulled = fs::read(&vault).unwrap();
         pulled.push(b'\n');
-        fs::write(&vault, &pulled).unwrap();
-        child.stdin.take().unwrap().write_all(b"s1\n").unwrap();
+        let staged = dir.path().join("pulled.tmp");
+        fs::write(&staged, &pulled).unwrap();
+        fs::rename(&staged, &vault).unwrap();
+        // If the child exits before it reads the value, the write fails with
+        // a broken pipe. The assertions below still require the refusal.
+        if let Err(e) = child.stdin.take().unwrap().write_all(b"s1\n") {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{args:?}: {e}");
+        }
         let out = child.wait_with_output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
@@ -4120,9 +4128,26 @@ fn setup_merge_driver_outside_a_repository_writes_nothing() {
 /// writes every working-tree file, a merge driver's result included, with
 /// CRLF endings. The driver itself writes LF, and git converts the whole file
 /// afterwards, so the endings must be uniform: a mix would mean part of the
-/// file bypassed git's conversion.
+/// file bypassed git's conversion. Without that setting git converts nothing,
+/// so any CR is the driver's own and fails the test.
 fn working_tree_text(path: &std::path::Path) -> String {
     let text = fs::read_to_string(path).unwrap();
+    let autocrlf = std::process::Command::new("git")
+        .args(["config", "--get", "core.autocrlf"])
+        .current_dir(path.parent().unwrap())
+        .output()
+        .unwrap();
+    let autocrlf = String::from_utf8_lossy(&autocrlf.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if !["true", "yes", "on", "1"].contains(&autocrlf.as_str()) {
+        assert!(
+            !text.contains('\r'),
+            "{}: CR in a file git did not convert: {text:?}",
+            path.display()
+        );
+        return text;
+    }
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count();
     assert!(
@@ -4706,6 +4731,823 @@ fn setup_merge_driver_prints_a_hostile_path_safely() {
     assert!(
         !stderr.contains("\x1b[31m"),
         "raw escape printed: {stderr:?}"
+    );
+}
+
+/// `bytes` (UTF-8 text) re-encoded as UTF-16 with a byte-order mark, little-
+/// or big-endian, as an editor saves it.
+fn utf16(bytes: &[u8], little_endian: bool) -> Vec<u8> {
+    let text = std::str::from_utf8(bytes).unwrap();
+    let mut out = if little_endian {
+        vec![0xff, 0xfe]
+    } else {
+        vec![0xfe, 0xff]
+    };
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        });
+    }
+    out
+}
+
+#[test]
+fn merge_driver_refuses_a_vault_damaged_on_every_side() {
+    // No side reads as a vault, and still none is merged as text: with base
+    // equal to theirs a text merge would exit 0 with a vault murk can't read.
+    let (base, ours) = base_and_ours_vaults();
+    type Damage = fn(&[u8]) -> Vec<u8>;
+    let damage: [(&str, Damage); 5] = [
+        ("bom", |v| [&b"\xef\xbb\xbf"[..], v].concat()),
+        ("bom and whitespace", |v| {
+            [&b"\xef\xbb\xbf \n\t"[..], v].concat()
+        }),
+        ("stray trailing line", |v| {
+            [v, &b"# stray line\n"[..]].concat()
+        }),
+        ("stray leading line", |v| {
+            [&b"# stray line\n"[..], v].concat()
+        }),
+        ("renamed version key", |v| {
+            String::from_utf8(v.to_vec())
+                .unwrap()
+                .replacen("\"version\"", "\"versionx\"", 1)
+                .into_bytes()
+        }),
+    ];
+    for (what, damaged) in damage {
+        let work = TempDir::new().unwrap();
+        let (code, stderr) = run_driver(
+            work.path(),
+            &damaged(&base),
+            &damaged(&ours),
+            &damaged(&base),
+            "test.murk",
+        );
+        assert_refused_with_markers(work.path(), code, &stderr, "on base, ours, theirs");
+        assert!(
+            stderr.contains("test.murk may be a vault") && !stderr.contains("merged as text"),
+            "{what}: {stderr}"
+        );
+        let written = fs::read_to_string(work.path().join("o")).unwrap();
+        assert!(murk_cli::vault::parse(&written).is_err(), "{what}");
+    }
+}
+
+#[test]
+fn merge_driver_refuses_a_side_with_a_stray_line_before_the_vault() {
+    let (base, ours) = base_and_ours_vaults();
+    let theirs = [&b"stray line\n"[..], &base].concat();
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(work.path(), &base, &ours, &theirs, "test.murk");
+    assert_refused_with_markers(work.path(), code, &stderr, "on theirs");
+    // Two sides are vaults murk reads: the vault advice applies.
+    assert!(
+        stderr.contains("test.murk is a vault") && stderr.contains("murk verify --vault test.murk"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn merge_driver_refuses_a_truncated_vault_that_names_no_vault_key() {
+    // Cut off before any key only a vault has: only the leading `{`, after
+    // a BOM and whitespace or not, says it could be a vault.
+    let cut = b"{\n  \"version\": \"3.0\",\n  \"created\": \"2026-";
+    for (what, side) in [
+        ("plain", cut.to_vec()),
+        ("bom", [&b"\xef\xbb\xbf  \n"[..], cut].concat()),
+    ] {
+        let work = TempDir::new().unwrap();
+        let theirs = [&side[..], b"theirs"].concat();
+        let (code, stderr) = run_driver(work.path(), &side, &side, &theirs, "test.murk");
+        assert_refused_with_markers(work.path(), code, &stderr, "on base, ours, theirs");
+        assert!(stderr.contains("may be a vault"), "{what}: {stderr}");
+    }
+}
+
+#[test]
+fn merge_driver_refuses_text_that_uses_any_vault_key() {
+    // Not JSON and no leading `{`: a vault fragment whose only sign is one
+    // key only a vault has, used as a JSON key, with any spacing before the
+    // colon. A text merge of these sides would be clean.
+    for key in ["recipients", "secrets", "meta", "vault_name", "vault_id"] {
+        for spacing in ["", " ", "\n  "] {
+            let fragment = format!("  \"version\": \"3.0\",\n  \"{key}\"{spacing}: \"x\",\n");
+            let ours = format!("{fragment}ours\n");
+            let theirs = format!("theirs\n{fragment}");
+            let work = TempDir::new().unwrap();
+            let (code, stderr) = run_driver(
+                work.path(),
+                fragment.as_bytes(),
+                ours.as_bytes(),
+                theirs.as_bytes(),
+                "test.murk",
+            );
+            assert_refused_with_markers(work.path(), code, &stderr, "on base, ours, theirs");
+            assert!(
+                stderr.contains("may be a vault"),
+                "{key:?}{spacing:?}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn merge_driver_merges_json_and_notes_that_are_not_vaults_as_text() {
+    // `.murk.*` also matches ordinary files: JSON with no top-level vault key
+    // (also one that has them deeper down, or is an array), and notes that
+    // quote a key name. Changes far apart merge cleanly; a change both sides
+    // made conflicts with markers.
+    let files = [
+        (
+            ".murk.json",
+            "{\n  \"k1\": \"first\",\n  \"version\": \"1.0\",\n  \"nested\": {\"secrets\": []},\n  \"k3\": 3,\n  \"k4\": \"last\"\n}\n",
+        ),
+        (
+            ".murk.list",
+            "[\n  \"first\",\n  {\"secrets\": 1, \"meta\": 2},\n  3,\n  \"last\"\n]\n",
+        ),
+        (
+            ".murk.md",
+            "first\n\nThe \"secrets\" field lists values; see \"meta\" and \"recipients\".\n\nlast\n",
+        ),
+    ];
+    for (path, base) in files {
+        let ours = base.replace("first", "ours");
+        let theirs = base.replace("last", "theirs");
+        let work = TempDir::new().unwrap();
+        let (code, stderr) = run_driver(
+            work.path(),
+            base.as_bytes(),
+            ours.as_bytes(),
+            theirs.as_bytes(),
+            path,
+        );
+        assert_eq!(code, 0, "{path}: {stderr}");
+        assert_eq!(
+            fs::read_to_string(work.path().join("o")).unwrap(),
+            base.replace("first", "ours").replace("last", "theirs"),
+            "{path}"
+        );
+
+        let theirs = base.replace("first", "theirs");
+        let (code, stderr) = run_driver(
+            work.path(),
+            base.as_bytes(),
+            ours.as_bytes(),
+            theirs.as_bytes(),
+            path,
+        );
+        assert_eq!(code, 1, "{path}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "{path} is not a murk vault: merged as text, with conflict markers"
+            )),
+            "{stderr}"
+        );
+        let merged = fs::read_to_string(work.path().join("o")).unwrap();
+        assert!(
+            merged.contains(&format!("<<<<<<< ours:{path}\n")) && merged.contains("theirs"),
+            "{merged}"
+        );
+    }
+}
+
+#[test]
+fn merge_driver_refuses_notes_that_use_a_vault_key_as_maybe_a_vault() {
+    // Notes holding a vault fragment: murk cannot tell them from a damaged
+    // vault, so it refuses, but without advice that only fits a vault.
+    let base = "first\n\n\"secrets\": {}\n\nlast\n";
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(
+        work.path(),
+        base.as_bytes(),
+        base.replace("first", "ours").as_bytes(),
+        base.replace("last", "theirs").as_bytes(),
+        ".murk.md",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains(".murk.md may be a vault, but murk cannot read it on base, ours, theirs")
+            && stderr.contains("merge it by hand")
+            && !stderr.contains("murk verify")
+            && !stderr.contains("redo the other side's changes with murk"),
+        "{stderr}"
+    );
+    let merged = fs::read_to_string(work.path().join("o")).unwrap();
+    assert!(
+        merged.starts_with("<<<<<<< ours:.murk.md\n") && merged.contains(">>>>>>> theirs:.murk.md"),
+        "{merged}"
+    );
+}
+
+#[test]
+fn merge_driver_refuses_a_vault_saved_as_utf16() {
+    let (base, ours) = base_and_ours_vaults();
+    let markers = |work: &std::path::Path| {
+        let merged = fs::read(work.join("o")).unwrap();
+        assert!(
+            merged.starts_with(b"<<<<<<< ours:test.murk\n")
+                && merged.ends_with(b">>>>>>> theirs:test.murk\n"),
+            "{}",
+            String::from_utf8_lossy(&merged)
+        );
+    };
+    // theirs re-saved as UTF-16.
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(work.path(), &base, &ours, &utf16(&base, true), "test.murk");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("test.murk is a vault, but murk cannot read it on theirs")
+            && stderr.contains("theirs: UTF-16 text")
+            && !stderr.contains("not a murk vault"),
+        "{stderr}"
+    );
+    markers(work.path());
+    // Every side, little-endian, then big-endian.
+    for little_endian in [true, false] {
+        let work = TempDir::new().unwrap();
+        let (code, stderr) = run_driver(
+            work.path(),
+            &utf16(&base, little_endian),
+            &utf16(&ours, little_endian),
+            &utf16(&base, little_endian),
+            "test.murk",
+        );
+        assert_eq!(code, 1, "{stderr}");
+        assert!(
+            stderr.contains(
+                "test.murk may be a vault, but murk cannot read it on base, ours, theirs"
+            ) && !stderr.contains("not a murk vault"),
+            "{stderr}"
+        );
+        markers(work.path());
+    }
+    // UTF-16 notes are still left to git, which cannot merge them as text.
+    let work = TempDir::new().unwrap();
+    let ours_notes = utf16(b"ours\n", true);
+    let (code, stderr) = run_driver(
+        work.path(),
+        &utf16(b"base\n", true),
+        &ours_notes,
+        &utf16(b"theirs\n", true),
+        ".murk.txt",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains(".murk.txt is not a murk vault"), "{stderr}");
+    assert_eq!(fs::read(work.path().join("o")).unwrap(), ours_notes);
+}
+
+#[test]
+fn merge_driver_without_a_path_names_no_file_it_cannot_know() {
+    // A driver line written before 0.14 passes no %P: the file may be
+    // .murk.staging, so no hint may name .murk.
+    let (base, ours) = base_and_ours_vaults();
+    let work = TempDir::new().unwrap();
+    for (name, bytes) in [
+        ("b", base.clone()),
+        ("o", ours),
+        ("t", [&b"\xef\xbb\xbf"[..], &base].concat()),
+    ] {
+        fs::write(work.path().join(name), bytes).unwrap();
+    }
+    let out = murk_bin(work.path())
+        .current_dir(work.path())
+        .args(["merge-driver", "--", "b", "o", "t"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        !stderr.contains("-- .murk") && !stderr.contains(".murk is"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("does not pass the file name (%P)")
+            && stderr.contains("run murk setup-merge-driver again")
+            && stderr.contains("the file git is merging (see git status) is a vault")
+            && stderr.contains("git checkout --ours -- <file>"),
+        "{stderr}"
+    );
+    let merged = fs::read_to_string(work.path().join("o")).unwrap();
+    assert!(
+        merged.starts_with("<<<<<<< ours\n") && merged.ends_with(">>>>>>> theirs\n"),
+        "{merged}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_driver_says_ours_is_unchanged_when_the_merged_vault_cannot_be_written() {
+    // theirs changed nothing, so the keyless merge is clean and only the
+    // write fails: the directory holding ours is read-only.
+    use std::os::unix::fs::PermissionsExt;
+    let (base, ours) = base_and_ours_vaults();
+    let work = TempDir::new().unwrap();
+    let ro = work.path().join("ro");
+    fs::create_dir(&ro).unwrap();
+    fs::write(work.path().join("b"), &base).unwrap();
+    fs::write(work.path().join("t"), &base).unwrap();
+    fs::write(ro.join("o"), &ours).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = murk_bin(work.path())
+        .current_dir(work.path())
+        .args(["merge-driver", "--", "b", "ro/o", "t", "test.murk"])
+        .output()
+        .unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("writing merged vault")
+            && stderr.contains("the working file test.murk is still ours, unchanged")
+            && stderr.contains("theirs was NOT merged")
+            && stderr.contains("git checkout --ours -- test.murk"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(ro.join("o")).unwrap(), ours);
+}
+
+#[test]
+fn merge_driver_counts_a_whitespace_only_base_as_no_base() {
+    // Both branches created the vault, and the base git hands over holds
+    // only a newline: still the add/add case, not an unreadable base.
+    let (vault_a, vault_b) = base_and_ours_vaults();
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(work.path(), b"\n", &vault_a, &vault_b, "test.murk");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("both branches created test.murk as a new vault"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn merge_driver_prints_a_hostile_vault_path_safely() {
+    let (base, ours) = base_and_ours_vaults();
+    let path = "ev\x1b]0;pwned\x07il.murk";
+    let escaped = "ev\\u{1b}]0;pwned\\u{7}il.murk";
+    let work = TempDir::new().unwrap();
+    let theirs = [&b"\xef\xbb\xbf"[..], &base].concat();
+    // A refusal, and a text merge with a conflict.
+    for (base, ours, theirs) in [
+        (&base[..], &ours[..], &theirs[..]),
+        (b"base\n", b"ours\n", b"theirs\n"),
+    ] {
+        let (code, stderr) = run_driver(work.path(), base, ours, theirs, path);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(!stderr.contains('\x1b'), "raw escape printed: {stderr:?}");
+        assert!(stderr.contains(escaped), "{stderr}");
+    }
+}
+
+#[test]
+fn merge_driver_refuses_a_side_over_the_size_limit() {
+    // A vault padded past 64 MiB: refused from its length, as a vault.
+    let (base, ours) = base_and_ours_vaults();
+    let mut theirs = base.clone();
+    theirs.resize(base.len() + 65 * 1024 * 1024, b' ');
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(work.path(), &base, &ours, &theirs, "test.murk");
+    assert_refused_with_markers(work.path(), code, &stderr, "on theirs");
+    assert!(
+        stderr.contains("theirs: vault parse error: vault file size exceeds the 64 MiB limit"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn merge_driver_refuses_a_text_merge_whose_result_could_be_a_vault() {
+    // No side uses `"secrets"` as a key, but the clean text merge does.
+    let work = TempDir::new().unwrap();
+    let (code, stderr) = run_driver(
+        work.path(),
+        b"\"secrets\"\nA\n\nB\n:\n",
+        b"\"secrets\"\n\nB\n:\n",
+        b"\"secrets\"\nA\n\n:\n",
+        "test.murk",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("merged as text, test.murk may be a vault, but murk cannot read it"),
+        "{stderr}"
+    );
+    let merged = fs::read_to_string(work.path().join("o")).unwrap();
+    assert!(
+        merged.starts_with("<<<<<<< ours:test.murk\n\"secrets\"\n\nB\n"),
+        "{merged}"
+    );
+}
+
+#[test]
+fn setup_merge_driver_leaves_a_custom_driver_in_global_or_command_config_alone() {
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let global = dir.path().join("global.gitconfig");
+    fs::write(
+        &global,
+        "[merge \"murk\"]\n\tdriver = /opt/global-wrapper %O %A %B %P\n",
+    )
+    .unwrap();
+    let envs: [&[(&str, &std::ffi::OsStr)]; 2] = [
+        &[("GIT_CONFIG_GLOBAL", global.as_os_str())],
+        &[
+            ("GIT_CONFIG_COUNT", "1".as_ref()),
+            ("GIT_CONFIG_KEY_0", "merge.murk.driver".as_ref()),
+            (
+                "GIT_CONFIG_VALUE_0",
+                "/opt/env-wrapper %O %A %B %P".as_ref(),
+            ),
+        ],
+    ];
+    for env in envs {
+        murk_bin(dir.path())
+            .args(["setup-merge-driver"])
+            .current_dir(dir.path())
+            .envs(env.iter().copied())
+            .assert()
+            .failure()
+            .stderr(
+                predicate::str::contains("a command murk did not write")
+                    .and(predicate::str::contains("-wrapper %O %A %B %P")),
+            );
+        assert!(!dir.path().join(".gitattributes").exists());
+        assert!(driver_values(dir.path()).is_empty());
+    }
+}
+
+#[test]
+fn setup_merge_driver_prints_a_hostile_custom_driver_safely() {
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    git_ok(
+        dir.path(),
+        &["config", "merge.murk.driver", "evil\x1b[2Jcmd %O"],
+    );
+    let out = murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(!stderr.contains('\x1b'), "raw escape printed: {stderr:?}");
+    assert!(stderr.contains("evil\\u{1b}[2Jcmd %O"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_merge_driver_prints_git_rev_parse_errors_safely() {
+    // git replaces control bytes in its errors, but not a right-to-left
+    // override, which can disguise the rest of the line.
+    let dir = TempDir::new().unwrap();
+    let out = murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .env("GIT_DIR", dir.path().join("no\u{202e}git"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("git rev-parse failed"), "{stderr}");
+    assert!(
+        !stderr.contains('\u{202e}'),
+        "raw override printed: {stderr:?}"
+    );
+    assert!(stderr.contains("no\\u{202e}git"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_merge_driver_prints_git_config_errors_safely() {
+    // The repository's git dir has a right-to-left override in its name, and
+    // a stale lock makes git config fail with an error that names it.
+    let dir = TempDir::new().unwrap();
+    let base = real_path(dir.path());
+    let (repo, git_dir) = (base.join("repo"), base.join("g\u{202e}it"));
+    fs::create_dir_all(&repo).unwrap();
+    git_ok(
+        &repo,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            git_dir.to_str().unwrap(),
+        ],
+    );
+    fs::write(git_dir.join("config.lock"), "").unwrap();
+    let out = murk_bin(&base)
+        .args(["setup-merge-driver"])
+        .current_dir(&repo)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(
+        stderr.contains("git config merge.murk.name failed"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains('\u{202e}'),
+        "raw override printed: {stderr:?}"
+    );
+    assert!(stderr.contains("g\\u{202e}it"), "{stderr}");
+}
+
+/// Run setup in `dir`: it must refuse, name each of `lines` (`FILE:N: TEXT`),
+/// and configure no driver.
+fn assert_setup_refuses_attribute(dir: &std::path::Path, lines: &[&str]) {
+    let out = murk_bin(dir)
+        .args(["setup-merge-driver"])
+        .current_dir(dir)
+        .timeout(std::time::Duration::from_secs(120))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("already set a merge attribute") && stderr.contains("changed nothing"),
+        "{stderr}"
+    );
+    for line in lines {
+        assert!(stderr.contains(line), "{line}: {stderr}");
+    }
+    assert!(driver_values(dir).is_empty(), "{stderr}");
+}
+
+#[test]
+fn setup_merge_driver_leaves_a_custom_merge_attribute_alone() {
+    // Appending `*.murk merge=murk` would silently override these (the last
+    // matching line wins), or be overridden by .git/info/attributes.
+    for (file, contents, shown) in [
+        (
+            ".gitattributes",
+            "*.murk merge=custom\n",
+            ".gitattributes:1: *.murk merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "# mine\n.murk.* merge=union",
+            ".gitattributes:2: .murk.* merge=union",
+        ),
+        (
+            ".gitattributes",
+            "*.murk binary\n",
+            ".gitattributes:1: *.murk binary",
+        ),
+        (
+            ".git/info/attributes",
+            "*.murk merge=custom\n",
+            ".git/info/attributes:1: *.murk merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "prod.murk merge=custom\n",
+            ".gitattributes:1: prod.murk merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "/config/.murk.prod merge=custom\n",
+            ".gitattributes:1: /config/.murk.prod merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "[ps]rod.murk -merge\n",
+            ".gitattributes:1: [ps]rod.murk -merge",
+        ),
+        (
+            ".gitattributes",
+            "[attr]keep -merge\nprod.murk keep\n",
+            ".gitattributes:2: prod.murk keep",
+        ),
+        (
+            ".gitattributes",
+            "prod.murk !merge\n",
+            ".gitattributes:1: prod.murk !merge",
+        ),
+        // A leading `*` that names a driver also covers `.murk.prod`.
+        (
+            ".gitattributes",
+            "*.prod merge=custom\n",
+            ".gitattributes:1: *.prod merge=custom",
+        ),
+        // git decodes `\155` to `m`: this is `prod.murk`.
+        (
+            ".gitattributes",
+            "\"prod.\\155urk\" merge=custom\n",
+            ".gitattributes:1: \"prod.\\155urk\" merge=custom",
+        ),
+        // A directory glob with no vault in it yet, a quoted name and a
+        // negated class.
+        (
+            ".gitattributes",
+            "secrets/** merge=custom\n",
+            ".gitattributes:1: secrets/** merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "\"prod.murk\" merge=custom\n",
+            ".gitattributes:1: \"prod.murk\" merge=custom",
+        ),
+        (
+            ".gitattributes",
+            "[!a]rod.murk merge=custom\n",
+            ".gitattributes:1: [!a]rod.murk merge=custom",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        git_ok(dir.path(), &["init", "-q"]);
+        let path = dir.path().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        assert_setup_refuses_attribute(dir.path(), &[shown]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents, "{file}");
+        if file != ".gitattributes" {
+            assert!(!dir.path().join(".gitattributes").exists());
+        }
+    }
+}
+
+#[test]
+fn setup_merge_driver_leaves_a_custom_attribute_from_other_sources_alone() {
+    // core.attributesFile, and a .gitattributes in a subdirectory.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let global = dir.path().join("attributes");
+    fs::write(&global, "staging.murk merge=custom\n").unwrap();
+    git_ok(
+        dir.path(),
+        &["config", "core.attributesFile", global.to_str().unwrap()],
+    );
+    assert_setup_refuses_attribute(dir.path(), &["attributes:1: staging.murk merge=custom"]);
+    assert!(!dir.path().join(".gitattributes").exists());
+
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    fs::create_dir_all(dir.path().join("config")).unwrap();
+    fs::write(
+        dir.path().join("config/.gitattributes"),
+        "*.murk merge=custom\n",
+    )
+    .unwrap();
+    assert_setup_refuses_attribute(
+        dir.path(),
+        &["config/.gitattributes:1: *.murk merge=custom"],
+    );
+    assert!(!dir.path().join(".gitattributes").exists());
+}
+
+#[test]
+fn setup_merge_driver_judges_attribute_patterns_by_what_they_could_match() {
+    // A wildcard, a quoted pattern and a negated class each match a vault
+    // name. Whether that vault is tracked, untracked or absent, appending
+    // murk's lines would override the attribute, so setup refuses.
+    for (line, vault) in [
+        ("prod.* merge=custom", "prod.murk"),
+        ("\"my vault.murk\" merge=custom", "my vault.murk"),
+        ("[!x].murk merge=custom", "a.murk"),
+    ] {
+        for state in ["tracked", "untracked", "absent"] {
+            let dir = TempDir::new().unwrap();
+            git_ok(dir.path(), &["init", "-q"]);
+            let attributes = format!("{line}\n");
+            fs::write(dir.path().join(".gitattributes"), &attributes).unwrap();
+            if state != "absent" {
+                fs::write(dir.path().join(vault), "{}\n").unwrap();
+            }
+            if state == "tracked" {
+                git_ok(dir.path(), &["add", "--", vault]);
+            }
+            assert_setup_refuses_attribute(dir.path(), &[&format!(".gitattributes:1: {line}")]);
+            assert_eq!(
+                fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+                attributes,
+                "{line} ({state})"
+            );
+        }
+    }
+    // Lines that cannot touch a vault's merge attribute do not stop setup.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let attributes = "prod.txt merge=union\n*.png binary\n*.png -merge\n*.jpg !merge\n*.murk diff\n[!.]murk -merge\n";
+    fs::write(dir.path().join(".gitattributes"), attributes).unwrap();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+        format!("{attributes}*.murk merge=murk\n.murk.* merge=murk\n")
+    );
+}
+
+#[test]
+fn setup_merge_driver_follows_gits_case_rules_for_classes() {
+    // With core.ignorecase=false git matches case-sensitively, so `[!M]`
+    // matches `m`; with it, refusing is the safe side. `.[!m]urk` cannot
+    // match `.murk` in either mode.
+    for ignorecase in ["false", "true"] {
+        for line in [
+            ".[!M]urk merge=custom",
+            ".[^M]urk merge=custom",
+            ".[!A-Z]urk merge=custom",
+            ".[!M]urk.prod merge=custom",
+            ".[a-z]urk merge=custom",
+        ] {
+            let dir = TempDir::new().unwrap();
+            git_ok(dir.path(), &["init", "-q"]);
+            git_ok(dir.path(), &["config", "core.ignorecase", ignorecase]);
+            let attributes = format!("{line}\n");
+            fs::write(dir.path().join(".gitattributes"), &attributes).unwrap();
+            assert_setup_refuses_attribute(dir.path(), &[&format!(".gitattributes:1: {line}")]);
+            assert_eq!(
+                fs::read_to_string(dir.path().join(".gitattributes")).unwrap(),
+                attributes,
+                "{line} (ignorecase={ignorecase})"
+            );
+        }
+        let dir = TempDir::new().unwrap();
+        git_ok(dir.path(), &["init", "-q"]);
+        git_ok(dir.path(), &["config", "core.ignorecase", ignorecase]);
+        fs::write(dir.path().join(".gitattributes"), ".[!m]urk merge=custom\n").unwrap();
+        murk_bin(dir.path())
+            .args(["setup-merge-driver"])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn setup_merge_driver_finishes_quickly_in_a_large_repository() {
+    // 20000 tracked vault-named paths, more than a pipe holds: setup must
+    // not do per-path work that can block.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let blob = std::process::Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&blob.stdout).trim().to_string();
+    let index: String = (0..20_000)
+        .map(|n| format!("100644 {blob}\tvaults/dir{}/v{n}.murk\n", n % 100))
+        .collect();
+    let mut child = std::process::Command::new("git")
+        .args(["update-index", "--index-info"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), index.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let start = std::time::Instant::now();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
+}
+
+#[test]
+fn setup_merge_driver_writes_nothing_when_git_config_fails() {
+    // A stale lock makes git config fail: .gitattributes must not be left
+    // naming a driver git does not have. Once the lock is gone, a rerun
+    // finishes the setup.
+    let dir = TempDir::new().unwrap();
+    git_ok(dir.path(), &["init", "-q"]);
+    let attributes = dir.path().join(".gitattributes");
+    fs::write(&attributes, "*.txt text\n").unwrap();
+    let lock = dir.path().join(".git").join("config.lock");
+    fs::write(&lock, "").unwrap();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("git config merge.murk.name failed")
+                .and(predicate::str::contains(".gitattributes was not changed")),
+        );
+    assert_eq!(fs::read_to_string(&attributes).unwrap(), "*.txt text\n");
+
+    fs::remove_file(&lock).unwrap();
+    murk_bin(dir.path())
+        .args(["setup-merge-driver"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&attributes).unwrap(),
+        "*.txt text\n*.murk merge=murk\n.murk.* merge=murk\n"
+    );
+    assert_eq!(
+        driver_values(dir.path()),
+        ["murk merge-driver -- %O %A %B %P"]
     );
 }
 
