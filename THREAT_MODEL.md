@@ -89,7 +89,7 @@ If your threat model includes swap forensics or memory dumps of live processes, 
 **Library bindings (Python/Node) and the FFI boundary.** The bindings hand plaintext to a host runtime, and murk's zeroization cannot follow it there.
 
 - On a **read** (`get`/`export`), the decrypted value is copied out of `Zeroizing<String>` into a native host string (a Python `str`, a V8 `String`). The host's garbage collector owns that string and frees it on its own schedule. murk never gets to wipe it.
-- On a **write** (Node `vault.add` and the write path), the exposure is sharper. The caller builds the plaintext as a host string *before* calling murk, so it already lives in GC-managed memory. It is then copied across the FFI boundary into a Rust `String`, and neither side zeroizes it. The plaintext originated in your process, not in murk's decryption path, and lingers under the GC's control.
+- On a **write** (the `add` and `describe` writes of the Python and Node bindings), the exposure is sharper. The caller builds the plaintext as a host string *before* calling murk, so it already lives in GC-managed memory. It is then copied across the FFI boundary into a Rust `String`, and neither side zeroizes it. The plaintext originated in your process, not in murk's decryption path, and lingers under the GC's control.
 
 This is inherent to moving secrets across a language boundary. Build write values as late as possible, pass them straight in, and keep no long-lived references.
 
