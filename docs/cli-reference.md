@@ -253,6 +253,7 @@ Remove a secret
 
 ###### **Options:**
 
+* `--group <GROUP>` — Remove only the value held by this group, which must have no member who is a recipient
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
@@ -764,6 +765,7 @@ Remove a recipient from the vault
 * `--rotate` — Rotate the secrets they had access to in the same session
 * `--values-from <FILE>` — With --rotate, read new values from a dotenv file of KEY=value lines (`-` for stdin)
 * `--force` — Revoke every key of a multi-key GitHub user without confirmation
+* `--allow-orphan` — Revoke even if a group that holds values is left with no member who is a recipient
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

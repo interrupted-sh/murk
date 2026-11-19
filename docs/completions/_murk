@@ -99,6 +99,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (rm)
 _arguments "${_arguments_options[@]}" : \
+'--group=[Remove only the value held by this group, which must have no member who is a recipient]:GROUP:_default' \
 '--vault=[Vault filename]:VAULT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -470,6 +471,7 @@ _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
 '--rotate[Rotate the secrets they had access to in the same session]' \
 '--force[Revoke every key of a multi-key GitHub user without confirmation]' \
+'--allow-orphan[Revoke even if a group that holds values is left with no member who is a recipient]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':recipient -- Recipient pubkey, display name, or github\:username:_default' \
@@ -524,6 +526,7 @@ _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
 '--rotate[Rotate the secrets they had access to in the same session]' \
 '--force[Revoke every key of a multi-key GitHub user without confirmation]' \
+'--allow-orphan[Revoke even if a group that holds values is left with no member who is a recipient]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':recipient -- Recipient pubkey, display name, or github\:username:_default' \

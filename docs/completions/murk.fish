@@ -91,6 +91,7 @@ complete -c murk -n "__fish_murk_using_subcommand rotate" -l hex -d 'Encode gene
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l list -d 'List the secrets that need rotation instead of rotating (exits 1 if any do)'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c murk -n "__fish_murk_using_subcommand rm" -l group -d 'Remove only the value held by this group, which must have no member who is a recipient' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand get" -l vault -d 'Vault filename' -r
@@ -231,6 +232,7 @@ complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcom
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l rotate -d 'Rotate the secrets they had access to in the same session'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l force -d 'Revoke every key of a multi-key GitHub user without confirmation'
+complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l allow-orphan -d 'Revoke even if a group that holds values is left with no member who is a recipient'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from help" -f -a "authorize" -d 'Add a recipient to the vault'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from help" -f -a "revoke" -d 'Remove a recipient from the vault'
@@ -244,6 +246,7 @@ complete -c murk -n "__fish_murk_using_subcommand revoke" -l values-from -d 'Wit
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l rotate -d 'Rotate the secrets they had access to in the same session'
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l force -d 'Revoke every key of a multi-key GitHub user without confirmation'
+complete -c murk -n "__fish_murk_using_subcommand revoke" -l allow-orphan -d 'Revoke even if a group that holds values is left with no member who is a recipient'
 complete -c murk -n "__fish_murk_using_subcommand revoke" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand group; and not __fish_seen_subcommand_from create ls add rm help" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand group; and not __fish_seen_subcommand_from create ls add rm help" -f -a "create" -d 'Create a new recipient group (you become its first member)'

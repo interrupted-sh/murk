@@ -109,6 +109,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;rm'= {
+            cand --group 'Remove only the value held by this group, which must have no member who is a recipient'
             cand --vault 'Vault filename'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -359,6 +360,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --vault 'Vault filename'
             cand --rotate 'Rotate the secrets they had access to in the same session'
             cand --force 'Revoke every key of a multi-key GitHub user without confirmation'
+            cand --allow-orphan 'Revoke even if a group that holds values is left with no member who is a recipient'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -386,6 +388,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --vault 'Vault filename'
             cand --rotate 'Rotate the secrets they had access to in the same session'
             cand --force 'Revoke every key of a multi-key GitHub user without confirmation'
+            cand --allow-orphan 'Revoke even if a group that holds values is left with no member who is a recipient'
             cand -h 'Print help'
             cand --help 'Print help'
         }
