@@ -1143,7 +1143,7 @@ Configures git to use `murk merge-driver -- %O %A %B %P` for vault files via `.g
 
 ---
 
-### `murk verify [--vault NAME]`
+### `murk verify [--signature-only] [--vault NAME]`
 
 Verifies vault integrity (MAC and signature), reports whether this machine trusts the signer and why not (the same reasons a load refuses with), checks who signed the last git commit that touched the vault, and runs safety checks without exporting secrets. Exits 1 on any finding.
 
@@ -1157,6 +1157,21 @@ So verify reports the commit as ok only when git verified the signature and the 
 - **Unsigned.**
 
 verify runs git with `gpg.ssh.allowedSignersFile` set to a temporary file listing the trusted ssh-ed25519 signers, so the result does not depend on the user's own allowed-signers list. Without one git cannot check an ssh signature and reports a signed commit as unsigned.
+
+**Signature only.** `murk verify --signature-only` checks the vault signature without a key, for a pull-request check in CI that holds no secret. murk does not resolve or read a key (`MURK_KEY`, `MURK_KEY_FILE` or a stored key), does not read the trust pin, and decrypts nothing. Only the flag selects this check. Without it, `murk verify` with no key fails as before.
+
+The check reads and validates the vault, reads the trusted signers from `MURK_TRUSTED_SIGNERS`, and verifies the top-level (view 2) signature against the trusted key for its signer only, as an agent grant load does. The signature covers every vault field except the signature itself, the ciphertexts included. A text merge of two changed vaults (GitHub's conflict editor, `git merge -X ours` or `-X theirs`) makes a file that neither side signed, so the check fails it. A union merge makes a file that does not parse.
+
+It exits 0 and prints `ok signature verified by trusted signer <key>` only when the vault parses and a trusted signer signed it. Every other result exits 1 with one reason:
+
+- **Parse error.** The hint names a merge without the murk merge driver and tells you to merge locally after `murk setup-merge-driver`.
+- **No trusted signers.** `MURK_TRUSTED_SIGNERS` is unset or empty. An invalid entry is an error that names the variable.
+- **Format 2.x.** The signature is inside the encrypted meta, so the check cannot verify it without a key.
+- **Unsigned.**
+- **Signer not trusted.** The signer is not in `MURK_TRUSTED_SIGNERS`.
+- **Signature does not verify.** The file changed after it was signed, or an age signer's entry has a different verifying key. The hint names the merge cause and the local merge.
+
+It does not decrypt, so it does not check the MAC over the values, grant expiry, rollback against earlier saves, the last commit's signature, or the safety checks above. `murk verify` with a key checks those. All lines go to stderr.
 
 ---
 
