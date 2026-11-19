@@ -164,6 +164,36 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
             1,
         );
     }
+    // A key that cannot sign accepting a stripped vault: judge it as if no
+    // signed version had been seen, so the user sees and accepts everything
+    // else it changes (a rollback, another vault id, a recipient, grant or
+    // group this machine has not accepted) in this one step.
+    let beneath = (matches!(refusal, Refusal::Downgraded) && !resign).then(|| {
+        let pin = inspected.assessment.pin.clone().map(|mut p| {
+            p.was_signed = false;
+            p.removed.retain(|k, _| !readmit.contains(k));
+            p
+        });
+        let loaded = inspected.loaded();
+        match murk_cli::trust::reassess(vault_path, &loaded, &inspected.assessment, pin.as_ref()) {
+            Verdict::Refused(r) => {
+                let msg = murk_cli::trust::refusal_message(vault_path, &r, &loaded, pin.as_ref());
+                eprintln!(
+                    "{} {}",
+                    "⚠".yellow(),
+                    msg.lines().next().unwrap_or_default()
+                );
+                if !r.acceptable() {
+                    die(
+                        &format_args!("refusing to trust it\nrestore {vault_path} from git"),
+                        1,
+                    );
+                }
+                Some(r)
+            }
+            Verdict::Trusted | Verdict::UnsignedAllowed => None,
+        }
+    });
     let question = if resign {
         "sign this vault with your key and trust it?"
     } else {
@@ -202,19 +232,34 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
         );
         return;
     }
-    if matches!(refusal, Refusal::Downgraded) {
-        // A key that cannot sign accepting an unsigned vault: forget that a
-        // signed version was seen, so this machine loads it with a warning.
+    let reset_counter = matches!(
+        beneath
+            .as_ref()
+            .and_then(Option::as_ref)
+            .unwrap_or(&refusal),
+        Refusal::RolledBack { .. } | Refusal::OtherVault { .. } | Refusal::Forked { .. }
+    );
+    if beneath.is_some() {
+        // Record the vault as an accepted decision (recipients, groups,
+        // grants and marks), then forget that a signed version was seen, so
+        // this machine loads it with a warning and still refuses an unsigned
+        // file that widens it further.
+        let loaded = inspected.loaded();
         try_or_die(murk_cli::pins::update(vault_path, |fresh| {
-            let mut pin = fresh.cloned().unwrap_or_default();
+            let mut pin = murk_cli::trust::accepted_pin(
+                &loaded,
+                fresh,
+                murk_cli::trust::Acceptance::Trust {
+                    reset_counter,
+                    readmit: &readmit,
+                },
+                &head,
+                murk_cli::trust::accepted_commit_of(vault_path).as_deref(),
+            );
             pin.was_signed = false;
             Ok(Some(pin))
         }));
     } else {
-        let reset_counter = matches!(
-            refusal,
-            Refusal::RolledBack { .. } | Refusal::OtherVault { .. } | Refusal::Forked { .. }
-        );
         try_or_die(inspected.record_trust(vault_path, reset_counter, &readmit));
     }
     eprintln!("{} trusted {vault_path} on this machine", "◆".magenta());

@@ -1,0 +1,15 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1060,10 +1060,8 @@
+     if loaded.loader_can_sign || external_signers.is_some() {
+         return Some(Refusal::Unsigned);
+     }
+-    let Some(p) = pin.filter(|p| p.has_trust()) else {
+-        return Some(Refusal::UnsignedNotYetTrusted);
+-    };
+-    pinned_state_verdict(loaded, p, head, None).or_else(|| unsigned_widening(loaded, p))
++    let _ = head;
++    None
+ }
+ 
+ /// The signer rules for a signed vault: not a grant key, in the trusted set

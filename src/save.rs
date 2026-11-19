@@ -719,14 +719,16 @@ fn announce_new_group_members(original: &types::Murk, current: &types::Murk) {
     }
 }
 
-/// Record this machine's own write in the trust pin: a signed save is accepted
-/// as this machine's decision, changing the trusted set by what the save
-/// added and removed relative to `before`, the recipients of the file it
-/// replaced (see [`crate::trust::Acceptance::OwnSave`]). An unsigned save —
-/// the key cannot sign — clears `was_signed`, since the next load here would
-/// otherwise refuse the operator's own write. The pin is re-read under its
-/// lock. Best-effort: the vault is already written, so a pin failure only
-/// warns.
+/// Record this machine's own write in the trust pin: the save is accepted as
+/// this machine's decision, changing the trusted set by what the save added
+/// and removed relative to `before`, the recipients of the file it replaced
+/// (see [`crate::trust::Acceptance::OwnSave`]), and advancing the counters.
+/// An unsigned save (the key cannot sign) is recorded the same way, so the
+/// next load here still refuses an older revision, and an unsigned file that
+/// adds a recipient or changes a group this save did not make. It also clears
+/// `was_signed`, since the next load here would otherwise refuse the
+/// operator's own write. The pin is re-read under its lock. Best-effort: the
+/// vault is already written, so a pin failure only warns.
 fn record_own_save(
     vault_path: &str,
     vault: &types::Vault,
@@ -743,45 +745,46 @@ fn record_own_save(
             .map(|r| crate::recipients::canonical_recipient(r).into_owned())
             .collect()
     });
+    let signature = match &vault.sig {
+        Some(sig) => types::SignatureState::Signed {
+            signer: sig.signer.clone(),
+            v: sig.v,
+        },
+        None => types::SignatureState::Unsigned,
+    };
+    let loaded = crate::trust::Loaded {
+        vault,
+        signature: &signature,
+        signer_vk: vault
+            .sig
+            .as_ref()
+            .and_then(|sig| crate::signature::registry_entry(registry, &sig.signer))
+            .map(String::as_str),
+        registry,
+        names: &current.recipients,
+        groups: &current.groups,
+        grants: &current.grants,
+        loader_can_sign: vault.sig.is_some(),
+        operator_key: None,
+    };
     let result = crate::pins::update(vault_path, |prior| {
-        let pin = if let Some(sig) = &vault.sig {
-            let signature = types::SignatureState::Signed {
-                signer: sig.signer.clone(),
-                v: sig.v,
-            };
-            let loaded = crate::trust::Loaded {
-                vault,
-                signature: &signature,
-                signer_vk: crate::signature::registry_entry(registry, &sig.signer)
-                    .map(String::as_str),
-                registry,
-                names: &current.recipients,
-                groups: &current.groups,
-                grants: &current.grants,
-                loader_can_sign: true,
-                operator_key: None,
-            };
-            crate::trust::accepted_pin(
-                &loaded,
-                prior,
-                crate::trust::Acceptance::OwnSave {
-                    before: before.as_ref(),
-                },
-                &crate::trust::head_of(vault_path),
-                crate::trust::commit_of(vault_path).as_deref(),
-            )
-        } else {
-            let Some(prior) = prior else { return Ok(None) };
-            if prior.was_signed {
+        let mut pin = crate::trust::accepted_pin(
+            &loaded,
+            prior,
+            crate::trust::Acceptance::OwnSave {
+                before: before.as_ref(),
+            },
+            &crate::trust::head_of(vault_path),
+            crate::trust::commit_of(vault_path).as_deref(),
+        );
+        if vault.sig.is_none() {
+            if prior.is_some_and(|p| p.was_signed) {
                 eprintln!(
                     "warn {vault_path} was written unsigned (this key cannot sign) — teammates' murk will refuse it until someone with an age or ssh-ed25519 key reviews it and runs `murk trust`"
                 );
             }
-            let mut pin = prior.clone();
             pin.was_signed = false;
-            pin.generation = pin.generation.max(vault.generation);
-            pin
-        };
+        }
         Ok(Some(pin))
     });
     if let Err(e) = result {

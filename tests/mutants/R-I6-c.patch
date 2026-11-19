@@ -1,0 +1,13 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -784,6 +784,10 @@
+                 );
+             }
+             pin.was_signed = false;
++            if let Some(prior) = prior {
++                pin.branches = prior.branches.clone();
++                pin.branch_heads = prior.branch_heads.clone();
++            }
+         }
+         Ok(Some(pin))
+     });

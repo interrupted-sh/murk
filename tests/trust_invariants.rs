@@ -4660,18 +4660,13 @@ fn row_r_i6_b() {
                 attack.stderr
             ),
         );
-        p.today(
-            attack.ok && attack.stdout.contains(stale),
-            "the unsigned copy loads and shows the older value",
-        );
         p.note(attack.stderr);
         Ok(())
     });
 }
 
 /// A non-signing member's own unsigned save advances the branch mark, so a
-/// replay of the previous signed file is refused as rolled back. Today the
-/// mark stays at the last signed revision, and the replay loads.
+/// replay of the previous signed file is refused as rolled back.
 #[test]
 fn row_r_i6_c() {
     common::rows::check("R-I6-c", |p| {
@@ -4708,18 +4703,13 @@ fn row_r_i6_c() {
                 replay.stderr
             ),
         );
-        p.today(
-            mark == Some(generation(&previous)),
-            "the mark is still the last signed revision's generation",
-        );
-        p.today(replay.ok, "the replayed file loads");
         Ok(())
     });
 }
 
 /// A pinned non-signing machine refuses an unsigned file with another vault
 /// id. The same file signed (by a member erin trusts) is refused as another
-/// vault, which is the id check; unsigned, the check is skipped today.
+/// vault, which is the id check; unsigned, the same check applies.
 #[test]
 fn row_r_i8_d() {
     common::rows::check("R-I8-d", |p| {
@@ -4752,20 +4742,16 @@ fn row_r_i8_d() {
                 attack.stderr
             ),
         );
-        p.today(
-            attack.ok && attack.stdout.contains("POISONED"),
-            "the unsigned file of another vault loads",
-        );
         Ok(())
     });
 }
 
 /// An ssh-rsa person refuses a forged unsigned vault until `murk trust`, and
 /// their next write does not happen. dave builds a vault of his own that lists
-/// erin and strips its signature; erin on a fresh clone (no pin) loads it with a
-/// warning today and writes to dave's recipient list. An ed25519 member and a
-/// runner that names its signers refuse the same file, and erin's own
-/// unsigned vault (made by her `murk init`) loads.
+/// erin and strips its signature; erin on a fresh clone (no pin) must not load
+/// it, nor write to dave's recipient list. An ed25519 member and a runner that
+/// names its signers refuse the same file, and erin's own unsigned vault (made
+/// by her `murk init`) loads.
 #[test]
 fn row_r_i21_a() {
     common::rows::check("R-I21-a", |p| {
@@ -4835,10 +4821,6 @@ fn row_r_i21_a() {
                 read.stderr
             ),
         );
-        p.today(
-            read.ok && read.stdout.contains("POISONED"),
-            "the unsigned vault loads with a warning",
-        );
         let write = Printed::of(
             &victim
                 .murk()
@@ -4851,10 +4833,6 @@ fn row_r_i21_a() {
         p.target(
             !write.ok && !leaked,
             format!("erin's next write does not happen: {}", write.stderr),
-        );
-        p.today(
-            write.ok && leaked,
-            "erin's next write goes to dave's recipient list",
         );
         Ok(())
     });
@@ -4925,16 +4903,64 @@ fn row_r_i21_b() {
             !write.ok && !dave_reads(&run, &after, "NEWSEC"),
             "erin's next write does not happen",
         );
-        p.today(
-            read.ok && read.stdout.contains("POISONED"),
-            "the unsigned file with an extra recipient loads",
-        );
-        p.today(
-            write.ok && dave_reads(&run, &after, "NEWSEC"),
-            "erin's next write goes to dave's recipient list",
-        );
         Ok(())
     });
+}
+
+/// A non-signing member accepts a stripped vault that adds a recipient with
+/// one `murk trust`, and murk records the whole decision: the vault then
+/// loads, and an unsigned file that adds one more recipient is still refused.
+#[test]
+fn one_murk_trust_accepts_a_stripped_vault_for_a_key_that_cannot_sign() {
+    let run = Run::new();
+    let w = &run.world;
+    let erin = w.erin();
+    let (alice, carol, dave) = (&w.fx.people[0], &w.fx.people[2], &w.fx.people[3]);
+    let id = vault_json(&erin.vault())["vault_id"]
+        .as_str()
+        .expect("the vault has an id")
+        .to_string();
+    let rsa = rsa_pubkey();
+    let base = pin_generation(&erin);
+    let forged = |name: &str, extra: &[(&str, &str)], generation: u64| {
+        let mut recipients = vec![(rsa.as_str(), "erin")];
+        recipients.extend_from_slice(extra);
+        unsigned(&retargeted(
+            &w.built_vault(name, "alice", &recipients, "REVIEWED"),
+            alice,
+            &id,
+            generation,
+        ))
+    };
+    let reviewed = forged("reviewed", &[(&dave.pubkey, "dave")], base + 1);
+    let path = erin.dir.join(".murk");
+    let kept = fs::read(&path).unwrap();
+    fs::write(&path, &reviewed).unwrap();
+    let before = export(&erin);
+    assert!(
+        !before.ok,
+        "the stripped vault is refused before murk trust"
+    );
+    let trusted = Printed::of(&erin.murk().args(["trust", "--yes"]).output().unwrap());
+    assert!(trusted.ok, "murk trust accepts it: {}", trusted.stderr);
+    let after = export(&erin);
+    assert!(
+        after.ok && after.stdout.contains("REVIEWED"),
+        "one murk trust is enough: {}",
+        after.stderr
+    );
+    let widened = forged(
+        "widened",
+        &[(&dave.pubkey, "dave"), (&carol.pubkey, "carol")],
+        base + 2,
+    );
+    let attack = load_file(&erin, &widened);
+    assert!(
+        !attack.ok && !attack.stdout.contains("REVIEWED"),
+        "an unsigned file that adds another recipient is still refused: {}",
+        attack.stderr
+    );
+    fs::write(&path, kept).unwrap();
 }
 
 // ── Rows that need lineage ──
