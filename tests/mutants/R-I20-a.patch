@@ -1,0 +1,11 @@
+--- a/src/commands/recipients.rs
++++ b/src/commands/recipients.rs
+@@ -373,7 +373,7 @@
+         .into_iter()
+         .filter(|g| !orphaned_before.contains(g))
+         .collect();
+-    if !orphaned.is_empty() && !allow_orphan {
++    if false && !orphaned.is_empty() && !allow_orphan {
+         let count = orphaned.len();
+         let mut msg = format!(
+             "refusing to revoke: {count} group{} would have no member who is a recipient",

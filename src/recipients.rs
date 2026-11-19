@@ -416,6 +416,54 @@ pub fn revoke_recipient(
     })
 }
 
+/// A group that holds values but has no member who is a current recipient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedGroup {
+    /// The group name.
+    pub name: String,
+    /// The keys with a value in this group, sorted.
+    pub keys: Vec<String>,
+}
+
+/// Groups that hold a value that no current recipient can read through the
+/// group, sorted by name. Such a value stays readable only by keys that are no
+/// longer recipients, so no recipient can rotate it; any recipient can clear
+/// it with `murk rm KEY --group GROUP` and then `murk group rm`.
+///
+/// Empty for state loaded by an agent grant: a grant never sees group
+/// membership, so it cannot tell an orphaned group from a healthy one.
+pub fn orphaned_groups(vault: &types::Vault, murk: &types::Murk) -> Vec<OrphanedGroup> {
+    if murk.loaded_as_grant {
+        return Vec::new();
+    }
+    let recipients: BTreeSet<Cow<'_, str>> = vault
+        .recipients
+        .iter()
+        .map(|pk| canonical_recipient(pk))
+        .collect();
+    let mut orphaned: std::collections::BTreeMap<&str, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (key, entry) in &vault.secrets {
+        for group in entry.grouped.keys() {
+            let readable = murk.groups.get(group).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|pk| recipients.contains(&canonical_recipient(pk)))
+            });
+            if !readable {
+                orphaned.entry(group).or_default().push(key.clone());
+            }
+        }
+    }
+    orphaned
+        .into_iter()
+        .map(|(name, keys)| OrphanedGroup {
+            name: name.to_string(),
+            keys,
+        })
+        .collect()
+}
+
 /// Truncate a pubkey for display, keeping start and end.
 pub fn truncate_pubkey(pk: &str) -> String {
     if let Some(key_data) = pk.strip_prefix("ssh-ed25519 ") {
