@@ -684,6 +684,7 @@ fn revoke_rotate_refuses_unsafe_input_before_writing_anything() {
             "revoke",
             "carol",
             "--rotate",
+            "--allow-orphan",
             "--vault",
             "test.murk",
         ])
@@ -694,9 +695,13 @@ fn revoke_rotate_refuses_unsafe_input_before_writing_anything() {
 
     // A named key Alice can't rotate refuses the batch.
     fs::write(dir.path().join("bad.env"), "S=s1\nG=g1\n").unwrap();
-    revoke_carol(&dir, &alice, &["--values-from", "bad.env"])
-        .code(1)
-        .stderr(predicate::str::contains("G: it is held by group ops"));
+    revoke_carol(
+        &dir,
+        &alice,
+        &["--allow-orphan", "--values-from", "bad.env"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("G: it is held by group ops"));
 
     // Nothing was written: Carol is still a recipient and nothing is owed.
     get_ok(&dir, &carol, "S", "s0");
@@ -710,6 +715,33 @@ fn revoke_rotate_refuses_unsafe_input_before_writing_anything() {
 fn revoke_rotate_values_from_rotates_named_keys_and_keeps_the_rest_owed() {
     let dir = TempDir::new().unwrap();
     let (alice, carol) = vault_with_foreign_group(&dir);
+    // Dave joins ops and stays a recipient, so revoking carol leaves G owed,
+    // not orphaned.
+    let (_, dave_pk) = init_vault(TempDir::new().unwrap());
+    murk(&dir, &alice)
+        .args([
+            "circle",
+            "authorize",
+            &dave_pk,
+            "--name",
+            "dave",
+            "--vault",
+            "test.murk",
+        ])
+        .assert()
+        .success();
+    murk(&dir, &carol)
+        .args([
+            "group",
+            "add",
+            "ops",
+            "--member",
+            &dave_pk,
+            "--vault",
+            "test.murk",
+        ])
+        .assert()
+        .success();
     fs::write(dir.path().join("vals.env"), "S=s1\n").unwrap();
 
     revoke_carol(&dir, &alice, &["--values-from", "vals.env"])
@@ -1189,6 +1221,7 @@ fn refused_revoke_rotate_says_how_to_revoke_now() {
             "revoke",
             "carol",
             "--rotate",
+            "--allow-orphan",
             "--vault",
             "test.murk",
         ])

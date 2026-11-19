@@ -115,11 +115,11 @@ Reports the keys that need rotating: the same overdue/expiry/post-revoke signals
 
 The result is verified whenever a key can verify it. [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads) in SPEC.md states what happens with and without a key, and under `MURK_STRICT`.
 
-`--json` prints an object, `{"verified": bool, "issues": [...]}`. `issues` is the `reason`-tagged array (`overdue`, `no_baseline`, `expired`, `expiring_soon`, `revoke_pending`). `verified` is `true` when a key verified the vault and `false` otherwise. Before 0.14 the array was printed alone ([B12](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#b12-rotate---list---json-before-014) in SPEC.md).
+`--json` prints an object, `{"verified": bool, "issues": [...]}`. `issues` is the `reason`-tagged array (`overdue`, `no_baseline`, `expired`, `expiring_soon`, `revoke_pending`). When a group is orphaned (see [`murk circle revoke`](#murk-circle-revoke)), the object also has `orphaned`, with one `{"group": NAME, "keys": [...]}` entry for each orphaned group. Group membership is encrypted, so murk finds orphaned groups only when a key verified the vault. `verified` is `true` when a key verified the vault and `false` otherwise. Before 0.14 the array was printed alone ([B12](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#b12-rotate---list---json-before-014) in SPEC.md).
 
 ## `murk rm`
 
-Removes a key from the vault (shared value, schema entry, and all private entries). No confirmation prompt: git is your safety net. Refused when the key has a value in a group you are not a member of, or holds only other recipients' personal overrides. Those values would stay in the vault, so only their owners can remove them.
+Removes a key from the vault (shared value, schema entry, and all private entries). No confirmation prompt: git is your safety net. Refused when the key has a value in a group you are not a member of, or holds only other recipients' personal overrides. Those values would stay in the vault, so only their owners can remove them. The exception is a value in an orphaned group: no recipient can read it, so any recipient can remove it. `--group GROUP` removes only the key's value in GROUP, which must be orphaned, and leaves every other value, including other recipients' personal overrides.
 
 ## `murk get`
 
@@ -272,6 +272,8 @@ Adds a new recipient. Re-encrypts all shared secrets to include the new public k
 
 Removes a recipient by pubkey, display name or `github:username`. Re-encrypts all shared secrets without their key. Removes their private entries. murk refuses to revoke your own key, whether you name it directly or through your display name, before it prompts or writes anything. Another recipient has to revoke you. When the name covers several keys (a GitHub user with more than one key), murk lists them and asks before it revokes them all. Without a terminal it refuses unless you pass `--force`.
 
+A group whose values no current recipient can read is orphaned. Its values stay readable only by revoked keys, and no recipient can rotate them. murk refuses a revoke that orphans a group, names the group and its keys, and writes nothing. To keep the values, ask a member of the group to add another member first. To revoke anyway, pass `--allow-orphan`. murk then names the orphaned group and its keys. `murk rotate --list` and `murk doctor` continue to list them. Any recipient can clear an orphaned group: run `murk rm KEY --group GROUP` for each of its keys, then `murk group rm GROUP`.
+
 Revoking a recipient also revokes the agent grants whose key files trust it. [Revoking a recipient revokes the grants that trust it](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#revoking-a-recipient-revokes-the-grants-that-trust-it) in SPEC.md lists which grants, what murk deletes, and what it prints.
 
 Lists the secrets the revoked recipient had access to.
@@ -340,7 +342,7 @@ Shows who signed the vault, then asks before it records the vault in the local t
 
 ## `murk doctor`
 
-Checks the surrounding repo for hygiene issues: inline keys in `.env`, key files sitting next to the vault, state that would be bad to commit. If a vault is present it also reads the plaintext schema and reports keys overdue for rotation or past/near their `expires_at`. That read is never integrity-checked. With no key `doctor` says so on stderr (see [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads)), and with one it still does not load the vault, so use `murk rotate --list` or `murk verify` where the result must be trusted. Exits 1 on findings.
+Checks the surrounding repo for hygiene issues: inline keys in `.env`, key files sitting next to the vault, state that would be bad to commit. If a vault is present it also reads the plaintext schema and reports keys overdue for rotation or past/near their `expires_at`. That read is never integrity-checked. With no key `doctor` says so on stderr (see [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads)). Use `murk rotate --list` or `murk verify` where the result must be trusted. When a key loads the vault, `doctor` also reports the keys of each orphaned group (see [`murk circle revoke`](#murk-circle-revoke)) and the commands that clear them. Exits 1 on findings.
 
 ## `murk scan`
 

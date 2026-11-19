@@ -199,6 +199,9 @@ pub enum Command {
     Rm {
         /// Name of the secret
         key: String,
+        /// Remove only the value held by this group, which must have no member who is a recipient
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
@@ -440,6 +443,9 @@ pub enum Command {
         /// Revoke every key of a multi-key GitHub user without confirmation
         #[arg(long)]
         force: bool,
+        /// Revoke even if a group that holds values is left with no member who is a recipient
+        #[arg(long)]
+        allow_orphan: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
@@ -810,6 +816,9 @@ pub enum CircleCommand {
         /// Revoke every key of a multi-key GitHub user without confirmation
         #[arg(long)]
         force: bool,
+        /// Revoke even if a group that holds values is left with no member who is a recipient
+        #[arg(long)]
+        allow_orphan: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,

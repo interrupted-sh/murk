@@ -1073,12 +1073,12 @@ fn prod_db_readers(cast: &Cast) -> BTreeSet<String> {
 }
 
 /// A recipient who is not in a group revokes the group's only member. Murk
-/// must refuse without `--force`, since the group's values would stay
+/// must refuse without `--allow-orphan`, since the group's values would stay
 /// readable only by the revoked key and no remaining recipient could rotate
-/// them. With `--force` it revokes, reports the orphaned group, and any
+/// them. With `--allow-orphan` it revokes, reports the orphaned group, and any
 /// recipient can then clear it with `rm` and `group rm`. Revoking one of two
 /// members, or revoking a non-member as the sole member, is allowed without
-/// `--force`.
+/// `--allow-orphan`.
 #[test]
 fn row_r_i20_a() {
     common::rows::check("R-I20-a", |p| {
@@ -1099,7 +1099,7 @@ fn row_r_i20_a() {
         p.require(
             out.status.success(),
             format!(
-                "revoking one of two members needs no --force: {}",
+                "revoking one of two members needs no --allow-orphan: {}",
                 String::from_utf8_lossy(&out.stderr)
             ),
         )?;
@@ -1109,7 +1109,7 @@ fn row_r_i20_a() {
         )?;
 
         // Control: the sole member revokes someone else; the group is not
-        // orphaned, so no --force is needed.
+        // orphaned, so no --allow-orphan is needed.
         let (_dir, cast) = group_world(&["alice"]);
         p.require(
             prod_db_readers(&cast) == names(&["alice"]),
@@ -1122,7 +1122,7 @@ fn row_r_i20_a() {
             .unwrap();
         p.require(
             out.status.success() && prod_db_readers(&cast).contains("alice"),
-            "the sole member revokes a non-member without --force",
+            "the sole member revokes a non-member without --allow-orphan",
         )?;
 
         // Decisive: bob, not in ops, revokes alice, ops' only member.
@@ -1138,10 +1138,10 @@ fn row_r_i20_a() {
         let out = revoke(&cast, &[]);
         p.reached();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        p.note(format!("revoke alice, no --force: {stderr}"));
+        p.note(format!("revoke alice, no --allow-orphan: {stderr}"));
         p.target(
             !out.status.success(),
-            "revoking a group's sole member is refused without --force",
+            "revoking a group's sole member is refused without --allow-orphan",
         );
         p.target(
             fs::read(cast.vault_path()).unwrap() == before,
@@ -1160,13 +1160,16 @@ fn row_r_i20_a() {
             "the revoke succeeds and leaves PROD_DB readable only by the revoked alice",
         );
 
-        // With --force: the revoke goes through, its post-check reports the
+        // With --allow-orphan: the revoke goes through, its post-check reports the
         // group, and a recipient who is not a member clears it.
         let (_dir, cast) = group_world(&["alice"]);
-        let out = revoke(&cast, &["--force"]);
+        let out = revoke(&cast, &["--allow-orphan"]);
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        p.note(format!("revoke alice, --force: {stderr}"));
-        p.target(out.status.success(), "--force revokes the sole member");
+        p.note(format!("revoke alice, --allow-orphan: {stderr}"));
+        p.target(
+            out.status.success(),
+            "--allow-orphan revokes the sole member",
+        );
         p.target(
             out.status.success() && stderr.contains("ops") && stderr.contains("PROD_DB"),
             "the post-check reports the orphaned group and its key",
@@ -1189,8 +1192,137 @@ fn row_r_i20_a() {
                 "no PROD_DB value is left once it is cleared",
             );
         } else {
-            p.target(false, "the orphaned group can be cleared (needs --force)");
+            p.target(
+                false,
+                "the orphaned group can be cleared (needs --allow-orphan)",
+            );
         }
         Ok(())
     });
+}
+
+/// Run `murk args` as `who` and return (success, stderr, stdout).
+fn run_as(cast: &Cast, who: &Who, args: &[&str]) -> (bool, String, String) {
+    let out = cast
+        .murk_as(who)
+        .args(args)
+        .write_stdin("")
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// An orphaned group's value next to another recipient's personal override:
+/// rotation output stops asking for a rotation nobody can do, plain `rm`
+/// refuses (it would drop carol's override), and `rm --group` removes only the
+/// orphaned value, so `group rm` can follow and carol keeps her override.
+#[test]
+fn orphaned_value_beside_an_override_clears_without_touching_it() {
+    let (_dir, cast) = group_world(&["alice"]);
+    let out = cast
+        .murk_as(&cast.carol)
+        .args(["add", "PROD_DB", "--group", "me"])
+        .write_stdin("carol-override\n")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "carol adds her override: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let carol_reads = |cast: &Cast| {
+        cast::cells(cast.vault_path(), &cast.members().map(Clone::clone))
+            .get(&(
+                "PROD_DB".to_string(),
+                Tier::Private(cast.carol.pubkey.clone()),
+            ))
+            .is_some_and(|by| by.contains_key("carol"))
+    };
+    assert!(carol_reads(&cast));
+    let (ok, err, _) = run_as(
+        &cast,
+        &cast.bob,
+        &["circle", "revoke", &cast.alice.pubkey, "--allow-orphan"],
+    );
+    assert!(ok, "revoke with --allow-orphan: {err}");
+
+    // Only the orphaned finding, never a rotation nobody can do.
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["rotate", "--list"]);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("orphaned") && err.contains("murk rm PROD_DB --group ops"),
+        "{err}"
+    );
+    assert!(!err.contains("murk rotate PROD_DB"), "{err}");
+    let (_, _, json) = run_as(&cast, &cast.bob, &["rotate", "--list", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["issues"], serde_json::json!([]), "{json}");
+    assert_eq!(
+        json["orphaned"],
+        serde_json::json!([{ "group": "ops", "keys": ["PROD_DB"] }])
+    );
+
+    // Plain rm would drop carol's override: refused, pointing at --group.
+    let before = fs::read(cast.vault_path()).unwrap();
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["rm", "PROD_DB"]);
+    assert!(!ok && err.contains("murk rm PROD_DB --group ops"), "{err}");
+    assert_eq!(fs::read(cast.vault_path()).unwrap(), before);
+
+    // --group refuses a group that is not orphaned (or does not hold the key).
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["rm", "PROD_DB", "--group", "dev"]);
+    assert!(!ok, "{err}");
+
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["rm", "PROD_DB", "--group", "ops"]);
+    assert!(ok, "rm --group ops: {err}");
+    assert!(prod_db_readers(&cast).is_empty());
+    assert!(carol_reads(&cast), "carol's override is untouched");
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["group", "rm", "ops"]);
+    assert!(ok, "group rm ops: {err}");
+    let (ok, err, _) = run_as(&cast, &cast.bob, &["rotate", "--list"]);
+    assert!(ok, "nothing left to report: {err}");
+    assert!(carol_reads(&cast));
+}
+
+/// Control: an agent grant never sees group membership, so it must not report
+/// a healthy group's value as orphaned.
+#[test]
+fn a_grant_reports_no_orphan_for_a_healthy_group() {
+    let (_dir, cast) = group_world(&["alice"]);
+    // A grant reads only shared values; the healthy grouped PROD_DB is what it
+    // must not call orphaned.
+    let out = cast
+        .murk_as(&cast.alice)
+        .args(["add", "SHARED"])
+        .write_stdin("v\n")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    cast.grant(&cast.alice, "ci", &["SHARED"]);
+    // Through its key file, which carries the signers the grant trusts.
+    let as_grant = |args: &[&str]| {
+        let out = cast
+            .murk_as(&cast.alice)
+            .env_remove("MURK_KEY")
+            .env("MURK_KEY_FILE", cast.grant_key_path("ci"))
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let (ok, err, _) = as_grant(&["rotate", "--list"]);
+    assert!(ok && !err.contains("orphaned"), "rotate --list: {err}");
+    let (_, err, json) = as_grant(&["rotate", "--list", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).expect(&err);
+    assert_eq!(json["verified"], true, "{json}");
+    assert!(json.get("orphaned").is_none(), "{json}");
+    let (_, err, _) = as_grant(&["doctor"]);
+    assert!(!err.contains("orphaned"), "doctor: {err}");
 }

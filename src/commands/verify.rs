@@ -439,11 +439,26 @@ pub(crate) fn cmd_doctor(vault_path: &str) {
     // there's no readable vault — doctor still reports the repo-hygiene findings.
     // With no key nothing checks that schema, so say so: a stripped expiry or
     // revoke marker would otherwise read as a clean bill of health.
+    // Group membership is in the encrypted meta, so orphaned groups need a key.
+    // A vault that does not load is left to `murk verify`: doctor reports hygiene.
+    let orphaned = if key_resolves(vault_path)
+        && let Ok((vault, murk, _identity)) = murk_cli::load_vault(vault_path)
+    {
+        murk_cli::orphaned_groups(&vault, &murk)
+    } else {
+        Vec::new()
+    };
     if let Ok((vault, _raw)) = murk_cli::vault::read_with_raw(Path::new(vault_path)) {
         warn_if_keyless(vault_path);
-        for issue in murk_cli::rotation_health(&vault, chrono::Utc::now()) {
+        let issues = murk_cli::rotation_health(&vault, chrono::Utc::now());
+        for issue in rotatable_issues(&vault, &orphaned, issues) {
             findings.push(rotation_finding(&issue));
         }
+    }
+
+    // ── Orphaned groups ──
+    for group in &orphaned {
+        findings.extend(orphan_findings(group));
     }
 
     if findings.is_empty() {

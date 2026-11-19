@@ -97,9 +97,9 @@ pub use policy::{
     is_agent_identity, is_agent_key_allowed,
 };
 pub use recipients::{
-    RecipientEntry, RevokeResult, authorize_recipient, canonical_recipient, duplicate_recipients,
-    format_recipient_lines, key_type_label, list_recipients, revoke_recipient, revoke_targets,
-    same_recipient, truncate_pubkey,
+    OrphanedGroup, RecipientEntry, RevokeResult, authorize_recipient, canonical_recipient,
+    duplicate_recipients, format_recipient_lines, key_type_label, list_recipients, orphaned_groups,
+    revoke_recipient, revoke_targets, same_recipient, truncate_pubkey,
 };
 pub use secrets::{
     EXPIRY_WARN_DAYS, KeyTiers, RotationIssue, SecretWrite, add_grouped_secret, add_secret,
