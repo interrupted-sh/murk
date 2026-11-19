@@ -388,7 +388,7 @@ On load, murk accepts a view-2 signature only in the top-level `sig` and a view-
 
 Then the `signer` must be a current recipient (compared by canonical spelling: lowercase for age, `type blob` for SSH). The signature must verify strictly (`verify_strict`, see [Verifying keys](#verifying-keys)) under the signer's verifying key: the `ssh-ed25519 …` recipient string for SSH signers, the `signers` registry entry for age signers. A present-but-invalid signature fails the load as tampering, and so does a signature by an agent-grant key (grants are read-only). A valid signature only proves the registry entry's owner signed. Whether that key is really the recipient's is the trust check's job (rule 4 under [Trust](#trust)). murk only signs as a current recipient, so it never writes a self-invalidating signature.
 
-`murk verify --signature-only` checks the view-2 signature without a key against `MURK_TRUSTED_SIGNERS` only, as a grant load does. [Command behavior](https://murk.interrupted.sh/reference/commands/#murk-verify) states what it checks and what it cannot.
+`murk verify --signature-only` checks the view-2 signature without a key against `MURK_TRUSTED_SIGNERS` only, as a grant load does. It accepts a vault when a trusted signer signed its parsed content. It does not compare the file's bytes: murk rebuilds the signed message from the parsed vault, so whitespace, fields murk does not read and repeated map keys do not change it. It does not read the trust pin, so the removal and group rules ([Trust](#trust) rules 7 and 8) do not apply. [Command behavior](https://murk.interrupted.sh/reference/commands/#murk-verify) states what it checks and what it cannot.
 
 ---
 
