@@ -10,7 +10,7 @@ R-I1-a	enforced	-	trust_invariants	row_r_i1_a	tests/mutants/R-I1-a.patch	-	A pin
 R-I2-a	enforced	-	trust_invariants	row_r_i2_a	tests/mutants/R-I2-a.patch	-	A registry entry a removed member vouched for stops counting once the voucher is removed.
 R-I3-a	enforced	-	authenticity	reading_a_pull_request_never_trusts_what_it_adds	tests/mutants/R-I3-a.patch	-	Loading a pull request branch never trusts the signer it adds on main.
 R-I4-a	enforced	-	env_anchor	row_r_i4_a	tests/mutants/R-I4-a.patch	H1	A load anchored by MURK_TRUSTED_SIGNERS only narrows the pin: a later plain load refuses the environment's signer, and the pin differs only in the counters and marks.
-R-I4-a:pre-upgrade	known-violation	env-anchor	env_anchor	row_r_i4_a_pre_upgrade	drop the accepted_pre_upgrade restore	-	An environment-anchored load of a newer revision leaves the accepted 0.13 copy recorded in the pin as it was; today it drops the record.
+R-I4-a:pre-upgrade	enforced	-	env_anchor	row_r_i4_a_pre_upgrade	tests/mutants/R-I4-a-pre-upgrade.patch	-	An environment-anchored load of a newer revision leaves the accepted 0.13 copy recorded in the pin as it was.
 R-I4-a:lineage	pending	lineage-load	env_anchor	row_r_i4_a_lineage	move the lineage reference for any env-trusted signer	-	An environment-anchored load never moves the lineage reference.
 R-I6-a	enforced	-	authenticity	row_r_i6_a	tests/mutants/R-I6-a.patch	-	A replayed older signed revision on a marked branch is refused as rolled back; the same file loads on a branch this machine never accepted.
 R-I6-b	known-violation	unsigned-trust	trust_invariants	row_r_i6_b	restore the early UnsignedAllowed return in the unsigned verdict	-	A pinned non-signing machine refuses an unsigned same-id copy with a lower generation; today it loads it.
