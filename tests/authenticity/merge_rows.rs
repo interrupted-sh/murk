@@ -1771,10 +1771,11 @@ fn row_r_i13_b_ancestor() {
 // ── R-I20-b: a merge must not empty a group ──
 
 /// Group `ops` holds `GROUP_K` and bob is its only member (alice left it).
-/// Theirs, on another laptop, revokes bob: the group's last member. With
-/// `revoke` ours revokes him too, so the recipient lists agree and only the
-/// group is left to object; without it neither side does and theirs only adds
-/// a secret. Main adds a secret. Merged with the real driver.
+/// Theirs, on another laptop, revokes bob: the group's last member, which
+/// `circle revoke` allows only with `--allow-orphan`. With `revoke` ours
+/// revokes him too, so the recipient lists agree and only the group is left
+/// to object; without it neither side does and theirs only adds a secret.
+/// Main adds a secret. Merged with the real driver.
 fn group_merge(base: &Path, revoke: bool) -> Merged {
     let (alice, repo) = alice_repo(base);
     let bob = Machine::new(base, "bob");
@@ -1799,14 +1800,14 @@ fn group_merge(base: &Path, revoke: bool) -> Merged {
     git_ok(&repo, &["checkout", "-q", "-b", "theirs", &fork_point]);
     second.ok(&repo, &["trust", "--yes"]);
     if revoke {
-        second.ok(&repo, &["circle", "revoke", "bob"]);
+        second.ok(&repo, &["circle", "revoke", "bob", "--allow-orphan"]);
     } else {
         second.add(&repo, "THEIRS_K", "theirs");
     }
     commit(&repo, "theirs");
     git_ok(&repo, &["checkout", "-q", "main"]);
     if revoke {
-        murk_ok(&alice, &repo, &["circle", "revoke", "bob"]);
+        murk_ok(&alice, &repo, &["circle", "revoke", "bob", "--allow-orphan"]);
     }
     alice.add(&repo, "MAIN_K", "main");
     commit(&repo, "main moves on");
