@@ -301,7 +301,11 @@ fn run() {
             path,
         } => cmd_merge_driver(&base, &ours, &theirs, path.as_deref()),
         Command::SetupMergeDriver => cmd_setup_merge_driver(),
-        Command::Verify { vault } => cmd_verify(&murk_cli::resolve_vault_path(&vault)),
+        Command::Verify {
+            signature_only: true,
+            vault,
+        } => cmd_verify_signature_only(&murk_cli::resolve_vault_path(&vault)),
+        Command::Verify { vault, .. } => cmd_verify(&murk_cli::resolve_vault_path(&vault)),
         Command::Trust {
             yes,
             print_key,

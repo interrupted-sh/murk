@@ -6,6 +6,71 @@ use colored::Colorize;
 use murk_cli::types;
 use std::path::Path;
 
+/// `murk verify --signature-only`: check the vault file's signature against
+/// `MURK_TRUSTED_SIGNERS` alone. Resolves no key and decrypts nothing, so a
+/// pull-request check needs no secret. The signature covers the whole file,
+/// so a text merge of two signed vaults fails it.
+pub(crate) fn cmd_verify_signature_only(vault_path: &str) {
+    let merge_hint = "run `murk setup-merge-driver` once, then merge the base branch locally (`git merge origin/<base>`) and push the merge";
+    let vault = match murk_cli::vault::read(Path::new(vault_path)) {
+        Ok(vault) => vault,
+        Err(e @ murk_cli::vault::VaultError::Parse(_)) => die(
+            &format!(
+                "{e}\na merge without the murk merge driver can make this file (a union merge, or a conflict resolved by hand)\n{merge_hint}"
+            ),
+            1,
+        ),
+        Err(e) => die(&e, 1),
+    };
+    let signers = match murk_cli::trust::env_trusted_signers() {
+        Ok(Some(signers)) => signers,
+        Ok(None) => die(
+            &"MURK_TRUSTED_SIGNERS is not set, so `murk verify --signature-only` has no signer to accept\nset it to the trusted signer entries (each signer runs `murk trust --print-key` to print theirs)",
+            1,
+        ),
+        Err(e) => die(&e, 1),
+    };
+    // Vaults from before format 3 keep their (view 1) signature inside the
+    // encrypted meta: without a key there is nothing to check.
+    if vault.sig.is_none() && !vault.version.starts_with("3.") {
+        die(
+            &format!(
+                "vault {vault_path} is in format {}, which keeps its signature inside the encrypted meta, so a check without a key cannot verify it\nrun `murk verify` with a key, or save the vault once with a current murk to upgrade it to format 3",
+                vault.version
+            ),
+            1,
+        );
+    }
+    match murk_cli::trust::verify_anchored(&vault, &signers) {
+        Ok(signer) => eprintln!(
+            "{} signature verified by trusted signer {}",
+            "ok".green().bold(),
+            murk_cli::truncate_pubkey(&signer).dimmed()
+        ),
+        Err(murk_cli::trust::Refusal::Unsigned) => die(
+            &format!(
+                "vault {vault_path} is unsigned, so nothing shows who wrote it\na recipient with an age or ssh-ed25519 key can review it and sign it with `murk trust`"
+            ),
+            1,
+        ),
+        Err(murk_cli::trust::Refusal::UntrustedSigner { signer }) => die(
+            &format!(
+                "vault {vault_path} is signed by {}, which is not in MURK_TRUSTED_SIGNERS\nif this signer is a teammate, add their entry (they run `murk trust --print-key` to print it)",
+                murk_cli::truncate_pubkey(&signer)
+            ),
+            1,
+        ),
+        // `SignerKeyChanged`: the signature does not verify under the
+        // trusted key for its signer.
+        Err(_) => die(
+            &format!(
+                "vault {vault_path} signature does not verify — the file changed after it was signed\na merge without the murk merge driver can make this file (GitHub's conflict editor, `git merge -X ours` or `-X theirs`)\n{merge_hint}\nif the signer's entry in MURK_TRUSTED_SIGNERS has a different verifying key, correct the entry"
+            ),
+            1,
+        ),
+    }
+}
+
 pub(crate) fn cmd_verify(vault_path: &str) {
     // Decrypt and check integrity — a MAC or signature failure short-circuits
     // with the hard error. Trust is reported as a finding rather than refused,
