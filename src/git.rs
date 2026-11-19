@@ -36,6 +36,12 @@ const MERGE_DRIVER_COMMAND: &str = "murk merge-driver -- %O %A %B %P";
 /// None of the spawned git commands needs the key either. The merge driver is
 /// unaffected: git invokes `murk merge-driver` with the user's environment, not
 /// with the one murk hands git here.
+///
+/// Murk decides trust from history (which vault a commit holds, whether one
+/// commit is an ancestor of another), so that history must be the object graph
+/// as committed. Replace refs (`refs/replace/`) and a graft file both rewrite
+/// the graph git reports, and anyone who can write to the repository can add
+/// them, so both are switched off.
 pub fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -45,7 +51,9 @@ pub fn git_command() -> Command {
         "-c",
         "core.hooksPath=/dev/null",
     ]);
-    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null");
     crate::env::strip_key_env(&mut cmd);
     cmd
 }

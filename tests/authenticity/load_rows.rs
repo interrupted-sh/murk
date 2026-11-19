@@ -441,6 +441,165 @@ fn row_r_i23_a() {
     });
 }
 
+/// Bob, removed on Alice's machine, signs a vault on a root commit of his own
+/// (branch `evil`, checked out), and Alice's machine refuses it, naming him.
+struct BobAfterRemoval {
+    t: BobWroteMain,
+    alice: Person,
+    /// The commit Alice's pin records for Bob's removal.
+    removal: String,
+    /// Bob's post-removal vault commit, checked out.
+    after: String,
+}
+
+impl BobAfterRemoval {
+    fn new(p: &mut Probe) -> Result<Self, String> {
+        let t = BobWroteMain::new();
+        t.alice
+            .murk(&t.repo)
+            .args(["circle", "revoke", "bob"])
+            .assert()
+            .success();
+        let mut recorded = None;
+        super::edit_pin(&t.alice, &t.repo, |pin| {
+            recorded = pin["removed_at_commit"]
+                .as_object()
+                .and_then(|m| m.values().next())
+                .and_then(|c| c.as_str())
+                .map(str::to_string);
+        });
+        let removal = recorded.ok_or("Alice's pin records no commit for the removal")?;
+        commit(&t.repo, "offboard");
+
+        git_ok(&t.repo, &["checkout", "-q", "--orphan", "evil"]);
+        let bob0 = git(&t.repo, &["show", &format!("{}:.murk", t.bob0)]).stdout;
+        fs::write(t.repo.join(".murk"), bob0).unwrap();
+        let after = t.bob_writes("attacker-db");
+
+        let alice = Person::of(Machine {
+            home: t.alice.home.clone(),
+        });
+        let before = alice.get(&t.repo, ".murk", "DB_URL");
+        p.note(before.stderr.clone());
+        p.require(
+            refused(&before, "attacker-db") && before.stderr.contains("bob"),
+            "control: Alice refuses Bob's post-removal vault naming him",
+        )?;
+        Ok(Self {
+            t,
+            alice,
+            removal,
+            after,
+        })
+    }
+
+    /// Whether plain git, with `env` set, reports Bob's commit as an ancestor
+    /// of the removal commit.
+    fn git_says_ancestor(&self, env: &[(&str, &Path)]) -> bool {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["merge-base", "--is-ancestor", &self.after, &self.removal])
+            .current_dir(&self.t.repo)
+            .env("HOME", &self.t.repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stderr(std::process::Stdio::null());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.status().unwrap().success()
+    }
+}
+
+// ── R-I23-b ──
+
+/// The graft-file form of R-I23-a. A graft line naming Bob's post-removal
+/// commit as a parent of the removal commit makes his vault look older than
+/// his removal to plain git. Alice's machine must still refuse it, with the
+/// graft in the repository's `info/grafts` and with the graft file named by
+/// `GIT_GRAFT_FILE` in her environment.
+#[test]
+fn row_r_i23_b() {
+    rows::check("R-I23-b", |p| {
+        let s = BobAfterRemoval::new(p)?;
+        let line = format!("{} {}\n", s.removal, s.after);
+
+        let in_repo = s.t.repo.join(".git/info/grafts");
+        fs::create_dir_all(in_repo.parent().unwrap()).unwrap();
+        fs::write(&in_repo, &line).unwrap();
+        p.require(
+            s.git_says_ancestor(&[]),
+            "control: the repository's graft makes Bob's commit an ancestor of the removal commit for plain git",
+        )?;
+        p.reached();
+        let planted = s.alice.get(&s.t.repo, ".murk", "DB_URL");
+        p.note(planted.stderr.clone());
+        p.target(
+            refused(&planted, "attacker-db"),
+            "with a graft in info/grafts, Alice still refuses Bob's post-removal vault",
+        );
+        p.today(
+            printed(&planted, "attacker-db"),
+            "with a graft in info/grafts, murk reads Bob's post-removal vault as from before his removal",
+        );
+        fs::remove_file(&in_repo).unwrap();
+
+        let elsewhere = s.t.base.path().join("grafts");
+        fs::write(&elsewhere, &line).unwrap();
+        p.require(
+            s.git_says_ancestor(&[("GIT_GRAFT_FILE", &elsewhere)]),
+            "control: GIT_GRAFT_FILE makes Bob's commit an ancestor of the removal commit for plain git",
+        )?;
+        let mut cmd = s.alice.murk(&s.t.repo);
+        cmd.args(["get", "DB_URL", "--vault", ".murk"])
+            .env("GIT_GRAFT_FILE", &elsewhere);
+        let planted = out(cmd);
+        p.note(planted.stderr.clone());
+        p.target(
+            refused(&planted, "attacker-db"),
+            "with GIT_GRAFT_FILE set, Alice still refuses Bob's post-removal vault",
+        );
+        p.today(
+            printed(&planted, "attacker-db"),
+            "with GIT_GRAFT_FILE set, murk reads Bob's post-removal vault as from before his removal",
+        );
+        Ok(())
+    });
+}
+
+// ── R-I23-c ──
+
+/// Unknown ancestry counts as not-an-ancestor. When the commit Alice's pin
+/// records for Bob's removal is not in the repository (a shallow clone, or
+/// an object lost or pruned), git cannot say whether the commit checked out
+/// is older than the removal, and Alice's machine must treat Bob's vault as
+/// from after it.
+#[test]
+fn row_r_i23_c() {
+    rows::check("R-I23-c", |p| {
+        let s = BobAfterRemoval::new(p)?;
+        let (dir, file) = s.removal.split_at(2);
+        fs::remove_file(s.t.repo.join(".git/objects").join(dir).join(file))
+            .map_err(|e| format!("the removal commit is not a loose object: {e}"))?;
+        p.require(
+            !git(&s.t.repo, &["cat-file", "-e", &s.removal])
+                .status
+                .success(),
+            "control: the removal commit is gone from the repository",
+        )?;
+        p.reached();
+        let planted = s.alice.get(&s.t.repo, ".murk", "DB_URL");
+        p.note(planted.stderr.clone());
+        p.target(
+            refused(&planted, "attacker-db") && planted.stderr.contains("bob"),
+            "with the removal commit missing, Alice still refuses Bob's post-removal vault, naming him",
+        );
+        p.today(
+            printed(&planted, "attacker-db"),
+            "with the removal commit missing, murk reads Bob's post-removal vault as from before his removal",
+        );
+        Ok(())
+    });
+}
+
 // ── Two paths that share one vault id ──
 
 /// A prod vault in `repo`, and a byte copy of it in a second checkout
