@@ -89,7 +89,7 @@ complete -c murk -n "__fish_murk_using_subcommand rotate" -l all -d 'Rotate all 
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l generate -d 'Generate random values instead of prompting (refused with `--all`)'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l hex -d 'Encode generated values as hex instead of URL-safe base64'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l list -d 'List the secrets that need rotation instead of rotating (exits 1 if any do)'
-complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation'
+complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c murk -n "__fish_murk_using_subcommand rm" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -s h -l help -d 'Print help'

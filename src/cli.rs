@@ -187,7 +187,7 @@ pub enum Command {
         /// List the secrets that need rotation instead of rotating (exits 1 if any do)
         #[arg(long, conflicts_with_all = ["key", "all", "generate", "hex"])]
         list: bool,
-        /// Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
+        /// Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail
         #[arg(long, requires = "list", conflicts_with_all = ["key", "all", "generate", "hex"])]
         json: bool,
         /// Vault filename

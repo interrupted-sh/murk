@@ -46,7 +46,7 @@ Strict mode runs these checks:
 - `murk edit` aborts before it starts the editor unless its scratch file is on a RAM-backed filesystem.
 - `export`, `get` and `diff --show-values` refuse to run when stdout is a regular file.
 - murk skips the stored-key lookup in `~/.config/murk/keys`.
-- murk refuses a result that no key checked, such as `murk rotate --list` run without a key, and a `murk diff` revision it could only show with a warning.
+- murk refuses a result that no key checked, such as `murk rotate --list` run without a key, and a `murk diff` revision it could only show with a warning, except an unsigned revision read with a key that cannot sign while `MURK_TRUSTED_SIGNERS` is unset.
 
 Strict mode does not stop a process from writing values elsewhere.
 

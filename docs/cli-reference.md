@@ -234,7 +234,7 @@ New values come from a hidden prompt on a terminal, or from piped stdin. With a 
 * `--hex` — Encode generated values as hex instead of URL-safe base64
 * `--values-from <FILE>` — Read new values from a dotenv file of KEY=value lines (`-` for stdin), matched by secret name
 * `--list` — List the secrets that need rotation instead of rotating (exits 1 if any do)
-* `--json` — Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
+* `--json` — Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

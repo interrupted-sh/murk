@@ -114,7 +114,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('--generate', '--generate', [CompletionResultType]::ParameterName, 'Generate random values instead of prompting (refused with `--all`)')
             [CompletionResult]::new('--hex', '--hex', [CompletionResultType]::ParameterName, 'Encode generated values as hex instead of URL-safe base64')
             [CompletionResult]::new('--list', '--list', [CompletionResultType]::ParameterName, 'List the secrets that need rotation instead of rotating (exits 1 if any do)')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break

@@ -118,6 +118,39 @@ secrets anywhere else. A `--rotate` on that branch protects only the values
 it rotated there. To go back to an older vault on purpose, see [rollback and
 deliberate reverts](/concepts/recipients-signatures/#rollback-and-deliberate-reverts).
 
+## Merging a removal into a branch the removed member wrote to
+
+Alice revokes Bob on `feature`. Before that is merged, Carol (trusted) and
+then Bob change the vault on `main`. On `main`, Alice's machine refuses Bob's
+vault ("signed by bob, who was removed from this vault …"). The hint says how
+to recover: merge the branch that removed him.
+
+1. Run `git merge feature` with the murk merge driver. The merge stops with a
+   conflict on the vault: "ours failed its authenticity check … rolled back:
+   it is signed by bob, who was removed …". The driver does not accept Bob's
+   side, because nothing he signed after his removal is trusted. The file it
+   wrote is unsigned and does not load. Do not commit it.
+2. Keep the side that removed him: `git checkout --theirs -- .murk`, then
+   `git add .murk`. This drops every vault change made on `main` since the
+   branches split, Carol's included, and the hint says so.
+3. Run `murk trust`. The kept vault reads as a rollback or fork of `main`,
+   because Alice's machine already accepted Carol's newer vault there.
+   Accepting it does not trust Bob again.
+4. Find the last vault commit on `main` that Bob did not sign
+   (`git log -- .murk`). List what differs with
+   `murk diff <that commit> --show-values`.
+5. Review the list change by change. A vault that someone else signed on top
+   of Bob's write can still carry his changes.
+6. Make again, with murk, only the changes that trusted members made. Commit.
+
+`main` then carries the removal and loads, and murk never trusts Bob again.
+murk has no command that merges `main`'s last trusted vault with the
+removing side automatically.
+
+If Alice abandons `feature` instead, the removal stays in force on her
+machine. The refusal gives the command that trusts Bob again there:
+`murk trust --vault .murk --re-add <bob's key>`.
+
 ## Agent grants that trusted them
 
 Revoking a teammate also revokes each agent grant whose key file trusts them
