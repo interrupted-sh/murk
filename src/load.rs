@@ -699,9 +699,9 @@ impl InspectedVault {
     /// vault is refused rather than recorded over it. Writing is best-effort —
     /// a pin that cannot be written (read-only home) only warns. Warnings about
     /// the accepted vault land in [`types::Murk::warnings`]. When the
-    /// trust came from `MURK_TRUSTED_SIGNERS`, the pin's trusted set is left
-    /// as it was, so the environment variable never widens trust that
-    /// outlives it.
+    /// trust came from `MURK_TRUSTED_SIGNERS`, the pin's trusted set and its
+    /// record of the accepted murk 0.13 copy are left as they were, so the
+    /// environment variable never widens trust that outlives it.
     pub fn into_trusted(
         self,
         vault_path: &str,
@@ -740,6 +740,7 @@ impl InspectedVault {
                         pin.removed_on = prior.removed_on;
                         pin.removed_at_commit = prior.removed_at_commit;
                         pin.groups = prior.groups;
+                        pin.accepted_pre_upgrade = prior.accepted_pre_upgrade;
                     }
                     Ok((fresh != Some(&pin)).then_some(pin))
                 });
