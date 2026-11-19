@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn signed_view_v2_matches_vault_serialization_without_sig() {
         // The borrowed view must serialize exactly like the vault itself (minus
-        // `sig`), optional fields included, so it is the whole file.
+        // `sig`), optional fields included, so it covers every parsed field.
         let recipient = make_recipient(SSH_ED25519_PK);
         let mut vault = signed_test_vault(SSH_ED25519_PK, &recipient);
         let plain = serde_json::to_vec(&vault).unwrap();

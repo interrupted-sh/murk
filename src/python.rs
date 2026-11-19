@@ -161,59 +161,23 @@ impl Vault {
     ///
     /// The caller holds the plaintext as a Python `str` before this call. It is
     /// copied into Rust and zeroized on neither side. See THREAT_MODEL.md.
+    ///
+    /// The wait for the vault lock, the decryption and the save run without
+    /// the GIL, so other Python threads keep running.
     #[pyo3(signature = (key, value, *, tier=None, desc=None, tags=None))]
     fn add(
-        &mut self,
+        slf: &Bound<'_, Self>,
         key: &str,
         value: &str,
         tier: Option<&str>,
         desc: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> PyResult<()> {
-        if !crate::is_valid_key_name(key) {
-            return Err(fail(format!(
-                "invalid key name: {key}. Keys must start with a letter or underscore and contain only [A-Za-z0-9_]"
-            )));
-        }
-        let tier = tier.map(SecretTier::parse);
-        let tags = tags.unwrap_or_default();
-
-        // Lock, then load fresh from disk so a concurrent write isn't clobbered:
-        // the same read-modify-write as `murk add` and the Node binding.
-        let _lock = crate::vault::lock(Path::new(&self.path)).map_err(fail)?;
-        let (mut vault, murk, identity) =
-            crate::load_vault(&self.path).map_err(|e| load_error(&e))?;
-        crate::ensure_writable(&murk).map_err(fail)?;
-        let pubkey = identity.pubkey_string().map_err(fail)?;
-        let original = murk.clone();
-        let mut current = murk;
-
-        crate::set_secret(
-            &mut vault,
-            &mut current,
-            key,
-            value,
-            desc,
-            None,
-            tier.as_ref(),
-            &tags,
-            &pubkey,
-        )
-        .map_err(fail)?;
-
-        // Check the agent policy over the resulting key before saving, so a
-        // forbidden write leaves the vault on disk untouched.
-        policy::enforce_agent_policy(&vault, &current, &pubkey, &[key.to_string()])
-            .map_err(fail)?;
-
-        crate::save_vault(&self.path, &mut vault, &original, &current)
-            .map_err(|e| load_error(&e))?;
-
-        // Later reads on this handle see the write and any concurrent changes
-        // the fresh load picked up.
-        self.inner = vault;
-        self.decrypted = current;
-        self.pubkey = pubkey;
+        let path = slf.borrow().path.clone();
+        let written = slf
+            .py()
+            .detach(|| add_at(&path, key, value, tier, desc, tags))?;
+        slf.borrow_mut().refresh(written);
         Ok(())
     }
 
@@ -222,40 +186,133 @@ impl Vault {
     /// touched: a key with no value becomes a documented but unset entry.
     /// Non-empty `tags` replace the existing tags.
     ///
-    /// The trust, grant and policy checks are the same as in `add`.
+    /// The trust, grant and policy checks are the same as in `add`, and so is
+    /// the release of the GIL.
     #[pyo3(signature = (key, description, *, tags=None, example=None))]
     fn describe(
-        &mut self,
+        slf: &Bound<'_, Self>,
         key: &str,
         description: &str,
         tags: Option<Vec<String>>,
         example: Option<&str>,
     ) -> PyResult<()> {
-        let tags = tags.unwrap_or_default();
-
-        let _lock = crate::vault::lock(Path::new(&self.path)).map_err(fail)?;
-        let (mut vault, murk, identity) =
-            crate::load_vault(&self.path).map_err(|e| load_error(&e))?;
-        crate::ensure_writable(&murk).map_err(fail)?;
-        let pubkey = identity.pubkey_string().map_err(fail)?;
-        let original = murk.clone();
-        let current = murk;
-
-        crate::require_group_access(&vault, &current, key, &pubkey).map_err(|e| load_error(&e))?;
-
-        crate::describe_key(&mut vault, key, description, example, &tags, None, None);
-
-        policy::enforce_agent_policy(&vault, &current, &pubkey, &[key.to_string()])
-            .map_err(fail)?;
-
-        crate::save_vault(&self.path, &mut vault, &original, &current)
-            .map_err(|e| load_error(&e))?;
-
-        self.inner = vault;
-        self.decrypted = current;
-        self.pubkey = pubkey;
+        let path = slf.borrow().path.clone();
+        let written = slf
+            .py()
+            .detach(|| describe_at(&path, key, description, tags, example))?;
+        slf.borrow_mut().refresh(written);
         Ok(())
     }
+}
+
+impl Vault {
+    /// Take the state a write saved as this handle's snapshot, so later reads
+    /// see the write and any concurrent changes its fresh load picked up.
+    fn refresh(&mut self, written: Written) {
+        self.inner = written.vault;
+        self.decrypted = written.murk;
+        self.pubkey = written.pubkey;
+    }
+}
+
+/// The vault a write saved, decrypted, and the key that saved it.
+struct Written {
+    vault: types::Vault,
+    murk: types::Murk,
+    pubkey: String,
+}
+
+/// `vault_path` made absolute against the current directory. Symlinks are not
+/// resolved, so the symlink refusal still sees a link. A handle keeps this
+/// path, so it names the vault it loaded after the process changes directory.
+fn absolute_path(vault_path: &str) -> PyResult<String> {
+    std::path::absolute(vault_path)
+        .map_err(fail)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| fail("the vault path is not valid UTF-8"))
+}
+
+/// Store a secret in the vault at `path`: `Vault.add` without the GIL.
+fn add_at(
+    path: &str,
+    key: &str,
+    value: &str,
+    tier: Option<&str>,
+    desc: Option<&str>,
+    tags: Option<Vec<String>>,
+) -> PyResult<Written> {
+    if !crate::is_valid_key_name(key) {
+        return Err(fail(format!(
+            "invalid key name: {key}. Keys must start with a letter or underscore and contain only [A-Za-z0-9_]"
+        )));
+    }
+    let tier = tier.map(SecretTier::parse);
+    let tags = tags.unwrap_or_default();
+
+    // Lock, then load fresh from disk so a concurrent write isn't clobbered:
+    // the same read-modify-write as `murk add` and the Node binding.
+    let _lock = crate::vault::lock(Path::new(path)).map_err(fail)?;
+    let (mut vault, murk, identity) = crate::load_vault(path).map_err(|e| load_error(&e))?;
+    crate::ensure_writable(&murk).map_err(fail)?;
+    let pubkey = identity.pubkey_string().map_err(fail)?;
+    let original = murk.clone();
+    let mut current = murk;
+
+    crate::set_secret(
+        &mut vault,
+        &mut current,
+        key,
+        value,
+        desc,
+        None,
+        tier.as_ref(),
+        &tags,
+        &pubkey,
+    )
+    .map_err(fail)?;
+
+    // Check the agent policy over the resulting key before saving, so a
+    // forbidden write leaves the vault on disk untouched.
+    policy::enforce_agent_policy(&vault, &current, &pubkey, &[key.to_string()]).map_err(fail)?;
+
+    crate::save_vault(path, &mut vault, &original, &current).map_err(|e| load_error(&e))?;
+    Ok(Written {
+        vault,
+        murk: current,
+        pubkey,
+    })
+}
+
+/// Describe a key in the vault at `path`: `Vault.describe` without the GIL.
+fn describe_at(
+    path: &str,
+    key: &str,
+    description: &str,
+    tags: Option<Vec<String>>,
+    example: Option<&str>,
+) -> PyResult<Written> {
+    let tags = tags.unwrap_or_default();
+
+    let _lock = crate::vault::lock(Path::new(path)).map_err(fail)?;
+    let (mut vault, murk, identity) = crate::load_vault(path).map_err(|e| load_error(&e))?;
+    crate::ensure_writable(&murk).map_err(fail)?;
+    let pubkey = identity.pubkey_string().map_err(fail)?;
+    let original = murk.clone();
+    let current = murk;
+
+    crate::require_group_access(&vault, &current, key, &pubkey).map_err(|e| load_error(&e))?;
+
+    crate::describe_key(&mut vault, key, description, example, &tags, None, None);
+
+    policy::enforce_agent_policy(&vault, &current, &pubkey, &[key.to_string()]).map_err(fail)?;
+
+    crate::save_vault(path, &mut vault, &original, &current).map_err(|e| load_error(&e))?;
+    Ok(Written {
+        vault,
+        murk: current,
+        pubkey,
+    })
 }
 
 /// Load a murk vault. Finds the key the same way the CLI does: `MURK_KEY`,
@@ -264,6 +321,8 @@ impl Vault {
 #[pyfunction]
 #[pyo3(signature = (vault_path=".murk"))]
 fn load(vault_path: &str) -> PyResult<Vault> {
+    let path = absolute_path(vault_path)?;
+    // The load itself uses the path as given, so its messages match the CLI's.
     let (vault, murk, identity) = crate::load_vault(vault_path).map_err(|e| load_error(&e))?;
     let pubkey = identity
         .pubkey_string()
@@ -272,7 +331,7 @@ fn load(vault_path: &str) -> PyResult<Vault> {
         inner: vault,
         decrypted: murk,
         pubkey,
-        path: vault_path.to_string(),
+        path,
     })
 }
 
@@ -296,6 +355,7 @@ fn export_all(vault_path: &str) -> PyResult<HashMap<String, String>> {
 #[pyfunction]
 #[pyo3(signature = (key, value, vault_path=".murk", *, tier=None, desc=None, tags=None))]
 fn add(
+    py: Python<'_>,
     key: &str,
     value: &str,
     vault_path: &str,
@@ -303,7 +363,11 @@ fn add(
     desc: Option<&str>,
     tags: Option<Vec<String>>,
 ) -> PyResult<()> {
-    load(vault_path)?.add(key, value, tier, desc, tags)
+    // The load refuses an untrusted vault with the CLI's message. The write
+    // then reloads it under the lock, as `Vault.add` does.
+    let path = load(vault_path)?.path;
+    py.detach(|| add_at(&path, key, value, tier, desc, tags))
+        .map(drop)
 }
 
 /// Whether murk can find a key for `./.murk`: MURK_KEY, MURK_KEY_FILE or the key

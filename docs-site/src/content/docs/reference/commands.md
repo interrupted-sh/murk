@@ -317,7 +317,9 @@ verify runs git with `gpg.ssh.allowedSignersFile` set to a temporary file listin
 
 **Signature only.** `murk verify --signature-only` checks the vault signature without a key, for a pull-request check in CI that holds no secret. murk does not resolve or read a key (`MURK_KEY`, `MURK_KEY_FILE` or a stored key), does not read the trust pin, and decrypts nothing. Only the flag selects this check. Without it, `murk verify` with no key fails as before.
 
-The check reads and validates the vault, reads the trusted signers from `MURK_TRUSTED_SIGNERS`, and verifies the top-level (view 2) signature against the trusted key for its signer only, as an agent grant load does. The signature covers every vault field except the signature itself, the ciphertexts included. A text merge of two changed vaults (GitHub's conflict editor, `git merge -X ours` or `-X theirs`) makes a file that neither side signed, so the check fails it. A union merge makes a file that does not parse.
+The check reads and validates the vault, reads the trusted signers from `MURK_TRUSTED_SIGNERS`, and verifies the top-level (view 2) signature against the trusted key for its signer only, as an agent grant load does. The signature covers the vault's content: every vault field except the signature itself, the ciphertexts included. A text merge of two changed vaults (GitHub's conflict editor, `git merge -X ours` or `-X theirs`) makes a vault that neither side signed, so the check fails it. A union merge makes a file that does not parse.
+
+The signature covers the vault as murk parses it, not the file's bytes. A file with other whitespace, a field murk does not read, or a map key given twice still passes when its parsed content is what the signer signed. murk uses only the parsed content, so none of these changes what it reads.
 
 It exits 0 and prints `ok signature verified by trusted signer <key>` only when the vault parses and a trusted signer signed it. Every other result exits 1 with one reason:
 
@@ -326,9 +328,11 @@ It exits 0 and prints `ok signature verified by trusted signer <key>` only when 
 - **Format 2.x.** The signature is inside the encrypted meta, so the check cannot verify it without a key.
 - **Unsigned.**
 - **Signer not trusted.** The signer is not in `MURK_TRUSTED_SIGNERS`.
-- **Signature does not verify.** The file changed after it was signed, or an age signer's entry has a different verifying key. The hint names the merge cause and the local merge.
+- **Signature does not verify.** The vault's content changed after it was signed, or an age signer's entry has a different verifying key. The hint names the merge cause and the local merge.
 
 It does not decrypt, so it does not check the MAC over the values, grant expiry, rollback against earlier saves, the last commit's signature, or the safety checks above. `murk verify` with a key checks those. All lines go to stderr.
+
+It also does not read the trust pin, so it does not apply the [removal and group rules](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules). A vault signed by a teammate you removed passes while their entry is in `MURK_TRUSTED_SIGNERS`. A group membership change signed by someone outside the group also passes. When someone leaves, remove their entry from `MURK_TRUSTED_SIGNERS` too. See [offboarding](/guides/offboarding/#what-stops-a-revoked-teammate-coming-back).
 
 ## `murk trust`
 

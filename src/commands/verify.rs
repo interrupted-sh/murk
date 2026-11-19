@@ -6,10 +6,11 @@ use colored::Colorize;
 use murk_cli::types;
 use std::path::Path;
 
-/// `murk verify --signature-only`: check the vault file's signature against
+/// `murk verify --signature-only`: check the vault's signature against
 /// `MURK_TRUSTED_SIGNERS` alone. Resolves no key and decrypts nothing, so a
-/// pull-request check needs no secret. The signature covers the whole file,
-/// so a text merge of two signed vaults fails it.
+/// pull-request check needs no secret. The signature covers every parsed field
+/// except itself (not the file's bytes), so a text merge of two signed vaults
+/// fails it.
 pub(crate) fn cmd_verify_signature_only(vault_path: &str) {
     let merge_hint = "run `murk setup-merge-driver` once, then merge the base branch locally (`git merge origin/<base>`) and push the merge";
     let vault = match murk_cli::vault::read(Path::new(vault_path)) {

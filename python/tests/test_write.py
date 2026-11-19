@@ -11,6 +11,8 @@ import inspect
 import json
 import os
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -168,6 +170,68 @@ class TestOneLiner:
         assert cli_get(vault, "ONELINER_ME") == "mine"
         assert vault.tiers("ONELINER_ME") == (False, [], True)
         assert vault.schema("ONELINER_ME")["tags"] == ["agents"]
+
+
+class TestHandlePath:
+    def test_a_relative_path_keeps_naming_the_vault_it_loaded(self, vault, tmp_path, monkeypatch):
+        # A second vault the same key opens, in another directory.
+        other = tmp_path / "other"
+        other.mkdir()
+        subprocess.run(
+            [str(MURK_BIN), "init", "--vault", ".murk"],
+            input="testuser\n",
+            capture_output=True,
+            text=True,
+            cwd=other,
+            check=True,
+        )
+        other_before = (other / ".murk").read_bytes()
+
+        handle = murk.load(".murk")
+        monkeypatch.chdir(other)
+        handle.add("WHERE", "meant-for-the-first")
+        handle.describe("WHERE", "described on the first")
+
+        assert (other / ".murk").read_bytes() == other_before
+        assert cli_get(vault, "WHERE") == "meant-for-the-first"
+        assert vault.schema("WHERE")["description"] == "described on the first"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="holds the vault lock with fcntl")
+class TestLockWait:
+    def test_a_write_waiting_for_the_lock_lets_other_threads_run(self, vault):
+        # This thread holds the vault lock while a writer thread waits for it.
+        # Releasing it needs the GIL, so a writer that waits with the GIL held
+        # never finishes. The child process keeps a hang out of the test run.
+        script = textwrap.dedent(
+            """
+            import fcntl, threading, time
+            import murk
+
+            handle = murk.load()
+            lock = open(".murk.lock", "a")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            writer = threading.Thread(target=handle.add, args=("WAITED", "after-the-lock"))
+            writer.start()
+            time.sleep(0.5)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            writer.join()
+            print("done")
+            """
+        )
+        try:
+            child = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                cwd=vault.path.parent,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("the write held the GIL while it waited for the vault lock")
+
+        assert child.stdout == "done\n", child.stderr
+        assert cli_get(vault, "WAITED") == "after-the-lock"
 
 
 class TestDescribe:
