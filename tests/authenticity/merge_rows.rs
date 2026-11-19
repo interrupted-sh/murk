@@ -1807,7 +1807,11 @@ fn group_merge(base: &Path, revoke: bool) -> Merged {
     commit(&repo, "theirs");
     git_ok(&repo, &["checkout", "-q", "main"]);
     if revoke {
-        murk_ok(&alice, &repo, &["circle", "revoke", "bob", "--allow-orphan"]);
+        murk_ok(
+            &alice,
+            &repo,
+            &["circle", "revoke", "bob", "--allow-orphan"],
+        );
     }
     alice.add(&repo, "MAIN_K", "main");
     commit(&repo, "main moves on");
