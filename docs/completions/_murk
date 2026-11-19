@@ -620,8 +620,9 @@ esac
 (verify)
 _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--signature-only[Check only the vault signature, with no key]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (trust)
