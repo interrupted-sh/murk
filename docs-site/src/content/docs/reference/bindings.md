@@ -305,6 +305,31 @@ and a trust pin that could not be written. The CLI prints these as `warn …`.
 The bindings put the same text in `vault.warnings`, which is empty for a
 clean load.
 
+## A loaded `Vault` is a snapshot
+
+The trust check runs when the vault loads: at `load()`, at each one-line call
+(`get()`, `export_all()` or `exportAll()`, `add()`), and at the start of
+`vault.add()` and `vault.describe()`. A loaded `Vault` object keeps the state
+of its load, decrypted values included. `vault.get()` and `vault.export()`
+read that state and don't check the vault again. These changes reach the
+object only through a new `load()`:
+
+- a teammate revokes the key that the object reads with,
+- the vault's policy changes,
+- a newer revision of the vault lands, or
+- this machine's trust in the vault changes.
+
+So after a revoke, an object loaded before it still returns the values it
+holds. A fresh `load()` with the revoked key fails. For a grant key, `get()`
+and `export()` check the grant's expiry on every call, but against the grant
+record from the load.
+
+A long-running process that must see a revoke or a new revision soon should
+call `load()` again before it reads, or use the one-line functions, which load
+on every call. The MCP server (`murk mcp`) works differently: before each tool
+call it checks whether the vault file changed, and checks and loads it again
+when it did.
+
 ## Agent policy is enforced on read and write
 
 When the loaded key is an [agent grant](/concepts/grants/) (from

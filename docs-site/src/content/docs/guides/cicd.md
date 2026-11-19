@@ -179,12 +179,14 @@ the step.
 
 :::caution
 Set `MURK_TRUSTED_SIGNERS` only from a CI secret or the real process
-environment. Never set it from a file in the repository, or from a `.env`
-file that an app's dotenv loader reads. The variable decides which signers
-this machine trusts. The murk CLI never reads `.env`, but the Python and
-Node bindings read the process environment. So an app that calls
-`load_dotenv()` or `dotenv.config()` before `murk.load()` lets a `.env` in
-the repository choose the signers.
+environment. Never write its value into a file in the repository, such as a
+workflow file, `.envrc` or a `.env` file that an app's dotenv loader reads.
+Whoever can push to the repository can change such a file, and the variable
+decides which signers this machine trusts. murk can't tell where a variable
+came from, so it can't check this for you. The murk CLI never reads `.env`,
+but the Python and Node bindings read the process environment. So an app that
+calls `load_dotenv()` or `dotenv.config()` before `murk.load()` lets a `.env`
+in the repository choose the signers.
 :::
 
 ### The entry format
@@ -243,11 +245,72 @@ A signer that you add after you mint the grant is not in its key file. The
 grant then refuses the vault. Mint it again with `--renew`, or list that
 signer in `MURK_TRUSTED_SIGNERS`.
 
+### Name the expected vault and a minimum counter
+
+:::note[Needs a newer murk]
+This section describes `MURK_EXPECTED_VAULT`, which needs the murk release
+that adds it. Older murk ignores the variable, so on an older runner it checks
+nothing.
+:::
+
+A runner without a pin checks only the signer. So it loads any vault that a
+trusted signer signed: another vault's file, or an older revision of this
+one. `MURK_EXPECTED_VAULT` narrows that. Its value is
+`<vault id>:<minimum generation>`. When it's set, murk refuses a vault:
+
+- whose `vault_id` is different, or
+- whose save counter (`generation`) is below the minimum.
+
+The check applies to a full key and to a scoped grant, with or without a pin.
+A value that murk can't parse is an error.
+
+To make the value:
+
+1. On a machine that trusts the vault, check out the branch that the job
+   deploys from, and pull.
+2. Run `murk verify`. Continue only when it reports no problem.
+3. Read the two fields from the vault header:
+   `jq -r '"\(.vault_id):\(.generation)"' .murk`.
+4. Store the output as a CI secret named `MURK_EXPECTED_VAULT`.
+
+Give it to every step that runs murk, as you do `MURK_TRUSTED_SIGNERS`:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: interrupted-sh/murk-action@v1
+    with:
+      murk-key: ${{ secrets.MURK_KEY }}
+      trusted-signers: ${{ secrets.MURK_TRUSTED_SIGNERS }}
+    env:
+      MURK_EXPECTED_VAULT: ${{ secrets.MURK_EXPECTED_VAULT }}
+```
+
+Make the value again after each revoke and each rotation, from the vault that
+made the change. Until you do, the runner still loads the revision from
+before the change.
+
+Store the value only in the settings of your CI system, never in a file in
+the repository. Someone who can edit the workflow file can still delete the
+line that passes the variable, and the runner then checks nothing. Require
+review for changes to workflow files, for example with a `CODEOWNERS` entry
+for `.github/workflows/`.
+
 ### Limits
 
-A runner with no pin cannot detect a rollback. An older revision with a
-valid signature on the checked-out branch loads. Protect the branch that the
+A runner with no pin can't detect a rollback by itself. An older revision
+with a valid signature on the checked-out branch loads, unless
+`MURK_EXPECTED_VAULT` sets a minimum above it. Protect the branch that the
 job deploys from.
+
+Neither the pin nor `MURK_EXPECTED_VAULT` catches a genuine revision from a
+stale fork. A branch that split off before a revoke or rotation and kept
+saving can have a higher counter than the vault that made the change. When
+someone with repo write commits such a revision, every machine that trusts
+its signer loads it, a runner with a pin included, and the rotated values go
+back. A runner without a pin never checks group changes either. See the [threat
+model](/security/threat-model/#vault-signatures) (what it doesn't prevent,
+item 10).
 
 A teammate with a hardware or `ssh-rsa` key writes the vault unsigned. CI
 refuses that vault until a signing teammate runs `murk trust` and commits the
