@@ -26,7 +26,12 @@ const MERGE_HINT: &str = "murk setup-merge-driver";
 /// commit signing. Returns whether it succeeded.
 fn git(dir: &Path, args: &[&str]) -> bool {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
@@ -128,8 +133,14 @@ fn edit_vault(dir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
 #[test]
 fn branch_only_change_by_a_trusted_signer_passes_without_a_key() {
     let (dir, _, entry) = diverged(false);
-    git_ok(dir.path(), &["merge", "-q", "--no-ff", "feat", "-m", "merge"]);
-    assert_eq!(fs::read(dir.path().join(VAULT)).unwrap(), show(dir.path(), "feat"));
+    git_ok(
+        dir.path(),
+        &["merge", "-q", "--no-ff", "feat", "-m", "merge"],
+    );
+    assert_eq!(
+        fs::read(dir.path().join(VAULT)).unwrap(),
+        show(dir.path(), "feat")
+    );
 
     // A CI runner: an empty HOME, so no stored key and no trust pin.
     let home = TempDir::new().unwrap();
@@ -234,7 +245,15 @@ fn ssh_and_age_signers_both_verify() {
     let (alice_key, _) = init_vault(&dir);
     let alice = signer_entry(dir.path(), &alice_key);
     murk(&dir, &alice_key)
-        .args(["circle", "authorize", SSH_ED25519_PK, "--name", "bob", "--vault", VAULT])
+        .args([
+            "circle",
+            "authorize",
+            SSH_ED25519_PK,
+            "--name",
+            "bob",
+            "--vault",
+            VAULT,
+        ])
         .assert()
         .success();
     let signers = format!("{alice},{SSH_ED25519_PK}");
@@ -261,7 +280,9 @@ fn ssh_and_age_signers_both_verify() {
     // Only alice trusted: bob's write is refused.
     check(dir.path(), home.path(), Some(&alice))
         .code(1)
-        .stderr(predicate::str::contains("which is not in MURK_TRUSTED_SIGNERS"));
+        .stderr(predicate::str::contains(
+            "which is not in MURK_TRUSTED_SIGNERS",
+        ));
 }
 
 /// The vault's own stored key sits in HOME, but murk config there is
@@ -290,10 +311,16 @@ fn stored_key_in_home_is_never_read() {
         .args(["verify", "--vault", VAULT])
         .output()
         .unwrap();
-    let keyless = check(dir.path(), dir.path(), Some(&entry)).get_output().clone();
+    let keyless = check(dir.path(), dir.path(), Some(&entry))
+        .get_output()
+        .clone();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
 
-    assert_eq!(plain.status.code(), Some(1), "plain verify must need the key");
+    assert_eq!(
+        plain.status.code(),
+        Some(1),
+        "plain verify must need the key"
+    );
     assert!(
         keyless.status.success(),
         "{}",
