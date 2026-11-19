@@ -1822,6 +1822,16 @@ impl<'f> World<'f> {
         (!self.branches.is_empty()).then(|| self.branches[i % self.branches.len()].clone())
     }
 
+    /// Whether a forgery may start from `base`. A forgery's child process
+    /// saves straight through the library, without the load a member's murk
+    /// runs first. On a file an attacker's own code listed a recipient in (an
+    /// unsigned forgery, which no signing key loads), a member's signature
+    /// would be that member authorizing the recipient, which the authorize
+    /// step covers. So no forgery starts there.
+    fn forgeable(&self, base: &[u8]) -> bool {
+        !self.attacker_listed.contains(&blob_id(base))
+    }
+
     /// Run the library forgery in a child process with its own environment:
     /// `None` when it does not apply, `Some(Err(why))` when murk refused the
     /// save.
@@ -2556,7 +2566,9 @@ impl<'f> World<'f> {
                     .revisions()
                     .iter()
                     .map(|r| attacker.vault_at(r))
-                    .find(|v| self.listed(v).contains(&by.0) && self.opens(v, by.0))?;
+                    .find(|v| {
+                        self.forgeable(v) && self.listed(v).contains(&by.0) && self.opens(v, by.0)
+                    })?;
                 let vars = [
                     ("FORGE_KEY", self.fx.people[by.0].secret.clone()),
                     ("FORGE_GEN", generation(&base).saturating_add(1).to_string()),
@@ -2632,11 +2644,15 @@ impl<'f> World<'f> {
                 let revs = attacker.revisions();
                 let base = match base {
                     Base::Nth(n) => attacker.vault_at(&revs[n % revs.len()]),
-                    Base::NewestOpenable => revs
-                        .iter()
-                        .map(|r| attacker.vault_at(r))
-                        .find(|v| self.listed(v).contains(&by) && self.opens(v, by))?,
+                    Base::NewestOpenable => {
+                        revs.iter().map(|r| attacker.vault_at(r)).find(|v| {
+                            self.forgeable(v) && self.listed(v).contains(&by) && self.opens(v, by)
+                        })?
+                    }
                 };
+                if !self.forgeable(&base) {
+                    return None;
+                }
                 let base_gen =
                     serde_json::from_slice::<serde_json::Value>(&base).ok()?["generation"]
                         .as_u64()
@@ -2750,7 +2766,9 @@ impl<'f> World<'f> {
                     .revisions()
                     .iter()
                     .map(|r| attacker.vault_at(r))
-                    .find(|v| self.listed(v).contains(&by.0) && self.opens(v, by.0))?;
+                    .find(|v| {
+                        self.forgeable(v) && self.listed(v).contains(&by.0) && self.opens(v, by.0)
+                    })?;
                 let vars = [
                     ("FORGE_KEY", self.fx.people[by.0].secret.clone()),
                     ("FORGE_GEN", generation(&base).saturating_add(1).to_string()),
@@ -4961,6 +4979,52 @@ fn one_murk_trust_accepts_a_stripped_vault_for_a_key_that_cannot_sign() {
         attack.stderr
     );
     fs::write(&path, kept).unwrap();
+}
+
+/// erin's key cannot sign. A revision alice signed lists dave, whom erin's
+/// machine never accepted, and loads on a detached HEAD as history. An
+/// unsigned save over it would encrypt to dave with nothing that vouches for
+/// him, and erin's machine would then refuse her own write. So the save is
+/// refused and writes nothing.
+#[test]
+fn an_unsigned_save_never_carries_a_recipient_this_machine_did_not_accept() {
+    let run = Run::new();
+    let w = &run.world;
+    let erin = w.erin();
+    let (alice, dave) = (&w.fx.people[0], &w.fx.people[3]);
+    let id = vault_json(&erin.vault())["vault_id"]
+        .as_str()
+        .expect("the vault has an id")
+        .to_string();
+    let rsa = rsa_pubkey();
+    let listing = w.built_vault(
+        "history",
+        "alice",
+        &[(rsa.as_str(), "erin"), (&dave.pubkey, "dave")],
+        "HISTORY",
+    );
+    let history = retargeted(&listing, alice, &id, pin_generation(&erin) + 1);
+    assert!(has_sig(&history), "alice signed the revision");
+    fs::write(erin.dir.join(".murk"), &history).unwrap();
+    erin.commit("a revision that lists dave");
+    erin.git_ok(&["checkout", "-q", "--detach"]);
+    let read = export(&erin);
+    assert!(
+        read.ok && read.stdout.contains("HISTORY"),
+        "erin reads the revision as history: {}",
+        read.stderr
+    );
+    let saved = erin_saves(&erin, "NEWSEC", "erin-secret");
+    assert!(
+        !saved.ok && saved.stderr.contains("nothing was written"),
+        "the unsigned save is refused: {}",
+        saved.stderr
+    );
+    assert_eq!(erin.vault(), history, "the vault file is unchanged");
+    assert!(
+        !dave_reads(&run, &erin.vault(), "NEWSEC"),
+        "dave never gets erin's new value"
+    );
 }
 
 // ── Rows that need lineage ──
