@@ -91,6 +91,8 @@ murk reads membership straight out of git's own worktree metadata (never a `git`
 
 Discovery of any kind is off under `MURK_STRICT` and in agent context.
 
+Discovery and the path binding guard against accidents. They do not contain a process that runs as the same OS user, which can read `~/.config/murk/keys` itself. Only OS isolation contains such a process ([THREAT_MODEL.md](THREAT_MODEL.md#agent-feature-limits), agent feature limit 3).
+
 ---
 
 ## File Format
@@ -399,7 +401,7 @@ A valid signature proves that some key listed as a recipient signed the vault, a
 ### What must hold
 
 - No value is decrypted for a caller from a vault this machine has not accepted, and no write re-signs content this machine has not accepted. The one exception is `murk diff`, the review step before `murk trust`: it decrypts the working vault even when this machine has not accepted it, and a revision as [Historical revisions](#historical-revisions) allows, and it warns on stderr when it does.
-- Only state outside the repository decides which signers count: the pin, `MURK_TRUSTED_SIGNERS`, or a grant's key file.
+- Only state outside the repository decides which signers count: the pin, `MURK_TRUSTED_SIGNERS`, or a grant's key file. This state must reach murk through a channel that someone with repo write cannot edit: a protected CI variable or the user's own shell. A value in a workflow file in the repository, in `.envrc` or in a `.env` that a dotenv loader reads is repository content, not an anchor. murk cannot tell where a variable came from, so this rule is the user's to keep.
 - Reading a vault never adds trust unless the vault is newer than everything this machine accepted, on a branch it accepted before (or outside git). `murk trust`, `murk init` and this machine's own saves are the other ways trust grows.
 - On a branch this machine accepted, an older vault and a different vault at the same counter are refused until a person accepts them with `murk trust`.
 - A signer's pinned signing key never changes. A key bound to a name on someone else's word stops counting when that someone is removed.
@@ -431,7 +433,7 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
    - A key the pin trusts as a signer is never recorded as a grant and stays a trusted signer. A pinned grant entry never overrides signer trust.
 6. **Identity and rollback.**
    - **Identity.** `vault_id` must match the pinned one.
-   - **Rollback.** `generation` must not be below the highest accepted on the git branch the vault is checked out on. A branch never seen here and a detached HEAD have no mark. Outside a git checkout, the single highest mark applies.
+   - **Rollback.** `generation` must not be below the highest accepted on the git branch the vault is checked out on. A branch never seen here and a detached HEAD have no mark. Outside a git checkout, the single highest mark applies. The counter orders revisions, but it does not record where they came from. A genuine revision from a stale fork, signed by a trusted signer and numbered above the mark, passes this rule ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, item 10).
    - **History.** A load on a branch never accepted here, or on a detached HEAD, is history and never adds trust (see [Current and history loads](#current-and-history-loads)).
    - **Marks are per branch.** Every worktree of a repository shares one pin, but the marks are per branch. One worktree's save gives only its own branch a mark. A load never gives a branch its first mark, and a merge (git or the driver) does not either. So after a change is merged into a branch, that branch has no mark on this machine until this machine saves there (any write counts, not only a merge result).
    - **Branch names.** Where git's `core.ignorecase` is true, murk maps a branch name that HEAD spells in another case (`git checkout Main` for `main`) to the branch as stored, so its marks apply. In a repository on git's reftable ref backend, HEAD on disk is a stub, so murk asks git (`git symbolic-ref`) for the current branch, and per-branch marks work the same.
@@ -502,6 +504,8 @@ The pin is `~/.config/murk/signer-pins/<hash>.json`, mode `0600`, written atomic
 
 Every update (an accepted load, `murk trust`, a save) re-reads the pin under an exclusive lock on `<hash>.lock` and writes from that fresh copy. A load's acceptance is re-checked against it first. A load that read the pin before another process accepted a newer revision is then refused as rolled back instead of writing its stale view back.
 
+murk writes the pin from four places only: `murk trust`, `murk init`, a load that passed the trust check, and this machine's own save. These rules hold for murk's own code, against other OS users and against repository content. They do not protect the pin from the same OS user: any process that runs as the user can edit the pin file directly.
+
 The pin has these fields:
 
 - `trusted`, `grants`, `groups`, `vault_id`, `generation` and `was_signed`
@@ -550,7 +554,7 @@ To revert a vault on purpose, accept the older file with `murk trust` and make a
 
 `MURK_TRUSTED_SIGNERS` and an agent grant's key-file anchor use one entry format. An age signer is `age1…:<verifying key>` (the recipient, a colon, the base64 Ed25519 verifying key). An ssh-ed25519 signer is its public key line. `murk trust --print-key` prints the entry for the current key. In `MURK_TRUSTED_SIGNERS` entries are separated by commas or newlines. An invalid entry, or an age key without its verifying key, is an error.
 
-**CI.** A fresh runner has no pin. `MURK_TRUSTED_SIGNERS` (from a CI secret, in the entry format above) names the keys allowed to sign and the verifying keys their signatures must verify under. Nothing from it is written to the pin as trust. Without a pin there is no rollback mark on a runner.
+**CI.** A fresh runner has no pin. `MURK_TRUSTED_SIGNERS` (from a protected CI secret, in the entry format above) names the keys allowed to sign and the verifying keys their signatures must verify under. Never set it in a workflow file in the repository: that file is repository content, so whoever can push can choose the signers. Nothing from it is written to the pin as trust. Without a pin there is no rollback mark on a runner.
 
 **Opting out.** `MURK_NO_SIGNER_PIN` (present with any value, or no home directory) stops murk reading or writing the pin. It does not switch the trust check off: every signed vault is then refused unless `MURK_TRUSTED_SIGNERS` names its signer, and rollback and stripped-signature detection are off.
 
@@ -585,7 +589,9 @@ A run that has a key is not labelled, but is not checked either: these commands 
 
 ### Bindings
 
-The Python and Node bindings load through `load_vault` like the CLI. They do it on every call that reads the vault (their `add` and `describe` included), with no option to skip it. They update the pin exactly as the CLI's load does. A refusal or a failed integrity check raises the binding's trust error, with the message the CLI prints. A grant key with no anchor, or reading a 2.x vault, is a trust refusal too. Warnings about an accepted vault reach the caller as `vault.warnings`. [Bindings](https://murk.interrupted.sh/reference/bindings/) names the error types and the warnings.
+The Python and Node bindings load through `load_vault` like the CLI. Each module-level call (`load`, `get`, `export_all`/`exportAll`, `add`) loads the vault, with no option to skip the check. They update the pin exactly as the CLI's load does. A refusal or a failed integrity check raises the binding's trust error, with the message the CLI prints. A grant key with no anchor, or reading a 2.x vault, is a trust refusal too. Warnings about an accepted vault reach the caller as `vault.warnings`. [Bindings](https://murk.interrupted.sh/reference/bindings/) names the error types and the warnings.
+
+A loaded `Vault` object is a snapshot of its `load()`. Its `get` and `export` read that state and do not check the vault again. A revoke of the reading key, a policy change, a change to this machine's trust, or a new revision after the load reaches the object only through a new `load()`. For a grant key, `get` and `export` check the grant's expiry each time, but against the grant record from the load. The object's `add` and `describe` load the vault from disk first and then replace the object's state. The MCP server works differently: before each tool call it hashes the vault file. It keeps its loaded state while the bytes are unchanged, and checks and loads the file again when they changed.
 
 ---
 
@@ -723,7 +729,7 @@ The refusals that write nothing (no key, the save-counter limit, an unaccepted 0
 
 git passes the vault's path as `%P` (`murk merge-driver -- %O %A %B %P`) so the driver reads the right trust pin and finds that vault's stored key. A driver line without `%P` is covered in [B11](#b11-merge-driver-lines-from-before-014).
 
-A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart.
+A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart. The driver also takes git's merge base as given and cannot tell that ours already contains theirs. A branch that carries an earlier genuine vault file on an older parent commit merges cleanly and applies that change again. A genuine revision from a stale fork merged as theirs reverts the changes ours made since ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 10 and 11).
 
 ---
 
@@ -737,7 +743,7 @@ A merge done without the driver (GitHub's web merge, merge queues) either confli
 - A repo-writer replacing the vault. murk refuses these cases:
   - A vault signed by a key the writer listed as a recipient, unless its signer is trusted on this machine.
   - Another vault's file, by its id, unless both vaults were copied from one 0.13 vault and share it ([B4](#b4-vaults-from-murk-013)).
-  - An older revision, on a branch where this machine has a counter mark.
+  - An older revision with a lower counter, on a branch where this machine has a counter mark.
   - An unsigned vault, when the loading key can sign. A key that cannot sign (ssh-rsa, hardware or plugin) loads it with a warning instead, unless `MURK_TRUSTED_SIGNERS` is set (see [Trust](#trust)).
 
   A murk 0.13 revision has no counter, so [B4](#b4-vaults-from-murk-013) states where murk refuses it.
@@ -748,6 +754,8 @@ A merge done without the driver (GitHub's web merge, merge queues) either confli
 - Historical access after revocation: old `.murk` versions remain in git history. Always rotate credentials when revoking.
 - Fine-grained audit logging: use a secrets server for regulated environments.
 - Malicious recipients: any authorized recipient can decrypt all shared secrets.
+- A genuine revision from a stale fork with a higher counter, and a merge that applies again a change ours already undid ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 10 and 11).
+- A process that runs as your OS user. It can read your key store and edit your trust pin. Only OS isolation contains it.
 
 **Treat your key like your SSH private key.** Never commit it. Never share it. This holds for a key file and for `MURK_KEY`.
 

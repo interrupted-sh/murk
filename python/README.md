@@ -126,6 +126,12 @@ The binding reads `MURK_TRUSTED_SIGNERS` from the process environment. An app th
 
 An agent grant key reads only through the trusted signers in its key file or `MURK_TRUSTED_SIGNERS`.
 
+### A loaded `Vault` is a snapshot
+
+The trust check runs when the vault loads: at `load()`, at each one-line call (`murk.get()`, `murk.export_all()`, `murk.add()`), and at the start of `vault.add()` and `vault.describe()`. A `Vault` object keeps the state of its load, decrypted values included. `vault.get()`, `vault[key]` and `vault.export()` read that state and do not check the vault again. A revoke of the key the object reads with, a policy change, a newer revision of the vault, or a change to this machine's trust reaches the object only through a new `load()`. So after a revoke, an object loaded before it still returns the values it holds, while a fresh `load()` with the revoked key fails. For a grant key, reads check the grant's expiry on every call, but against the grant record from the load.
+
+A long-running process that must see a revoke or a new revision soon should call `murk.load()` again before it reads, or use the one-line functions, which load on every call. The MCP server (`murk mcp`) works differently: before each tool call it checks whether the vault file changed, and checks and loads it again when it did.
+
 ## Memory hygiene
 
 Every decrypted value murk returns is a plain Python `str`. murk zeroes plaintext from its own memory when a value is dropped. That guarantee ends at the FFI boundary. Once a value crosses into Python, the interpreter owns it, and its garbage collector controls its lifetime, not murk. This is inherent to reading secrets into a process (see the [threat model](https://github.com/interrupted-sh/murk/blob/main/THREAT_MODEL.md)). Avoid holding decrypted values longer than you need them.

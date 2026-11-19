@@ -104,6 +104,12 @@ The binding reads `MURK_TRUSTED_SIGNERS` from the process environment. An app th
 
 An agent grant key reads only through the trusted signers in its key file or `MURK_TRUSTED_SIGNERS`.
 
+#### A loaded `Vault` is a snapshot
+
+The trust check runs when the vault loads: at `load()`, at each one-line call (`get()`, `exportAll()`, `add()`), and at the start of `vault.add()` and `vault.describe()`. A `Vault` object keeps the state of its load, decrypted values included. `vault.get()` and `vault.export()` read that state and do not check the vault again. A revoke of the key the object reads with, a policy change, a newer revision of the vault, or a change to this machine's trust reaches the object only through a new `load()`. So after a revoke, an object loaded before it still returns the values it holds, while a fresh `load()` with the revoked key fails. For a grant key, reads check the grant's expiry on every call, but against the grant record from the load.
+
+A long-running process that must see a revoke or a new revision soon should call `load()` again before it reads, or use the one-line functions, which load on every call. The MCP server (`murk mcp`) works differently: before each tool call it checks whether the vault file changed, and checks and loads it again when it did.
+
 ### Writing secrets
 
 `vault.add(key, value, options?)` works like `murk add`. It encrypts the value, signs the vault when your key can sign, and writes it back to disk under an exclusive lock, so concurrent writers are safe. The loaded `Vault` refreshes, so later reads on the same handle see the write. A secret name must start with a letter or underscore and contain only `A-Z`, `a-z`, `0-9` and `_`.
