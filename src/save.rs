@@ -492,9 +492,7 @@ pub fn save_vault(
     let recipients = meta_recipients(vault, current)?;
     refuse_unsafe_recipients(vault)?;
 
-    let prior_pin = refuse_carried_removed_keys(vault_path, vault, on_disk.as_ref(), current)?;
-    refuse_unaccepted_pre_upgrade(vault_path, vault, on_disk.as_ref(), prior_pin.as_ref())?;
-    advance_identity(vault_path, vault, prior_pin.as_ref())?;
+    let prior_pin = check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver)?;
 
     announce_new_group_members(original, current);
 
@@ -633,6 +631,24 @@ fn refuse_unaccepted_pre_upgrade(
     Ok(())
 }
 
+/// Read the trust pin for a save and run the checks against it, in order:
+/// no removed key carried back, no unaccepted recipient carried by an
+/// unsigned save, no unaccepted 0.13 file upgraded. Then give the vault its
+/// id and next counter.
+fn check_against_pin(
+    vault_path: &str,
+    vault: &mut types::Vault,
+    on_disk: Option<&types::Vault>,
+    current: &types::Murk,
+    saver: &crypto::MurkIdentity,
+) -> Result<Option<crate::pins::TrustPin>, MurkError> {
+    let prior_pin = refuse_carried_removed_keys(vault_path, vault, on_disk, current)?;
+    refuse_unsigned_carried_recipients(vault, on_disk, current, saver, prior_pin.as_ref())?;
+    refuse_unaccepted_pre_upgrade(vault_path, vault, on_disk, prior_pin.as_ref())?;
+    advance_identity(vault_path, vault, prior_pin.as_ref())?;
+    Ok(prior_pin)
+}
+
 /// Read the trust pin for a save, refusing one that would write back a key
 /// this machine recorded as removed only because the file it replaces — an
 /// older revision, numbered at or below the removal — still lists it: the
@@ -670,6 +686,45 @@ fn refuse_carried_removed_keys(
             on_disk.generation
         ))),
         None => Ok(prior_pin),
+    }
+}
+
+/// Refuse an unsigned save (the key cannot sign) that carries a recipient
+/// this machine's pin does not trust from the file it replaces, such as a
+/// revision read as history. Nothing signed would vouch for the recipient,
+/// so this machine would then refuse its own write (see rule R3 in
+/// [`crate::trust`]). A recipient the save adds itself is this machine's own
+/// decision, and a current grant key is the grant's.
+fn refuse_unsigned_carried_recipients(
+    vault: &types::Vault,
+    on_disk: Option<&types::Vault>,
+    current: &types::Murk,
+    saver: &crypto::MurkIdentity,
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    let (Some(pin), Some(on_disk)) = (pin.filter(|p| p.has_trust()), on_disk) else {
+        return Ok(());
+    };
+    if saver.is_signing_capable() {
+        return Ok(());
+    }
+    let canonical = |r: &String| crate::recipients::canonical_recipient(r).into_owned();
+    let before: BTreeSet<String> = on_disk.recipients.iter().map(canonical).collect();
+    let grants: BTreeSet<String> = current
+        .grants
+        .values()
+        .map(|g| canonical(&g.pubkey))
+        .collect();
+    let carried = vault.recipients.iter().find(|r| {
+        let key = canonical(r);
+        before.contains(&key) && !pin.trusted.contains(&key) && !grants.contains(&key)
+    });
+    match carried {
+        Some(key) => Err(MurkError::Secret(format!(
+            "refusing to save: this vault lists {}, a recipient this machine has not accepted, and your key cannot sign\nnothing was written\nswitch to a branch this machine accepted, or ask a teammate with an age or ssh-ed25519 key to review the vault and run `murk trust`",
+            crate::trust::label(&current.recipients, key)
+        ))),
+        None => Ok(()),
     }
 }
 
