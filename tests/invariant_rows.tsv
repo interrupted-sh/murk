@@ -13,8 +13,8 @@ R-I4-a	enforced	-	env_anchor	row_r_i4_a	tests/mutants/R-I4-a.patch	H1	A load anc
 R-I4-a:pre-upgrade	known-violation	env-anchor	env_anchor	row_r_i4_a_pre_upgrade	drop the accepted_pre_upgrade restore	-	An environment-anchored load of a newer revision leaves the accepted 0.13 copy recorded in the pin as it was; today it drops the record.
 R-I4-a:lineage	pending	lineage-load	env_anchor	row_r_i4_a_lineage	move the lineage reference for any env-trusted signer	-	An environment-anchored load never moves the lineage reference.
 R-I6-a	enforced	-	authenticity	row_r_i6_a	tests/mutants/R-I6-a.patch	-	A replayed older signed revision on a marked branch is refused as rolled back; the same file loads on a branch this machine never accepted.
-R-I6-b	known-violation	unsigned-trust	trust_invariants	row_r_i6_b	restore the early UnsignedAllowed return in the unsigned verdict	-	A pinned non-signing machine refuses an unsigned same-id copy with a lower generation; today it loads it.
-R-I6-c	known-violation	unsigned-trust	trust_invariants	row_r_i6_c	drop the mark advance on an own unsigned save	H3	A non-signing member's own unsigned save advances its branch mark, so a replay of the previous signed file is refused as rolled back.
+R-I6-b	enforced	-	trust_invariants	row_r_i6_b	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned same-id copy with a lower generation.
+R-I6-c	enforced	-	trust_invariants	row_r_i6_c	tests/mutants/R-I6-c.patch	H3	A non-signing member's own unsigned save advances its branch mark, so a replay of the previous signed file is refused as rolled back.
 R-I6-d	pending	lineage-load	authenticity	row_r_i6_d	skip rule 10 in counter_refusal	H2	A genuine stale-fork revision with a counter above the mark is refused as not descending from the accepted revision.
 R-L-load	pending	lineage-load	trust_invariants	row_r_l_load	skip rule 10 in counter_refusal	H2	Stored-sequence form of R-I6-d: a stale-fork genuine file over main is refused, the rotated value kept.
 R-I7-a	enforced	-	authenticity	a_generation_near_the_u64_limit_is_refused_outright	tests/mutants/R-I7-a.patch	-	A generation above the cap is refused on load.
@@ -27,7 +27,7 @@ R-I8-b:residual	control	lineage-load	authenticity	row_r_i8_b_residual	-	-	Stated
 R-I8-c:other	known-violation	expected-vault	auth_matrix	row_r_i8_c_other	drop the MURK_EXPECTED_VAULT check	-	A pinless runner with MURK_EXPECTED_VAULT refuses another vault's file; today it loads it.
 R-I8-c:older	known-violation	expected-vault	auth_matrix	row_r_i8_c_older	drop the MURK_EXPECTED_VAULT check	-	A pinless runner with MURK_EXPECTED_VAULT refuses a prod revision below the minimum generation; today it loads it.
 R-I8-c:fork	pending	lineage-load	auth_matrix	row_r_i8_c_fork	ignore the fp part of MURK_EXPECTED_VAULT	-	A pinless runner whose MURK_EXPECTED_VAULT names a revision refuses a stale fork above the minimum.
-R-I8-d	known-violation	unsigned-trust	trust_invariants	row_r_i8_d	restore the early UnsignedAllowed return in the unsigned verdict	-	A pinned non-signing machine refuses an unsigned file with another vault id; today it loads it.
+R-I8-d	enforced	-	trust_invariants	row_r_i8_d	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned file with another vault id.
 R-I8-e:a	known-violation	shared-vault-id	authenticity	row_r_i8_e_a	drop K1	H3	murk trust of a byte copy of a pinned vault is refused and names both paths; today it is accepted silently.
 R-I8-e:b	known-violation	shared-vault-id	authenticity	row_r_i8_e_b	apply the K1 refusal on the pinned path too	-	A planted copy: the pinned path loads with a warning naming it, a fresh clone refuses until --shares-identity-with, the copy is always refused.
 R-I8-e:c	control	shared-vault-id	authenticity	row_r_i8_e_c	apply K2 without the tracked-file check	-	A renamed vault path: every load before and after the rename is accepted.
@@ -75,8 +75,8 @@ R-I19-a	enforced	-	trust_invariants	row_r_i19_a	tests/mutants/R-I19-a.patch	-	A 
 R-I19-b	known-violation	group-deletions	trust_invariants	row_r_i19_b	accepted_pin does not record deleted_groups	-	A non-member who re-creates a group a member deleted, with themselves in it, is refused by machines that saw the deletion; today they accept it.
 R-I20-a	enforced	-	access_invariants	row_r_i20_a	tests/mutants/R-I20-a.patch	-	Revoking a group's sole member is refused without --allow-orphan; with it the revoke reports the orphaned group and any recipient clears it.
 R-I20-b	enforced	-	authenticity	row_r_i20_b	tests/mutants/R-I20-b.patch	-	A merge that leaves a group's values with no member who is still a recipient conflicts and names the value; today the group-no-longer-exists conflict holds it, and the merge post-check must keep it.
-R-I21-a	known-violation	unsigned-trust	trust_invariants	row_r_i21_a	restore the early UnsignedAllowed return in the unsigned verdict	-	An ssh-rsa person refuses a forged unsigned vault until murk trust; today it loads with a warning.
-R-I21-b	known-violation	unsigned-trust	trust_invariants	row_r_i21_b	drop R3	H3	A mixed team: an unsigned file with the pinned id, counter +3 and an extra recipient is refused; today it loads.
+R-I21-a	enforced	-	trust_invariants	row_r_i21_a	tests/mutants/R-I21-a.patch	-	An ssh-rsa person refuses a forged unsigned vault until murk trust, and their next write does not happen.
+R-I21-b	enforced	-	trust_invariants	row_r_i21_b	tests/mutants/R-I21-b.patch	H3	A mixed team: an unsigned file with the pinned id, counter +3 and an extra recipient is refused, and the next write does not happen.
 R-I22-a	enforced	-	authenticity	row_r_i22_a	tests/mutants/R-I22-a.patch	-	An unsigned vault whose ciphertexts were swapped fails the integrity check: with no signature, the MAC is the only guard.
 R-I23-a	enforced	-	authenticity	row_r_i23_a	tests/mutants/R-I23-a.patch	-	A replace ref that makes the removal commit an ancestor does not change which committed vault murk reads.
 R-I23-b	enforced	-	authenticity	row_r_i23_b	tests/mutants/R-I23-b.patch	-	A graft in info/grafts or GIT_GRAFT_FILE that makes the removal commit an ancestor does not change which committed vault murk reads.

@@ -151,6 +151,15 @@ pub enum Refusal {
     Unsigned,
     /// No signature, but a signed version was accepted here before.
     Downgraded,
+    /// No signature, and this machine has no trust decision for the vault.
+    UnsignedNotYetTrusted,
+    /// No signature, and it lists a recipient that is not in the pin's
+    /// trusted set (nor a recorded grant whose record it carries).
+    UnsignedRecipient { key: String },
+    /// No signature, and it carries a grant this machine has not recorded.
+    UnsignedGrant { key: String },
+    /// No signature, and a group's membership differs from the pinned one.
+    UnsignedGroupChange { group: String },
     /// The save counter is below the highest accepted here.
     RolledBack { pinned: u64, found: u64 },
     /// A vault with a murk 0.13 (view 1) signature where this machine has
@@ -1003,117 +1012,194 @@ fn verdict(
     if let Some(refusal) = grant_binding_refusal(loaded, pin, external_signers) {
         return Verdict::Refused(refusal);
     }
-    let types::SignatureState::Signed { signer, v } = loaded.signature else {
-        // An unsigned murk 0.13 file is still judged by the id its first 0.14
-        // save takes, so another vault's file never reads as unsigned or
-        // stripped (which `murk trust` would re-sign under this vault's id).
-        if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION && !p.vault_id.is_empty())
-            && written_by_0_13(loaded.vault)
-        {
-            let found = crate::save::derived_vault_id(loaded.vault);
-            if found != p.vault_id {
-                return Verdict::Refused(Refusal::OtherVault {
-                    pinned: p.vault_id.clone(),
-                    found,
-                });
+    let refusal = match loaded.signature {
+        types::SignatureState::Unsigned => {
+            match unsigned_verdict(loaded, pin, external_signers, head) {
+                None => return Verdict::UnsignedAllowed,
+                refusal => refusal,
             }
         }
-        if pin.is_some_and(|p| p.was_signed) {
-            return Verdict::Refused(Refusal::Downgraded);
+        types::SignatureState::Signed { signer, .. } => {
+            signer_verdict(loaded, pin, external_signers, signer).or_else(|| {
+                pin.filter(|p| p.v >= pins::PIN_VERSION)
+                    .and_then(|p| pinned_state_verdict(loaded, p, head, Some(signer.as_str())))
+            })
         }
-        // A key that cannot sign loads an unsigned vault with a warning —
-        // unless the operator named the signers they require.
-        if loaded.loader_can_sign || external_signers.is_some() {
-            return Verdict::Refused(Refusal::Unsigned);
-        }
-        return Verdict::UnsignedAllowed;
     };
-    let signer_c = canonical_recipient(signer).into_owned();
-    let refuse = Verdict::Refused;
+    refusal.map_or(Verdict::Trusted, Verdict::Refused)
+}
 
-    if let Some(refusal) = grant_signer_refusal(loaded, pin, signer) {
-        return refuse(refusal);
+/// The rules for an unsigned vault. Nothing in it shows who wrote it, so it
+/// loads only for a key that cannot sign, with no `MURK_TRUSTED_SIGNERS`, on
+/// a machine that holds a trust decision for the vault (an accepted load,
+/// `murk trust`, `murk init` or an own save). It then meets the same id and
+/// rollback checks as a signed vault, and it may not widen what this machine
+/// encrypts to: every recipient, grant and group membership must be one the
+/// pin already holds. A change there needs `murk trust` after review.
+fn unsigned_verdict(
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+    external_signers: Option<&TrustedSigners>,
+    head: &HeadState,
+) -> Option<Refusal> {
+    // An unsigned murk 0.13 file is still judged by the id its first 0.14
+    // save takes, so another vault's file never reads as unsigned or
+    // stripped (which `murk trust` would re-sign under this vault's id).
+    if written_by_0_13(loaded.vault)
+        && let Some(refusal) = pin
+            .filter(|p| p.v >= pins::PIN_VERSION)
+            .and_then(|p| id_refusal(loaded, p))
+    {
+        return Some(refusal);
     }
+    if pin.is_some_and(|p| p.was_signed) {
+        return Some(Refusal::Downgraded);
+    }
+    // A key that can sign, or an operator who named the signers they
+    // require, never loads an unsigned vault.
+    if loaded.loader_can_sign || external_signers.is_some() {
+        return Some(Refusal::Unsigned);
+    }
+    let Some(p) = pin.filter(|p| p.has_trust()) else {
+        return Some(Refusal::UnsignedNotYetTrusted);
+    };
+    pinned_state_verdict(loaded, p, head, None).or_else(|| unsigned_widening(loaded, p))
+}
 
+/// The signer rules for a signed vault: not a grant key, in the trusted set
+/// (the environment's or anchor's when given, else the pin's), and signed
+/// under the verifying key pinned or given for it.
+fn signer_verdict(
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+    external_signers: Option<&TrustedSigners>,
+    signer: &str,
+) -> Option<Refusal> {
+    if let Some(refusal) = grant_signer_refusal(loaded, pin, signer) {
+        return Some(refusal);
+    }
+    let signer_c = canonical_recipient(signer).into_owned();
     let trusted_pin = pin.filter(|p| p.has_trust());
     let is_trusted = match (external_signers, trusted_pin) {
         (Some(external), _) => external.contains_key(&signer_c),
         (None, Some(p)) => p.trusted.contains(&signer_c),
         (None, None) => {
-            return refuse(Refusal::NotYetTrusted {
-                signer: signer.clone(),
+            return Some(Refusal::NotYetTrusted {
+                signer: signer.to_string(),
             });
         }
     };
     if !is_trusted {
-        return refuse(Refusal::UntrustedSigner {
-            signer: signer.clone(),
+        return Some(Refusal::UntrustedSigner {
+            signer: signer.to_string(),
         });
     }
+    signer_key_refusal(loaded, signer, external_signers, trusted_pin)
+}
 
-    if let Some(refusal) = signer_key_refusal(loaded, signer, external_signers, trusted_pin) {
-        return refuse(refusal);
-    }
+/// The vault id `loaded` is judged by. A v1 vault, and an unsigned murk 0.13
+/// file, has no id of its own: it is judged by the id its first 0.14 save
+/// takes (`save::derived_vault_id`, from `created` and `vault_name`), which
+/// is how a vault upgraded from 0.13 got the id pinned here. Those two fields
+/// are not covered by the v1 signature or the MAC, so this check catches
+/// another vault's file, not one whose header was edited to match. Such a
+/// file is read-only where it loads (see `pre_upgrade_read_only`).
+fn id_refusal(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+    let derived = signed_v1(loaded)
+        || (matches!(loaded.signature, types::SignatureState::Unsigned)
+            && written_by_0_13(loaded.vault));
+    let found = if derived {
+        crate::save::derived_vault_id(loaded.vault)
+    } else {
+        loaded.vault.vault_id.clone()
+    };
+    (!pin.vault_id.is_empty() && found != pin.vault_id).then(|| Refusal::OtherVault {
+        pinned: pin.vault_id.clone(),
+        found,
+    })
+}
 
-    if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION) {
-        // A v1 vault has no id of its own; it is judged by the id its first
-        // 0.14 save takes (`save::derived_vault_id`, from `created` and
-        // `vault_name`), which is how a vault upgraded from 0.13 got the id
-        // pinned here. Those two fields are not covered by the v1 signature
-        // or the MAC, so this check catches another vault's file, not one
-        // whose header was edited to match; such a file is read-only where
-        // it loads (see `pre_upgrade_read_only`). It comes first, so `murk
-        // trust` never re-signs another vault's file under this vault's id.
-        let legacy = *v == crate::signature::LEGACY_SIGNED_VIEW_VERSION;
-        let found = if legacy {
-            crate::save::derived_vault_id(loaded.vault)
-        } else {
-            loaded.vault.vault_id.clone()
-        };
-        if !p.vault_id.is_empty() && found != p.vault_id {
-            return refuse(Refusal::OtherVault {
-                pinned: p.vault_id.clone(),
-                found,
-            });
-        }
-        // A v1 signature covers neither the vault id nor the counter. Where
-        // this machine has seen the vault written by murk 0.14 (see
-        // `upgraded_at`), such a vault can only be an older revision. Anywhere
-        // else — a branch not upgraded here yet, a detached HEAD — it is
-        // pre-0.14 history: every other rule still applies, and its load only
-        // narrows the pin (see `accepted_pin`).
-        if legacy && upgraded_at(p, head) {
-            return refuse(Refusal::PreUpgrade {
-                on_branch: matches!(head, HeadState::Branch(_)),
-            });
-        }
-        // Rollback is judged per branch: checking out an older branch is
-        // normal, a branch going backwards is not. A detached HEAD (rebase,
-        // bisect, CI checkout of a commit) and a branch never seen here have
-        // no high-water mark to compare with.
-        let high = match head {
-            HeadState::NotARepo => Some(p.generation),
-            HeadState::Branch(b) => p.branches.get(b).copied(),
-            HeadState::Detached => None,
-        };
-        if let Some(high) = high
-            && loaded.vault.generation < high
-        {
-            return refuse(Refusal::RolledBack {
-                pinned: high,
-                found: loaded.vault.generation,
-            });
-        }
-        if p.has_trust()
-            && let Some(group) = unauthorised_group_change(loaded, p, &signer_c)
-        {
-            return refuse(Refusal::GroupChange {
-                group,
-                signer: signer.clone(),
-            });
-        }
+/// The checks against what this machine accepted before, for a signed vault
+/// (`signer`) and an unsigned one alike: the vault id, the 0.13 format where
+/// the vault was upgraded, rollback, and (for a signed vault) who may change
+/// a group. An unsigned vault may not change a group at all (see
+/// [`unsigned_widening`]).
+fn pinned_state_verdict(
+    loaded: &Loaded<'_>,
+    p: &TrustPin,
+    head: &HeadState,
+    signer: Option<&str>,
+) -> Option<Refusal> {
+    // The id comes first, so `murk trust` never re-signs another vault's
+    // file under this vault's id.
+    if let Some(refusal) = id_refusal(loaded, p) {
+        return Some(refusal);
     }
-    Verdict::Trusted
+    // A v1 signature covers neither the vault id nor the counter. Where
+    // this machine has seen the vault written by murk 0.14 (see
+    // `upgraded_at`), such a vault can only be an older revision. Anywhere
+    // else — a branch not upgraded here yet, a detached HEAD — it is
+    // pre-0.14 history: every other rule still applies, and its load only
+    // narrows the pin (see `accepted_pin`).
+    if signed_v1(loaded) && upgraded_at(p, head) {
+        return Some(Refusal::PreUpgrade {
+            on_branch: matches!(head, HeadState::Branch(_)),
+        });
+    }
+    // Rollback is judged per branch: checking out an older branch is
+    // normal, a branch going backwards is not. A detached HEAD (rebase,
+    // bisect, CI checkout of a commit) and a branch never seen here have
+    // no high-water mark to compare with.
+    let high = match head {
+        HeadState::NotARepo => Some(p.generation),
+        HeadState::Branch(b) => p.branches.get(b).copied(),
+        HeadState::Detached => None,
+    };
+    if let Some(high) = high
+        && loaded.vault.generation < high
+    {
+        return Some(Refusal::RolledBack {
+            pinned: high,
+            found: loaded.vault.generation,
+        });
+    }
+    let signer = signer?;
+    if p.has_trust()
+        && let Some(group) = unauthorised_group_change(loaded, p, signer)
+    {
+        return Some(Refusal::GroupChange {
+            group,
+            signer: signer.to_string(),
+        });
+    }
+    None
+}
+
+/// Rule R3 for an unsigned vault: the first recipient, grant or group
+/// membership in `loaded` that `pin` has not accepted. A recipient must be a
+/// trusted signer in the pin, or a grant key the pin recorded whose record
+/// this vault still carries. Every grant must be one the pin recorded. Every
+/// group must have the pinned membership. Removing a recipient or a grant
+/// only narrows, so it passes.
+fn unsigned_widening(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+    let grants = grant_keys(loaded.grants);
+    if let Some(key) = grants.iter().find(|k| !pin.grants.contains(*k)) {
+        return Some(Refusal::UnsignedGrant { key: key.clone() });
+    }
+    if let Some(key) = loaded.vault.recipients.iter().find(|r| {
+        let key = canonical_recipient(r);
+        !pin.trusted.contains(key.as_ref()) && !grants.contains(key.as_ref())
+    }) {
+        return Some(Refusal::UnsignedRecipient { key: key.clone() });
+    }
+    let groups = canonical_groups(loaded.groups);
+    groups
+        .keys()
+        .chain(pin.groups.keys())
+        .find(|g| groups.get(*g) != pin.groups.get(*g))
+        .map(|group| Refusal::UnsignedGroupChange {
+            group: group.clone(),
+        })
 }
 
 /// Check one side of a merge (ours or theirs) before its content is merged
@@ -1800,9 +1886,18 @@ pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdic
     );
     // Groups were cleared above, so a pinned group would read as "new" for
     // every revision; group authority is a property of the working vault.
-    if let Verdict::Refused(Refusal::GroupChange { .. }) = verdict {
-        verdict = Verdict::Trusted;
-    }
+    // So is the rule that an unsigned vault never widens the pin: a revision
+    // read as history changes nothing here, and differs from the pin by
+    // nature.
+    verdict = match verdict {
+        Verdict::Refused(Refusal::GroupChange { .. }) => Verdict::Trusted,
+        Verdict::Refused(
+            Refusal::UnsignedRecipient { .. }
+            | Refusal::UnsignedGrant { .. }
+            | Refusal::UnsignedGroupChange { .. },
+        ) => Verdict::UnsignedAllowed,
+        other => other,
+    };
     Ok(verdict)
 }
 
@@ -1895,6 +1990,12 @@ pub fn refusal_message(
         Refusal::Downgraded => format!(
             "vault {vault_path} was signed when this machine last accepted it and is now unsigned — the signature was stripped, or a merge or a hardware-key write left it unsigned\nreview `git diff -- {vault_path}` and `murk diff`, then run `murk trust --vault {vault_path}` to accept and re-sign it"
         ),
+        Refusal::UnsignedNotYetTrusted
+        | Refusal::UnsignedRecipient { .. }
+        | Refusal::UnsignedGrant { .. }
+        | Refusal::UnsignedGroupChange { .. } => {
+            unsigned_refusal_message(vault_path, refusal, loaded, &changes(), &review)
+        }
         Refusal::RolledBack { pinned, found } => format!(
             "vault {vault_path} rolled back: generation {found}, but this machine accepted generation {pinned} — an older revision may have been replayed\nif you switched to an older branch, switch back; for a deliberate revert, {review}"
         ),
@@ -1942,6 +2043,38 @@ pub fn refusal_message(
             "vault {vault_path} has generation {found}, above the largest murk accepts ({MAX_GENERATION}) — it may have been tampered with to exhaust the counter\nrestore {vault_path} from git"
         ),
     }
+}
+
+/// The message for an unsigned vault refused by rule R1 (no trust decision
+/// here yet) or R3 (it widens what this machine encrypts to).
+fn unsigned_refusal_message(
+    vault_path: &str,
+    refusal: &Refusal,
+    loaded: &Loaded<'_>,
+    changes: &str,
+    review: &str,
+) -> String {
+    let what = match refusal {
+        Refusal::UnsignedRecipient { key } => format!(
+            "lists {}, a recipient this machine has not accepted",
+            label(loaded.names, key)
+        ),
+        Refusal::UnsignedGrant { key } => format!(
+            "carries an agent grant for {}, which this machine has not accepted",
+            crate::truncate_pubkey(key)
+        ),
+        Refusal::UnsignedGroupChange { group } => {
+            format!("changes the membership of group {group}")
+        }
+        _ => {
+            return format!(
+                "vault {vault_path} is unsigned, and this machine has not accepted it yet — nothing shows who wrote it{changes}\n{review}"
+            );
+        }
+    };
+    format!(
+        "vault {vault_path} is unsigned and {what} — nothing shows who made this change{changes}\nmurk does not encrypt to it until you accept it\n{review}"
+    )
 }
 
 /// The message for [`Refusal::RemovedKey`].
@@ -2544,12 +2677,74 @@ mod tests {
         );
         let mut hw = c.loaded();
         hw.loader_can_sign = false;
-        assert_eq!(verdict(&hw, None, None), Verdict::UnsignedAllowed);
+        assert_eq!(
+            verdict(&hw, None, None),
+            Verdict::Refused(Refusal::UnsignedNotYetTrusted)
+        );
         let pin = pin_for(&Case::new(&[A], 1, A));
         assert_eq!(
             verdict(&hw, Some(&pin), None),
             Verdict::Refused(Refusal::Downgraded)
         );
+    }
+
+    #[test]
+    fn an_unsigned_vault_never_widens_the_pin() {
+        // A non-signing member's machine: it accepted A and B, then its own
+        // unsigned save cleared the signed bit.
+        let mut pin = pin_for(&Case::new(&[A, B], 1, A));
+        pin.was_signed = false;
+        let judge = |c: &Case| {
+            let mut l = c.loaded();
+            l.loader_can_sign = false;
+            verdict(&l, Some(&pin), None)
+        };
+        let unsigned = |recipients: &[&str], generation| {
+            let mut c = Case::new(recipients, generation, A);
+            c.sig = types::SignatureState::Unsigned;
+            c
+        };
+        assert_eq!(judge(&unsigned(&[A, B], 2)), Verdict::UnsignedAllowed);
+        // Dropping a recipient only narrows.
+        assert_eq!(judge(&unsigned(&[A], 2)), Verdict::UnsignedAllowed);
+        assert_eq!(
+            judge(&unsigned(&[A, B, M], 2)),
+            Verdict::Refused(Refusal::UnsignedRecipient { key: M.into() })
+        );
+        let mut grouped = unsigned(&[A, B], 2);
+        grouped.groups.insert("ops".into(), vec![A.into()]);
+        assert_eq!(
+            judge(&grouped),
+            Verdict::Refused(Refusal::UnsignedGroupChange {
+                group: "ops".into()
+            })
+        );
+        let mut granted = unsigned(&[A, B, "age1grant"], 2);
+        granted.grants.insert(
+            "g".into(),
+            types::GrantEntry {
+                pubkey: "age1grant".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            judge(&granted),
+            Verdict::Refused(Refusal::UnsignedGrant {
+                key: "age1grant".into()
+            })
+        );
+        // The id and rollback checks apply as to a signed vault.
+        let mut other = unsigned(&[A, B], 2);
+        other.vault.vault_id = "other".into();
+        assert!(matches!(
+            judge(&other),
+            Verdict::Refused(Refusal::OtherVault { .. })
+        ));
+        let older = unsigned(&[A, B], 0);
+        assert!(matches!(
+            judge(&older),
+            Verdict::Refused(Refusal::RolledBack { .. })
+        ));
     }
 
     #[test]
