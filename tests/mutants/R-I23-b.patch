@@ -1,0 +1,12 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -52,8 +52,7 @@
+         "core.hooksPath=/dev/null",
+     ]);
+     cmd.env("GIT_OPTIONAL_LOCKS", "0")
+-        .env("GIT_NO_REPLACE_OBJECTS", "1")
+-        .env("GIT_GRAFT_FILE", "/dev/null");
++        .env("GIT_NO_REPLACE_OBJECTS", "1");
+     crate::env::strip_key_env(&mut cmd);
+     cmd
+ }
