@@ -187,7 +187,7 @@ pub enum Command {
         /// List the secrets that need rotation instead of rotating (exits 1 if any do)
         #[arg(long, conflicts_with_all = ["key", "all", "generate", "hex"])]
         list: bool,
-        /// Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
+        /// Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail
         #[arg(long, requires = "list", conflicts_with_all = ["key", "all", "generate", "hex"])]
         json: bool,
         /// Vault filename
@@ -454,6 +454,19 @@ pub enum Command {
     // Checks
     /// Verify vault integrity without exporting secrets
     Verify {
+        /// Check only the vault signature, with no key
+        ///
+        /// Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed
+        /// this vault's content. The signature covers every field except
+        /// itself, so a text merge of two changed vaults fails this check: use
+        /// it as a pull-request check in CI with no secret. It covers the
+        /// parsed content, not the file's bytes: a reformatted file still
+        /// passes. murk reads no key and decrypts nothing. So it does not check
+        /// the MAC over the values, grant expiry, rollback against earlier
+        /// saves, removed keys, group membership changes or the last commit's
+        /// signature. `murk verify` with a key checks those
+        #[arg(long)]
+        signature_only: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,

@@ -159,7 +159,7 @@ murk trust
 `murk trust` re-signs the vault with their key. That is a save, so they
 commit and push the result. After that, the machines of the signing
 teammates load the vault again. Review the change carefully. The new
-signature vouches for the whole file, including recipient changes.
+signature vouches for all of the vault's content, including recipient changes.
 
 A hardware or `ssh-rsa` machine that last accepted this vault signed refuses
 it once when it becomes unsigned ("signed when this machine last accepted

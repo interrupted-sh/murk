@@ -44,7 +44,7 @@ The mechanics of the MAC and signatures (what they protect against and what they
 
 ## The signature
 
-`sig` is a top-level field, outside the meta, so the file alone can be verified. It holds the signer's pubkey, the signed-view version (`2`) and an Ed25519 signature over the whole file with `sig` left out: every header field, the `agents` and `secrets` ciphertexts, and the `meta` ciphertext. It is omitted when the last writer's identity can't sign.
+`sig` is a top-level field, outside the meta, so the file alone can be verified. It holds the signer's pubkey, the signed-view version (`2`) and an Ed25519 signature over the vault's content with `sig` left out: every header field, the `agents` and `secrets` ciphertexts, and the `meta` ciphertext. murk signs the parsed vault, not the file's bytes, so whitespace and fields murk does not read are not signed. It is omitted when the last writer's identity can't sign.
 
 ## Validation on load
 

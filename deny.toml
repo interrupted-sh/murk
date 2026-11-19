@@ -26,6 +26,11 @@ ignore = [
     # or later (0.7.5 is still affected). Upstream fix: rage main already uses
     # p256/hpke 0.14 (https://github.com/str4d/rage/pull/649).
     "RUSTSEC-2026-0387",
+    # chrono is unmaintained. An informational "unmaintained" advisory: no
+    # security vulnerability and no patched version. chrono comes in through
+    # murk-cli itself and through rmcp and schemars. Drop this once murk's own
+    # date handling moves off chrono and rmcp and schemars no longer pull it in.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

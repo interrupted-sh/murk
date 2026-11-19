@@ -234,7 +234,7 @@ New values come from a hidden prompt on a terminal, or from piped stdin. With a 
 * `--hex` — Encode generated values as hex instead of URL-safe base64
 * `--values-from <FILE>` — Read new values from a dotenv file of KEY=value lines (`-` for stdin), matched by secret name
 * `--list` — List the secrets that need rotation instead of rotating (exits 1 if any do)
-* `--json` — Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
+* `--json` — Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
@@ -864,6 +864,9 @@ Verify vault integrity without exporting secrets
 
 ###### **Options:**
 
+* `--signature-only` — Check only the vault signature, with no key
+
+   Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault's content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull-request check in CI with no secret. It covers the parsed content, not the file's bytes: a reformatted file still passes. murk reads no key and decrypts nothing. So it does not check the MAC over the values, grant expiry, rollback against earlier saves, removed keys, group membership changes or the last commit's signature. `murk verify` with a key checks those
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

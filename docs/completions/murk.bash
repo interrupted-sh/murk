@@ -2660,7 +2660,7 @@ _murk() {
             return 0
             ;;
         murk__subcmd__verify)
-            opts="-h --vault --help"
+            opts="-h --signature-only --vault --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
