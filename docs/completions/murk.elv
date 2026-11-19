@@ -104,7 +104,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --generate 'Generate random values instead of prompting (refused with `--all`)'
             cand --hex 'Encode generated values as hex instead of URL-safe base64'
             cand --list 'List the secrets that need rotation instead of rotating (exits 1 if any do)'
-            cand --json 'Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation'
+            cand --json 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail'
             cand -h 'Print help (see more with ''--help'')'
             cand --help 'Print help (see more with ''--help'')'
         }

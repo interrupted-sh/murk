@@ -450,7 +450,7 @@ Reviewing a pull request from a trusted signer therefore never trusts the people
 
 **Counter bounds.**
 
-- A vault more than 1,000,000 generations above the machine's mark is refused until `murk trust`.
+- A vault more than 1,000,000 generations above the machine's mark is refused until `murk trust`. A machine whose mark is still 0 has no such limit.
 - A generation above 2^53 - 1 is refused everywhere, and `murk trust` won't accept it, so no signer can push the counter to where it stops increasing.
 - A save or keyed merge never writes such a vault. One that would number it above 2^53 - 1 is refused and writes nothing (a merge stops as a conflict and leaves ours as the working file). A merge without a key never raises the counter itself: it keeps ours'.
 
@@ -500,7 +500,7 @@ A different vault with the generation already accepted on the same branch is a f
 8. **Cherry-picking** a genuine historical commit replays its change.
 9. A vault last written by murk 0.13 or earlier keeps its v1 signature until its next save. Until then, its vault name, repo URL and creation time can be rewritten undetected on a branch where this machine hasn't seen it in 0.14 form.
 
-**Reserved environment names.** A vault writer could otherwise pick `PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PROMPT_COMMAND` or `MURK_STRICT` for everyone who runs `eval "$(murk export)"` or `murk exec`. That would mean code execution on teammates' machines, or murk's own hardening switched off. `export`, `exec` and `agent exec` refuse such names unless `--allow-reserved` is passed, and the MCP `murk_exec` tool always refuses them (the list is in SPEC.md under `murk export`). This is a guardrail for a trusted vault, not a substitute for the trust check.
+**Reserved environment names.** A vault writer could otherwise pick `PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PROMPT_COMMAND` or `MURK_STRICT` for everyone who runs `eval "$(murk export)"` or `murk exec`. That would mean code execution on teammates' machines, or murk's own hardening switched off. `export`, `exec` and `agent exec` refuse such names unless `--allow-reserved` is passed, and the MCP `murk_exec` tool always refuses them (the list is in [Variable names a vault may not set](/concepts/env-vars/#variable-names-a-vault-may-not-set)). This is a guardrail for a trusted vault, not a substitute for the trust check.
 
 ## Trust boundaries
 
