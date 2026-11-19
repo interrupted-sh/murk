@@ -244,3 +244,42 @@ def test_unsigned_vault_loaded_by_a_key_that_cannot_sign_carries_the_cli_warning
     # On Alice's machine the same vault is a stripped signature: refused.
     alice.use(clean_env, repo, MURK_KEY_FILE=str(alice.key_file()))
     assert "is now unsigned" in refusal()
+
+
+def test_writes_over_a_self_enrolled_signer_are_refused(tmp_path, clean_env):
+    alice, repo = alice_repo(tmp_path)
+    shutil.copy(mallory_vault(tmp_path, alice.pubkey(repo)), repo / ".murk")
+    planted = (repo / ".murk").read_bytes()
+    pins = alice.home / ".config" / "murk" / "signer-pins"
+    before = {p.name: p.read_bytes() for p in pins.glob("*.json")}
+    alice.use(clean_env, repo, MURK_KEY_FILE=str(alice.key_file()))
+
+    with pytest.raises(murk.TrustError) as exc:
+        murk.add("NEW_SECRET", "for-alice-only")
+
+    assert "not a trusted signer" in str(exc.value)
+    assert exc.value.args[0] == refusal()
+    assert (repo / ".murk").read_bytes() == planted
+    assert {p.name: p.read_bytes() for p in pins.glob("*.json")} == before
+
+
+def test_a_loaded_handle_does_not_write_over_a_vault_swapped_for_an_untrusted_one(
+    tmp_path, clean_env
+):
+    # The handle was loaded from the trusted vault. Each write reloads from
+    # disk, so the swapped file must go through the trust check again.
+    alice, repo = alice_repo(tmp_path)
+    alice.use(clean_env, repo, MURK_KEY_FILE=str(alice.key_file()))
+    handle = murk.load(".murk")
+    shutil.copy(mallory_vault(tmp_path, alice.pubkey(repo)), repo / ".murk")
+    planted = (repo / ".murk").read_bytes()
+
+    with pytest.raises(murk.TrustError, match="not a trusted signer"):
+        handle.add("NEW_SECRET", "for-alice-only")
+    with pytest.raises(murk.TrustError, match="not a trusted signer"):
+        handle.describe("DB_URL", "changed")
+
+    assert (repo / ".murk").read_bytes() == planted
+    # The handle keeps its trusted snapshot.
+    assert handle.get("DB_URL") == "prod-db"
+    assert "NEW_SECRET" not in handle
