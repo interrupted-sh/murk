@@ -1026,3 +1026,171 @@ fn group_add_admits_only_the_named_member() {
     assert!(err.contains("carol can now read K2 (group ops)"), "{err}");
     assert!(!err.contains("bob can now read"), "{err}");
 }
+
+/// A cast whose group `ops` holds `PROD_DB` and has `members` (alice among
+/// them) as members; bob and carol are recipients too.
+fn group_world(members: &[&str]) -> (tempfile::TempDir, Cast) {
+    let dir = tempfile::tempdir().unwrap();
+    let cast = Cast::new(dir.path());
+    let ok = |who: &Who, args: &[&str], stdin: &str| {
+        let out = cast
+            .murk_as(who)
+            .args(args)
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{} murk {args:?}: {}",
+            who.label,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ok(&cast.alice, &["group", "create", "ops"], "");
+    for member in members.iter().filter(|m| **m != "alice") {
+        let who = cast.members().into_iter().find(|w| w.label == *member);
+        ok(
+            &cast.alice,
+            &["group", "add", "ops", "--member", &who.unwrap().pubkey],
+            "",
+        );
+    }
+    ok(
+        &cast.alice,
+        &["add", "PROD_DB", "--group", "ops"],
+        "prod-db-value\n",
+    );
+    (dir, cast)
+}
+
+/// Who reads `PROD_DB` in group `ops` in `cast`'s vault.
+fn prod_db_readers(cast: &Cast) -> BTreeSet<String> {
+    let cells = cast::cells(cast.vault_path(), &cast.members().map(Clone::clone));
+    cells
+        .get(&("PROD_DB".to_string(), Tier::Group("ops".to_string())))
+        .map(|by| by.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// A recipient who is not in a group revokes the group's only member. Murk
+/// must refuse without `--force`, since the group's values would stay
+/// readable only by the revoked key and no remaining recipient could rotate
+/// them. With `--force` it revokes, reports the orphaned group, and any
+/// recipient can then clear it with `rm` and `group rm`. Revoking one of two
+/// members, or revoking a non-member as the sole member, is allowed without
+/// `--force`.
+#[test]
+fn row_r_i20_a() {
+    common::rows::check("R-I20-a", |p| {
+        let names = |set: &[&str]| set.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+
+        // Control: a group with two members survives losing one. Bob, not in
+        // the group, revokes alice; carol still reads PROD_DB and holds the group.
+        let (_dir, cast) = group_world(&["alice", "carol"]);
+        p.require(
+            prod_db_readers(&cast) == names(&["alice", "carol"]),
+            "the two-member group's value is readable by exactly its members",
+        )?;
+        let out = cast
+            .murk_as(&cast.bob)
+            .args(["circle", "revoke", &cast.alice.pubkey])
+            .output()
+            .unwrap();
+        p.require(
+            out.status.success(),
+            format!(
+                "revoking one of two members needs no --force: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )?;
+        p.require(
+            prod_db_readers(&cast).contains("carol"),
+            "the remaining member still reads the group's value",
+        )?;
+
+        // Control: the sole member revokes someone else; the group is not
+        // orphaned, so no --force is needed.
+        let (_dir, cast) = group_world(&["alice"]);
+        p.require(
+            prod_db_readers(&cast) == names(&["alice"]),
+            "the sole member alone reads the group's value",
+        )?;
+        let out = cast
+            .murk_as(&cast.alice)
+            .args(["circle", "revoke", &cast.bob.pubkey])
+            .output()
+            .unwrap();
+        p.require(
+            out.status.success() && prod_db_readers(&cast).contains("alice"),
+            "the sole member revokes a non-member without --force",
+        )?;
+
+        // Decisive: bob, not in ops, revokes alice, ops' only member.
+        let (_dir, cast) = group_world(&["alice"]);
+        let before = fs::read(cast.vault_path()).unwrap();
+        let revoke = |cast: &Cast, extra: &[&str]| {
+            cast.murk_as(&cast.bob)
+                .args(["circle", "revoke", &cast.alice.pubkey])
+                .args(extra)
+                .output()
+                .unwrap()
+        };
+        let out = revoke(&cast, &[]);
+        p.reached();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        p.note(format!("revoke alice, no --force: {stderr}"));
+        p.target(
+            !out.status.success(),
+            "revoking a group's sole member is refused without --force",
+        );
+        p.target(
+            fs::read(cast.vault_path()).unwrap() == before,
+            "the refusal leaves the vault byte for byte as it was",
+        );
+        p.target(
+            !out.status.success() && stderr.contains("ops") && stderr.contains("PROD_DB"),
+            "the refusal names the group and its key",
+        );
+        let readers = prod_db_readers(&cast);
+        p.today(
+            out.status.success()
+                && !readers.contains("bob")
+                && !readers.contains("carol")
+                && readers.contains("alice"),
+            "the revoke succeeds and leaves PROD_DB readable only by the revoked alice",
+        );
+
+        // With --force: the revoke goes through, its post-check reports the
+        // group, and a recipient who is not a member clears it.
+        let (_dir, cast) = group_world(&["alice"]);
+        let out = revoke(&cast, &["--force"]);
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        p.note(format!("revoke alice, --force: {stderr}"));
+        p.target(out.status.success(), "--force revokes the sole member");
+        p.target(
+            out.status.success() && stderr.contains("ops") && stderr.contains("PROD_DB"),
+            "the post-check reports the orphaned group and its key",
+        );
+        if out.status.success() {
+            let run = |args: &[&str]| cast.murk_as(&cast.bob).args(args).output().unwrap();
+            let rm = run(&["rm", "PROD_DB"]);
+            let group_rm = run(&["group", "rm", "ops"]);
+            p.note(format!(
+                "rm: {}group rm: {}",
+                String::from_utf8_lossy(&rm.stderr),
+                String::from_utf8_lossy(&group_rm.stderr)
+            ));
+            p.target(
+                rm.status.success() && group_rm.status.success(),
+                "a recipient outside the group clears the orphan with rm and group rm",
+            );
+            p.target(
+                prod_db_readers(&cast).is_empty(),
+                "no PROD_DB value is left once it is cleared",
+            );
+        } else {
+            p.target(false, "the orphaned group can be cleared (needs --force)");
+        }
+        Ok(())
+    });
+}

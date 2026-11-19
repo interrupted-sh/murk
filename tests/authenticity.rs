@@ -19,6 +19,13 @@ use tempfile::TempDir;
 mod common;
 use common::murk_bin;
 
+/// Invariant rows (see `tests/invariant_rows.tsv`) about loads and `murk trust`.
+#[path = "authenticity/load_rows.rs"]
+mod load_rows;
+/// Invariant rows about the merge driver.
+#[path = "authenticity/merge_rows.rs"]
+mod merge_rows;
+
 /// One person's machine: a HOME of their own, working in `repo`.
 struct Machine {
     home: PathBuf,

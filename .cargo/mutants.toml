@@ -6,31 +6,32 @@
 # src/property_tests.rs: those assert the invariants, this proves the assertions
 # have teeth.
 #
-# Run locally:   cargo mutants
-# CI:            .github/workflows/mutants.yaml (scheduled + manual; never on
-#                PRs — it is slow). Green baseline; red on a real regression.
+# There are two profiles. This file is the lib profile: modules whose rules the
+# lib's unit and property tests pin down, run against `--lib` only. The trust
+# profile (.cargo/mutants-trust.toml) covers the trust and merge core, whose
+# guards are often held only by the integration harness, and runs those suites.
+#
+# Run locally:   cargo mutants                                   (lib profile)
+#                cargo mutants --config .cargo/mutants-trust.toml (trust profile)
+# CI:            .github/workflows/mutants.yaml: both profiles weekly, sharded
+#                to fit the 6-hour job limit; the trust profile nightly and on
+#                pull requests for the code a diff touches.
 
-# The security-critical, in-process vault surface: the crypto core plus the
-# I/O-heavier and structural modules — key resolution (env), export scope/policy
-# filtering + escaping, agent-grant creation/revoke (grants), recipient
-# add/revoke — the who-can-decrypt surface (recipients), agent allow-tag
-# enforcement (policy), the three-way merge driver (merge), and secret
-# add/rotate/group-scoping (secrets). All are covered
-# by the lib tests, so a survivor here is a genuine assertion gap rather than a
-# test-tool artifact. The MAC/integrity/load functions (mac.rs, signature.rs,
-# load.rs) are mutation-tested by a second, function-scoped invocation in
-# mutants.yaml.
+# Key resolution (env), export scope/policy filtering + escaping, agent-grant
+# creation/revoke (grants), recipient add/revoke — the who-can-decrypt surface
+# (recipients), agent allow-tag enforcement (policy), secret
+# add/rotate/group-scoping (secrets), group membership (groups), and the
+# crypto core and key recovery.
 examine_globs = [
     "src/crypto.rs",
-    "src/signing.rs",
     "src/recovery.rs",
     "src/env.rs",
     "src/export.rs",
     "src/grants.rs",
     "src/recipients.rs",
     "src/policy.rs",
-    "src/merge.rs",
     "src/secrets.rs",
+    "src/groups.rs",
 ]
 
 # Only the lib's unit + property tests need to run to catch mutants in this

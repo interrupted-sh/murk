@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -854,7 +854,7 @@
+                 .collect()
+         })
+         .unwrap_or_default();
+-    if current_grants.contains(&signer_c) || pinned_grants.contains(&signer_c) {
++    if false && (current_grants.contains(&signer_c) || pinned_grants.contains(&signer_c)) {
+         return Some(Refusal::GrantSigner {
+             signer: signer.to_string(),
+         });

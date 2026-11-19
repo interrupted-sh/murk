@@ -1,0 +1,18 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1045,13 +1045,13 @@
+             });
+         }
+     };
+-    if !is_trusted {
++    if false && !is_trusted {
+         return refuse(Refusal::UntrustedSigner {
+             signer: signer.clone(),
+         });
+     }
+ 
+-    if let Some(refusal) = signer_key_refusal(loaded, signer, external_signers, trusted_pin) {
++    if false && let Some(refusal) = signer_key_refusal(loaded, signer, external_signers, trusted_pin) {
+         return refuse(refusal);
+     }
+ 

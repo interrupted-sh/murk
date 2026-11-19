@@ -1036,12 +1036,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn verify_mac_rejects_grouped_under_legacy_prefix() {
-        // A v5 (blake3v3) MAC doesn't cover grouped ciphertext. Injecting a
-        // grouped entry must not verify against the old scheme — otherwise an
-        // attacker without a key could add a group value that wins on read.
-        let mut vault = types::Vault {
+    /// A murk 0.13-era vault (header 2.0, no id, no counter, no agents), so
+    /// the v10-only check passes and each downgrade guard below is the only
+    /// thing between an old-prefix MAC and acceptance.
+    fn legacy_vault() -> types::Vault {
+        types::Vault {
             version: "2.0".into(),
             created: "2026-02-28T00:00:00Z".into(),
             vault_name: ".murk".into(),
@@ -1053,36 +1052,95 @@ mod tests {
             recipients: vec!["age1abc".into()],
             schema: BTreeMap::new(),
             policy: None,
-            secrets: BTreeMap::new(),
+            secrets: BTreeMap::from([(
+                "API_KEY".to_string(),
+                types::SecretEntry {
+                    shared: "shared-ct".into(),
+                    ..Default::default()
+                },
+            )]),
             meta: String::new(),
-        };
-        let key = [7u8; 32];
-        let no_groups = BTreeMap::new();
-        let v5_mac = compute_mac_v5(&vault, &key);
-        assert!(v5_mac.starts_with("blake3v3:"));
-        assert!(verify_mac(
-            &vault,
-            &no_groups,
-            &std::collections::BTreeMap::new(),
-            &v5_mac,
-            Some(&key)
-        ));
+        }
+    }
 
-        // Attacker injects a grouped entry; the v5 MAC is now invalid for it.
-        vault.secrets.insert(
-            "STOLEN".into(),
-            types::SecretEntry {
-                grouped: BTreeMap::from([("prod".to_string(), "injected-ct".to_string())]),
-                ..Default::default()
+    /// Every MAC scheme a key can stamp on `vault`, oldest first, with the
+    /// prefix it writes.
+    fn keyed_macs(
+        vault: &types::Vault,
+        groups: &BTreeMap<String, Vec<String>>,
+        grants: &BTreeMap<String, types::GrantEntry>,
+        key: &[u8; 32],
+    ) -> Vec<(&'static str, String)> {
+        vec![
+            ("blake3v3:", compute_mac_v5(vault, key)),
+            ("blake3v4:", compute_mac_v6(vault, groups, key)),
+            ("blake3v5:", compute_mac_v7(vault, groups, grants, key)),
+            ("blake3v6:", compute_mac_v8(vault, groups, grants, key)),
+            ("blake3v7:", compute_mac_v9(vault, groups, grants, key)),
+            ("blake3v8:", compute_mac_v10(vault, groups, grants, key)),
+        ]
+    }
+
+    /// `vault` verifies under exactly the schemes from `oldest` on: a vault is
+    /// rejected under an older prefix that does not cover what it carries, so
+    /// an attacker cannot add or strip it by downgrading the MAC.
+    fn assert_minimum_scheme(
+        vault: &types::Vault,
+        groups: &BTreeMap<String, Vec<String>>,
+        grants: &BTreeMap<String, types::GrantEntry>,
+        oldest: &str,
+    ) {
+        let key = [9u8; 32];
+        let mut covered = false;
+        for (prefix, mac) in keyed_macs(vault, groups, grants, &key) {
+            assert!(mac.starts_with(prefix), "{mac} is not {prefix}");
+            covered |= prefix == oldest;
+            assert_eq!(
+                verify_mac(vault, groups, grants, &mac, Some(&key)),
+                covered,
+                "{prefix} must {} for this vault",
+                if covered { "verify" } else { "be refused" }
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_values_need_blake3v4_or_newer() {
+        // A grouped value inside an existing key, with no group membership:
+        // the key name is covered by every scheme, so only the group guard
+        // can refuse the older ones.
+        let mut vault = legacy_vault();
+        vault.secrets.get_mut("API_KEY").unwrap().grouped =
+            BTreeMap::from([("prod".to_string(), "group-ct".to_string())]);
+        assert_minimum_scheme(&vault, &BTreeMap::new(), &BTreeMap::new(), "blake3v4:");
+        // Group membership alone needs the same scheme.
+        let groups = BTreeMap::from([("prod".to_string(), vec!["age1abc".to_string()])]);
+        assert_minimum_scheme(&legacy_vault(), &groups, &BTreeMap::new(), "blake3v4:");
+    }
+
+    #[test]
+    fn grants_need_blake3v5_or_newer() {
+        let grants = BTreeMap::from([(
+            "codex".to_string(),
+            types::GrantEntry {
+                pubkey: "age1agent".into(),
+                scope: vec!["API_KEY".into()],
+                issued_at: "2026-02-28T00:00:00Z".into(),
+                expires_at: "2026-02-28T02:00:00Z".into(),
+                issuer: "age1abc".into(),
+                anchors: Vec::new(),
             },
-        );
-        assert!(!verify_mac(
-            &vault,
-            &no_groups,
-            &std::collections::BTreeMap::new(),
-            &v5_mac,
-            Some(&key)
-        ));
+        )]);
+        assert_minimum_scheme(&legacy_vault(), &BTreeMap::new(), &grants, "blake3v5:");
+    }
+
+    #[test]
+    fn a_policy_needs_blake3v6_or_newer() {
+        let mut vault = legacy_vault();
+        vault.policy = Some(types::Policy {
+            agent_allow_tags: vec!["agents".into()],
+        });
+        assert_minimum_scheme(&vault, &BTreeMap::new(), &BTreeMap::new(), "blake3v6:");
     }
 
     #[test]
@@ -1138,51 +1196,6 @@ mod tests {
             &no_groups,
             &tampered,
             &v7_mac,
-            Some(&key)
-        ));
-    }
-
-    #[test]
-    fn verify_mac_rejects_grants_under_legacy_prefix() {
-        // Grant metadata is only covered by v7. A vault carrying grants but
-        // stamped with an older (group-era) MAC must not verify — otherwise an
-        // attacker could fabricate or extend a grant the MAC ignores.
-        let vault = types::Vault {
-            version: types::VAULT_VERSION.into(),
-            created: "2026-02-28T00:00:00Z".into(),
-            vault_name: ".murk".into(),
-            repo: String::new(),
-            vault_id: String::new(),
-            generation: 0,
-            agents: BTreeMap::new(),
-            sig: None,
-            recipients: vec!["age1abc".into()],
-            schema: BTreeMap::new(),
-            policy: None,
-            secrets: BTreeMap::new(),
-            meta: String::new(),
-        };
-        let key = [3u8; 32];
-        let no_groups = BTreeMap::new();
-        let grants = BTreeMap::from([(
-            "codex".to_string(),
-            types::GrantEntry {
-                pubkey: "age1agent".into(),
-                scope: vec!["STRIPE_KEY".into()],
-                issued_at: "2026-02-28T00:00:00Z".into(),
-                expires_at: "2026-02-28T02:00:00Z".into(),
-                issuer: "age1abc".into(),
-                anchors: Vec::new(),
-            },
-        )]);
-        // A v6 MAC (no grants in the digest) must be rejected once grants exist.
-        let v6_mac = compute_mac_v6(&vault, &no_groups, &key);
-        assert!(v6_mac.starts_with("blake3v4:"));
-        assert!(!verify_mac(
-            &vault,
-            &no_groups,
-            &grants,
-            &v6_mac,
             Some(&key)
         ));
     }
@@ -1269,43 +1282,6 @@ mod tests {
         let mac_a = compute_mac(&a, &groups, &grants, Some(&key));
         let mac_b = compute_mac(&b, &groups, &grants, Some(&key));
         assert_ne!(mac_a, mac_b, "distinct tag lists must not share a MAC");
-    }
-
-    #[test]
-    fn verify_mac_rejects_policy_under_legacy_prefix() {
-        // Policy is only covered by v8. A vault carrying a policy but stamped
-        // with an older MAC must not verify — otherwise an attacker could strip
-        // or weaken the policy by downgrading the MAC.
-        let vault = types::Vault {
-            version: types::VAULT_VERSION.into(),
-            created: "2026-02-28T00:00:00Z".into(),
-            vault_name: ".murk".into(),
-            repo: String::new(),
-            vault_id: String::new(),
-            generation: 0,
-            agents: BTreeMap::new(),
-            sig: None,
-            recipients: vec!["age1abc".into()],
-            schema: BTreeMap::new(),
-            policy: Some(types::Policy {
-                agent_allow_tags: vec!["agents".into()],
-            }),
-            secrets: BTreeMap::new(),
-            meta: String::new(),
-        };
-        let key = [5u8; 32];
-        let no_groups = BTreeMap::new();
-        let no_grants = BTreeMap::new();
-        // A v5 MAC (no policy in the digest) must be rejected once a policy exists.
-        let v5_mac = compute_mac_v5(&vault, &key);
-        assert!(v5_mac.starts_with("blake3v3:"));
-        assert!(!verify_mac(
-            &vault,
-            &no_groups,
-            &no_grants,
-            &v5_mac,
-            Some(&key)
-        ));
     }
 
     #[test]

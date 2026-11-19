@@ -1,12 +1,33 @@
 name: Mutants
 
 # Mutation testing proves the suite CATCHES bugs — a surviving mutant is a change
-# no test noticed, i.e. an assertion gap. It is slow (rebuild + retest per
-# mutant), so it runs on a schedule and on demand only, never on pull requests.
-# Scope, test args, and exclusions live in .cargo/mutants.toml.
+# no test noticed, i.e. an assertion gap. Two profiles (see .cargo/mutants.toml
+# and .cargo/mutants-trust.toml):
+# - lib: modules the lib tests pin down, run against `--lib`;
+# - trust: the trust and merge core, run against the lib tests plus the trust
+#   suites, because many of its guards are held only by the integration tests.
+# Weekly (and on demand) both run in full, sharded so every job stays under two
+# hours, far inside GitHub's 6-hour limit. Nightly and on pull requests the
+# trust profile runs on the code the recent diff touched. Every sharded section
+# goes through scripts/mutants-step.sh, which fails a shard that selected no
+# mutants. .github/workflows/watchdog.yaml opens or updates the tracking issue
+# when a scheduled run fails, is cancelled, times out or never runs.
 on:
   schedule:
-    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+    - cron: "0 8 * * 1" # full run, Mondays 08:00 UTC
+    - cron: "30 3 * * *" # nightly: the trust profile on last week's changes
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/trust.rs"
+      - "src/pins.rs"
+      - "src/save.rs"
+      - "src/merge.rs"
+      - "src/load.rs"
+      - "src/mac.rs"
+      - "src/signature.rs"
+      - "src/signing.rs"
+      - "src/git.rs"
   workflow_dispatch:
 
 permissions:
@@ -16,107 +37,223 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  mutants:
-    name: cargo-mutants
+  # Lib profile: about 590 mutants at ~30 s each (15 s build + 15 s lib tests on
+  # ubuntu-latest), 8 shards of about 40 minutes.
+  lib:
+    name: lib profile ${{ matrix.shard }}/8
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 1'
     runs-on: ubuntu-latest
-    # Job-level permissions replace the workflow default, so restate it.
-    # issues: write is only for the tracking-issue step on scheduled failures.
-    permissions:
-      contents: read
-      issues: write
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked --version 25.3.1
-
-      - name: Prepare report directory
-        run: mkdir -p target/mutants
-
-      # The default examine_globs scope from .cargo/mutants.toml: the in-process
-      # crypto core plus the security-critical vault modules — env (key
-      # resolution), export (scope/policy filtering + escaping), grants
-      # (agent-grant create/revoke), recipients (who-can-decrypt), policy
-      # (agent allow-tag enforcement), and merge (three-way merge driver).
-      # --lib test args keep each mutant tractable.
-      #
-      # Every section runs through scripts/mutants-step.sh, which fails the step
-      # when its filters select zero mutants (cargo-mutants itself exits 0).
-      - name: Mutation test — crypto core & vault security modules
-        run: scripts/mutants-step.sh "crypto core & vault security modules" target/mutants/crypto
-
-      # The MAC / integrity / load trust boundary (mac.rs, signature.rs,
-      # load.rs), scoped by function name so the run stays bounded and
-      # meaningful. Each section runs even if an earlier one failed, so one red
-      # section cannot hide another.
-      - name: Mutation test — MAC & load core
-        if: ${{ !cancelled() }}
+      - name: Mutation test
         run: >
-          scripts/mutants-step.sh "MAC & load core" target/mutants/mac
-          --file src/mac.rs --file src/signature.rs --file src/load.rs
-          --re 'compute_mac|verify_mac|mac_bytes|schema_mac_bytes|decode_mac_key|generate_mac_key|signing_message|sign_vault|verify_vault_signature|check_signature|resolve_meta_state|decrypt_vault'
-
-      # The config-generation invariant for `murk agent connect`: a client config
-      # must reference a MURK_KEY_FILE *path* (+ MURK_AGENT=1) and never inline
-      # key material. Scoped by function name to the renderers, which are
-      # mutation-clean. The surrounding JSONC/TOML scanner and surgical
-      # file-editing helpers (skip_trivia, scan_*, object_members,
-      # upsert/remove_*_server, connect_client error handling) are not part of
-      # this scoped no-inline-key invariant; they preserve/splice existing
-      # config bytes and are covered by round-trip unit tests. Full-file
-      # 0-missed is deferred: their survivors/timeouts are byte-index arithmetic
-      # in bounded parse loops, many equivalent, with no key-material exposure.
-      - name: Mutation test — agent connect config generation
-        if: ${{ !cancelled() }}
-        run: >
-          scripts/mutants-step.sh "agent connect config generation" target/mutants/connect
-          --file src/connect.rs
-          --re 'render_value|render_member|render_toml_member|fresh_document|\bquote\b'
-
-      # The strict-mode / agent-context gates that decide whether murk falls
-      # back to the operator's stored key and honors the vault's agent policy.
-      # Scoped to the env-driven decision functions, which are platform-
-      # independent and mutation-clean. is_ram_backed and stdout_is_regular_file
-      # are deliberately out of scope: they are per-OS #[cfg] syscall wrappers
-      # (the inactive branch is dead code on any single runner) whose result
-      # depends on runtime filesystem/fd state (tmpfs availability, whether
-      # stdout is a captured pipe) that a --lib test cannot control portably —
-      # covering them to 0-missed needs a multi-OS matrix + fd redirection.
-      - name: Mutation test — strict-mode & agent gates
-        if: ${{ !cancelled() }}
-        run: >
-          scripts/mutants-step.sh "strict-mode & agent gates" target/mutants/hardening
-          --file src/hardening.rs
-          --re 'strict_mode|agent_context|ci_context|self_scope|strict_from|effective_strict_from|disable_core_dumps'
-
+          scripts/mutants-step.sh "lib profile ${{ matrix.shard }}/8"
+          target/mutants/lib-${{ matrix.shard }} --shard ${{ matrix.shard }}/8
       - name: Upload mutation reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutants-report
+          name: mutants-lib-${{ matrix.shard }}
           path: target/mutants/
 
-      # A scheduled run only notifies whoever last edited the cron, so a red
-      # week used to go unseen. Open one tracking issue (fixed title) and add a
-      # comment to it on each later failure until someone closes it.
-      - name: Open or update the tracking issue
-        if: failure() && github.event_name == 'schedule'
+  # Function-scoped lib-profile sections.
+  lib-scoped:
+    name: lib profile (${{ matrix.name }})
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The config-generation invariant for `murk agent connect`: a client
+          # config must reference a MURK_KEY_FILE *path* (+ MURK_AGENT=1) and
+          # never inline key material. Scoped by function name to the
+          # renderers, which are mutation-clean. The surrounding JSONC/TOML
+          # scanner and surgical file-editing helpers (skip_trivia, scan_*,
+          # object_members, upsert/remove_*_server, connect_client error
+          # handling) are not part of this scoped no-inline-key invariant; they
+          # preserve/splice existing config bytes and are covered by round-trip
+          # unit tests. Full-file 0-missed is deferred: their survivors/timeouts
+          # are byte-index arithmetic in bounded parse loops, many equivalent,
+          # with no key-material exposure.
+          - name: agent connect config generation
+            slug: connect
+            file: src/connect.rs
+            re: 'render_value|render_member|render_toml_member|fresh_document|\bquote\b'
+          # The strict-mode / agent-context gates that decide whether murk
+          # falls back to the operator's stored key and honors the vault's
+          # agent policy. Scoped to the env-driven decision functions, which
+          # are platform-independent and mutation-clean. is_ram_backed and
+          # stdout_is_regular_file are deliberately out of scope: they are
+          # per-OS #[cfg] syscall wrappers (the inactive branch is dead code on
+          # any single runner) whose result depends on runtime filesystem/fd
+          # state (tmpfs availability, whether stdout is a captured pipe) that
+          # a --lib test cannot control portably — covering them to 0-missed
+          # needs a multi-OS matrix + fd redirection.
+          - name: strict-mode & agent gates
+            slug: hardening
+            file: src/hardening.rs
+            re: 'strict_mode|agent_context|ci_context|self_scope|strict_from|effective_strict_from|disable_core_dumps'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version 25.3.1
+      - name: Mutation test
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SECTION: ${{ matrix.name }}
+          FILE: ${{ matrix.file }}
+          RE: ${{ matrix.re }}
+        run: >
+          scripts/mutants-step.sh "$SECTION" "target/mutants/${{ matrix.slug }}"
+          --file "$FILE" --re "$RE"
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ matrix.slug }}
+          path: target/mutants/
+
+  # Trust profile, git.rs aside: about 1,020 mutants. A mutant rebuilds the lib,
+  # the binary and the trust suites and runs them: 2 minutes on a laptop
+  # (cargo test, serial), so about 4 minutes on a hosted runner. 45 shards of
+  # about 23 mutants keep each near 90 minutes. Resize from the job timings.
+  trust:
+    name: trust profile ${{ matrix.shard }}/45
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version 25.3.1
+      - name: Mutation test
+        run: >
+          scripts/mutants-step.sh "trust profile ${{ matrix.shard }}/45"
+          target/mutants/trust-${{ matrix.shard }}
+          --config .cargo/mutants-trust.toml --exclude src/git.rs
+          --shard ${{ matrix.shard }}/45
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-trust-${{ matrix.shard }}
+          path: target/mutants/
+
+  # git.rs in the trust profile, scoped to the git invocation and the history
+  # walks that decide which committed revision a removal or a branch mark
+  # refers to (about 60 mutants, 2 shards).
+  trust-git:
+    name: trust profile git.rs ${{ matrix.shard }}/2
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version 25.3.1
+      - name: Mutation test
+        run: >
+          scripts/mutants-step.sh "trust profile git.rs ${{ matrix.shard }}/2"
+          target/mutants/git-${{ matrix.shard }}
+          --config .cargo/mutants-trust.toml --file src/git.rs
+          --re '\b(git_command|git_output|git_succeeds|vault_at_revision|head_state|head_commit|head_commit_holding_vault|vault_committed_at_head|committed_vault_at_or_before|stored_branch_name|common_dir|ignores_case|collect_loose_refs|is_commit_id)\b'
+          --shard ${{ matrix.shard }}/2
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-git-${{ matrix.shard }}
+          path: target/mutants/
+
+  # The trust profile on the code a diff touched: on a pull request, its diff
+  # against the base branch; nightly, the last week of main. A diff that
+  # touches no trust-profile code selects no mutant, which is fine here.
+  trust-diff:
+    name: trust profile on changed code
+    if: github.event_name == 'pull_request' || github.event.schedule == '30 3 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: mutants-diff-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version 25.3.1
+      - name: Diff to test
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          title="Weekly mutation test run is failing"
-          body="The scheduled cargo-mutants run failed on \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}: ${RUN_URL}
-
-          A missed mutant is a code change no test noticed. The job log lists each MISSED or TIMEOUT mutant; the \`mutants-report\` artifact has the full outcomes. Close this issue once the run is green."
-          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --limit 100 \
-            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body "$body"
+          if [ "$EVENT" = pull_request ]; then
+            base="$(git merge-base "origin/$BASE_REF" HEAD)"
           else
-            gh issue create --title "$title" --body "$body"
+            base="$(git rev-list -1 --before='7 days ago' HEAD)"
           fi
+          git diff "$base" HEAD -- src >target-diff.patch
+          echo "Diff against $base: $(grep -c '^@@' target-diff.patch || true) hunks"
+      - name: Mutation test
+        run: |
+          set -euo pipefail
+          mkdir -p target/mutants
+          if [ ! -s target-diff.patch ]; then
+            echo "No source change to test."
+            exit 0
+          fi
+          cargo mutants --output target/mutants/diff \
+            --config .cargo/mutants-trust.toml --in-diff target-diff.patch
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-diff
+          path: target/mutants/
+
+  # The invariant rows (tests/invariant_rows.tsv) whose guards live in code the
+  # lib tests do not reach: each enforced row names a patch that disables its
+  # guard, and the row's own test must fail with the patch applied.
+  row-mutants:
+    name: Invariant row mutants
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Every enforced row fails with its guard disabled
+        run: tests/mutants/run.sh

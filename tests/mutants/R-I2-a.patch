@@ -1,0 +1,22 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -142,7 +142,7 @@
+     pub fn pinned_key(&self, key: &str) -> Option<&String> {
+         let vk = self.signers.get(key)?;
+         match self.added_by.get(key) {
+-            Some(adder) if !self.trusted.contains(adder) => None,
++            Some(adder) if false && !self.trusted.contains(adder) => None,
+             _ => Some(vk),
+         }
+     }
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1717,7 +1717,7 @@
+     // that must not pin it again under a new name.
+     let mut dropped = BTreeSet::new();
+     added_by.retain(|pk, adder| {
+-        let stands = trusted.contains(adder);
++        let stands = trusted.contains(adder) || true;
+         if !stands {
+             signers.remove(pk);
+             dropped.insert(pk.clone());

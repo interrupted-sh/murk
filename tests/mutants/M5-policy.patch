@@ -1,0 +1,11 @@
+--- a/src/mac.rs
++++ b/src/mac.rs
+@@ -620,7 +620,7 @@
+     // it so an attacker can't strip or weaken the policy by downgrading the MAC.
+     if vault.policy.is_some()
+         && !stored_mac.starts_with("blake3v6:")
+-        && !stored_mac.starts_with("blake3v7:")
++        && stored_mac.starts_with("blake3v7:")
+         && !stored_mac.starts_with("blake3v8:")
+     {
+         return false;

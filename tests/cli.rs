@@ -10801,3 +10801,152 @@ fn agent_connect_covers_every_adapter() {
         );
     }
 }
+
+// ── invariant rows ──
+
+/// R-L-verify: `murk verify` prints a `lineage` line that tells a revision
+/// descending from the one this machine accepted on the branch, one that does
+/// not (a genuine fork of an older revision, above the accepted generation),
+/// and a branch with no reference apart. The descendant also prints the value
+/// to copy into `MURK_EXPECTED_VAULT`, `<id>:<generation>:<fp>`.
+#[test]
+fn row_r_l_verify() {
+    common::rows::check("R-L-verify", |p| {
+        let dir = TempDir::new().unwrap();
+        let repo = real_path(dir.path());
+        let git = |args: &[&str]| {
+            let out = common::machines::git_in(&repo, &repo, None)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+        let (key, _) = init_vault(&repo);
+        let add = |at: &std::path::Path, name: &str| {
+            murk(at, &key)
+                .args(["add", name, "--vault", "test.murk"])
+                .write_stdin(format!("v-{name}\n"))
+                .assert()
+                .success();
+        };
+        add(&repo, "TOKEN"); // generation 2
+        let fork_base = fs::read(repo.join("test.murk")).unwrap();
+        add(&repo, "MAIN"); // generation 3: the revision this machine accepted on main
+        git(&["add", "test.murk"]);
+        git(&["commit", "-q", "-m", "vault"]);
+        let accepted = fs::read(repo.join("test.murk")).unwrap();
+
+        // A genuine fork of generation 2 with two saves of its own: signed by
+        // the same key, above the accepted generation, not a descendant.
+        let other = TempDir::new().unwrap();
+        fs::write(other.path().join("test.murk"), &fork_base).unwrap();
+        murk(other.path(), &key)
+            .args(["trust", "--yes", "--vault", "test.murk"])
+            .assert()
+            .success();
+        add(other.path(), "FORK_ONE");
+        add(other.path(), "FORK_TWO");
+        let stale_fork = fs::read(other.path().join("test.murk")).unwrap();
+
+        let main: serde_json::Value = serde_json::from_slice(&accepted).unwrap();
+        let fork: serde_json::Value = serde_json::from_slice(&stale_fork).unwrap();
+        let format = main["version"].as_str().unwrap().to_string();
+        p.require(
+            format.starts_with("4."),
+            format!("this build writes format {format} vaults, not format 4, so verify has no lineage to report"),
+        )?;
+        p.require(
+            fork["vault_id"] == main["vault_id"]
+                && fork["sig"]["signer"] == main["sig"]["signer"]
+                && fork["generation"].as_u64() > main["generation"].as_u64(),
+            "the stale fork is the same vault, signed by the same key, above the accepted generation",
+        )?;
+
+        // `murk verify` exits non-zero on any finding (an unsigned commit, say),
+        // so the rows read what it prints, not how it exits.
+        let verify = || {
+            let out = murk(&repo, &key)
+                .args(["verify", "--vault", "test.murk"])
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let lineage = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.to_lowercase().contains("lineage"))
+                .map(|l| l.trim().to_string())
+                .collect()
+        };
+        let descendant = verify();
+        p.require(
+            descendant.contains("signed by trusted signer"),
+            format!("verify accepts the revision this machine saved: {descendant}"),
+        )?;
+
+        // The decisive runs: a branch this machine never accepted a vault on,
+        // then the fork over the accepted branch.
+        git(&["checkout", "-q", "-b", "feature"]);
+        let new_branch = verify();
+        git(&["checkout", "-q", "main"]);
+        fs::write(repo.join("test.murk"), &stale_fork).unwrap();
+        let forked = verify();
+        fs::write(repo.join("test.murk"), &accepted).unwrap();
+        p.reached();
+
+        let (descends, forks, fresh) =
+            (lineage(&descendant), lineage(&forked), lineage(&new_branch));
+        p.target(
+            !descends.is_empty(),
+            "verify prints a lineage line for a descendant",
+        );
+        p.target(
+            !forks.is_empty(),
+            "verify prints a lineage line for a non-descendant",
+        );
+        p.target(
+            !fresh.is_empty(),
+            "verify prints a lineage line for a branch with no reference",
+        );
+        p.target(
+            descends != forks && descends != fresh && forks != fresh,
+            "the three lineage lines differ",
+        );
+        let typed: murk_cli::types::Vault = serde_json::from_slice(&accepted).unwrap();
+        let value = format!(
+            "{}:{}:{}",
+            typed.vault_id,
+            typed.generation,
+            murk_cli::trust::vault_fingerprint(&typed)
+        );
+        p.target(
+            descendant.contains(&value),
+            format!("the descendant also prints {value}"),
+        );
+        p.target(
+            descends.join("\n").contains("descends from"),
+            "the descendant's line says it descends from the accepted revision",
+        );
+        p.target(
+            !forks.is_empty() && !forks.join("\n").contains("descends from"),
+            "the non-descendant's line does not say it descends",
+        );
+        p.target(
+            fresh.join("\n").contains("no lineage reference"),
+            "the new branch's line says there is no lineage reference",
+        );
+        p.note(format!("descendant: {descends:?}"));
+        p.note(format!("non-descendant: {forks:?}"));
+        p.note(format!("new branch: {fresh:?}"));
+        Ok(())
+    });
+}

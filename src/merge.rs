@@ -2320,6 +2320,7 @@ mod tests {
         let _env = crate::testutil::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let base = base_vault_json();
         let output = run_merge_driver(&base, &base, &base, ".murk").unwrap();
         assert!(output.result.conflicts.is_empty());
@@ -2332,6 +2333,7 @@ mod tests {
         let _env = crate::testutil::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let mut v: Vault = serde_json::from_str(&base_vault_json()).unwrap();
         v.generation = u64::MAX;
         v.vault_id = "00112233445566778899aabbccddeeff".into();
@@ -2350,6 +2352,7 @@ mod tests {
         let _env = crate::testutil::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let mut base: Vault = serde_json::from_str(&base_vault_json()).unwrap();
         base.generation = 3;
         base.vault_id = "00112233445566778899aabbccddeeff".into();

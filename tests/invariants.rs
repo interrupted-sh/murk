@@ -139,3 +139,89 @@ fn library_modules_do_not_print_to_stdout() {
         offenders.join("\n"),
     );
 }
+
+#[path = "common/rows.rs"]
+mod rows;
+
+/// Every `.rs` file under `dir`, recursively, with its contents.
+fn rust_files(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if dir.is_dir() {
+        collect(dir, &mut out);
+    }
+    out
+}
+
+/// The trust and merge invariant rows (`tests/invariant_rows.tsv`) point at
+/// tests and mutants that exist, so a renamed test or a lost patch fails here
+/// rather than turning a row into a silent no-op.
+#[test]
+fn invariant_rows_table_points_at_real_tests_and_mutants() {
+    use rows::State;
+    let table = rows::table();
+    assert!(!table.is_empty(), "tests/invariant_rows.tsv has no rows");
+    let mut problems = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for row in &table {
+        let id = &row.id;
+        if !seen.insert((row.id.clone(), row.test.clone())) {
+            problems.push(format!("{id}: {} is listed twice", row.test));
+        }
+        if row.test.starts_with("row_") && table.iter().filter(|r| r.id == *id).count() != 1 {
+            problems.push(format!(
+                "{id}: a row run through rows::check needs a unique id"
+            ));
+        }
+        let enforced = row.state == State::Enforced;
+        if enforced != (row.fix == "-") {
+            problems.push(format!(
+                "{id}: an enforced row has fix `-`, every other row names the change that flips it"
+            ));
+        }
+        if enforced {
+            if !(row.mutant.starts_with("tests/mutants/") && row.mutant.ends_with(".patch")) {
+                problems.push(format!(
+                    "{id}: an enforced row needs a patch under tests/mutants/"
+                ));
+            } else if !Path::new(&row.mutant).is_file() {
+                problems.push(format!("{id}: {} does not exist", row.mutant));
+            }
+        } else if row.mutant.ends_with(".patch") {
+            problems.push(format!(
+                "{id}: only an enforced row has a patch; describe the guard to disable instead"
+            ));
+        }
+        let sources = if row.binary == "lib" {
+            source_files()
+        } else {
+            let file = format!("tests/{}.rs", row.binary);
+            match fs::read_to_string(&file) {
+                Ok(body) => {
+                    let mut files = vec![(file, body)];
+                    files.extend(rust_files(&Path::new("tests").join(&row.binary)));
+                    files
+                }
+                Err(_) => {
+                    problems.push(format!("{id}: no test target {file}"));
+                    continue;
+                }
+            }
+        };
+        let needle = format!("fn {}(", row.test);
+        let defined = sources.iter().any(|(_, body)| {
+            body.lines().any(|l| {
+                l.trim_start()
+                    .trim_start_matches("pub ")
+                    .starts_with(&needle)
+            })
+        });
+        if !defined {
+            problems.push(format!("{id}: no test `{}` in {}", row.test, row.binary));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "tests/invariant_rows.tsv:\n  {}",
+        problems.join("\n  ")
+    );
+}

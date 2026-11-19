@@ -20,6 +20,11 @@
 //! All cells run, then the test fails with the full list of broken cells.
 //! Rows that drive `$EDITOR` run on Unix only (see
 //! [`table::EDITOR_UNIX_ONLY`]); every other row runs on every platform.
+//!
+//! The `row_*` tests after the matrix test are trust invariant rows (see
+//! `tests/invariant_rows.tsv`) about the CI and grant roles. They need
+//! fixtures of their own, a second vault or a spent grant, so they build them
+//! rather than add a role to the table.
 
 mod common;
 #[path = "auth_matrix/table.rs"]
@@ -30,7 +35,9 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use common::cast::{self, Tier, Who};
@@ -803,4 +810,794 @@ fn every_role_gets_exactly_the_access_the_matrix_grants() {
         results.len(),
         failures.join("\n")
     );
+}
+
+// ── Trust rows ──
+//
+// Scenarios of `tests/invariant_rows.tsv` that need a fixture of their own (a
+// second vault, a spent agent grant) and not a role in the table above.
+
+/// One team's vault for a row. Alice owns it: `repo` is its directory and her
+/// `HOME`, so her trust pin is as `murk` left it. With `signers`, every
+/// command also runs with `MURK_TRUSTED_SIGNERS` set to them.
+struct Org {
+    repo: PathBuf,
+    alice: Who,
+    signers: Option<String>,
+}
+
+impl Org {
+    /// `murk init` as alice in `root/name`.
+    fn new(root: &Path, name: &str, alice: &Who) -> Result<Self, String> {
+        let org = Self::at(root, name, alice, None);
+        org.must(&["init"], "alice\n")?;
+        Ok(org)
+    }
+
+    /// An empty directory `root/name` for alice.
+    fn at(root: &Path, name: &str, alice: &Who, signers: Option<String>) -> Self {
+        let repo = root.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        Org {
+            repo,
+            alice: alice.clone(),
+            signers,
+        }
+    }
+
+    /// A copy of `vault` in `root/name`, which alice works on from a machine
+    /// that has never seen it (as `signers` anchors the first load).
+    fn adopt(root: &Path, name: &str, alice: &Who, signers: &str, vault: &[u8]) -> Self {
+        let org = Self::at(root, name, alice, Some(signers.to_string()));
+        org.put(vault);
+        org
+    }
+
+    /// `murk` run as alice in the repo.
+    fn run(&self, args: &[&str], stdin: &str) -> Output {
+        let mut cmd = murk_bin(&self.repo);
+        cmd.current_dir(&self.repo)
+            .env("MURK_KEY", &self.alice.secret);
+        if let Some(signers) = &self.signers {
+            cmd.env("MURK_TRUSTED_SIGNERS", signers);
+        }
+        cmd.args(args)
+            .write_stdin(stdin)
+            .timeout(Duration::from_secs(60))
+            .output()
+            .unwrap()
+    }
+
+    /// `murk` as alice, which must succeed.
+    fn must(&self, args: &[&str], stdin: &str) -> Result<Output, String> {
+        let out = self.run(args, stdin);
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(format!(
+                "alice: murk {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    /// Alice sets `key` to `value`.
+    fn add(&self, key: &str, value: &str) -> Result<(), String> {
+        self.must(
+            &["add", key, "--desc", "d", "--tag", "t"],
+            &format!("{value}\n"),
+        )
+        .map(drop)
+    }
+
+    /// Alice's signer entry, as `murk trust --print-key` prints it.
+    fn entry(&self) -> Result<String, String> {
+        let out = self.must(&["trust", "--print-key"], "")?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(str::to_string)
+            .filter(|e| !e.is_empty())
+            .ok_or_else(|| "no signer entry".to_string())
+    }
+
+    fn vault(&self) -> Vec<u8> {
+        fs::read(self.repo.join(".murk")).unwrap()
+    }
+
+    /// Replace the vault file with `bytes`.
+    fn put(&self, bytes: &[u8]) {
+        write_checked_out(&self.repo.join(".murk"), bytes);
+    }
+}
+
+/// Write a vault file as git would check it out: not group-writable, whatever
+/// the test process's umask.
+fn write_checked_out(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// Write a key file only its owner can read, which `murk` insists on.
+fn write_key_file(path: &Path, text: &str) {
+    fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn vault_json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes).expect("a vault file is JSON")
+}
+
+fn generation(bytes: &[u8]) -> u64 {
+    vault_json(bytes)["generation"].as_u64().unwrap_or(0)
+}
+
+fn vault_id(bytes: &[u8]) -> String {
+    vault_json(bytes)["vault_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The major number of the vault file's header version.
+fn header_major(bytes: &[u8]) -> Option<u64> {
+    vault_json(bytes)["version"]
+        .as_str()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn out_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// A machine of its own for one command: a fresh `HOME` (so no trust pin) and
+/// a work directory holding `vault` as `.murk`. Names are unique per call.
+fn fresh_machine(root: &Path, vault: &[u8]) -> (PathBuf, PathBuf) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let home = root.join(format!("machine-{n}-home"));
+    let work = root.join(format!("machine-{n}-work"));
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write_checked_out(&work.join(".murk"), vault);
+    (home, work)
+}
+
+/// `murk` on the machine `home`, in `work`, as the holder of `secret` (or of
+/// the key file `key_file`), with `env` set.
+fn on_machine(
+    (home, work): &(PathBuf, PathBuf),
+    key: Key<'_>,
+    env: &[(&str, &str)],
+    args: &[&str],
+    stdin: &str,
+) -> Output {
+    let mut cmd = murk_bin(home);
+    cmd.current_dir(work)
+        .env_remove("MURK_EXPECTED_VAULT")
+        .timeout(Duration::from_secs(60));
+    match key {
+        Key::Inline(secret) => cmd.env("MURK_KEY", secret),
+        Key::File(path) => cmd.env("MURK_KEY_FILE", path),
+    };
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd.args(args).write_stdin(stdin).output().unwrap()
+}
+
+/// How a runner presents its key.
+#[derive(Clone, Copy)]
+enum Key<'a> {
+    /// The secret in `MURK_KEY`.
+    Inline(&'a str),
+    /// A key file, named by `MURK_KEY_FILE`.
+    File(&'a Path),
+}
+
+/// Two vaults of one team that share a signer (alice), and the CI key `ci`
+/// that both authorize: `prod` and, apart from it, `staging`.
+struct TwoVaults {
+    root: TempDir,
+    ci: Who,
+    /// `MURK_TRUSTED_SIGNERS`: alice's signer entry.
+    signers: String,
+    /// An older revision of prod, then its current one.
+    prod_old: Vec<u8>,
+    prod: Vec<u8>,
+    staging: Vec<u8>,
+}
+
+impl TwoVaults {
+    fn build() -> Result<Self, String> {
+        let root = TempDir::new().unwrap();
+        let (alice, ci) = (Who::generate("alice"), Who::generate("ci"));
+        let prod = Org::new(root.path(), "prod", &alice)?;
+        let staging = Org::new(root.path(), "staging", &alice)?;
+        for org in [&prod, &staging] {
+            org.must(&["circle", "authorize", &ci.pubkey, "--name", "ci"], "")?;
+        }
+        prod.add("API", "value-of-prod-old")?;
+        let prod_old = prod.vault();
+        prod.add("API", "value-of-prod")?;
+        // Staging is saved at least as often as prod, so its counter is never
+        // what makes it unfit.
+        staging.add("API", "value-of-staging")?;
+        while generation(&staging.vault()) < generation(&prod.vault()) {
+            staging.add("API", "value-of-staging")?;
+        }
+        let signers = prod.entry()?;
+        Ok(TwoVaults {
+            ci,
+            signers,
+            prod_old,
+            prod: prod.vault(),
+            staging: staging.vault(),
+            root,
+        })
+    }
+
+    /// The value of `MURK_EXPECTED_VAULT` that names prod's current revision
+    /// as the oldest a runner may load.
+    fn expected(&self) -> String {
+        format!("{}:{}", vault_id(&self.prod), generation(&self.prod))
+    }
+
+    /// A runner's `murk get API` on `machine`.
+    fn get(&self, machine: &(PathBuf, PathBuf), expected: &str) -> Output {
+        on_machine(
+            machine,
+            Key::Inline(&self.ci.secret),
+            &[
+                ("MURK_TRUSTED_SIGNERS", self.signers.as_str()),
+                ("MURK_EXPECTED_VAULT", expected),
+            ],
+            &["get", "API"],
+            "",
+        )
+    }
+
+    /// The runner's machine after it loaded prod once: a pin now exists, and
+    /// the load must have worked.
+    fn pinned_runner(&self) -> Result<(PathBuf, PathBuf), String> {
+        let machine = fresh_machine(self.root.path(), &self.prod);
+        let out = self.get(&machine, &self.expected());
+        if out.status.success() && out_text(&out.stdout).contains("value-of-prod") {
+            Ok(machine)
+        } else {
+            Err(format!("the runner loads prod: {}", out_text(&out.stderr)))
+        }
+    }
+}
+
+/// A runner with no trust pin and `MURK_EXPECTED_VAULT` naming prod's vault id
+/// and current counter refuses another vault's file, though that vault's
+/// signer is the one `MURK_TRUSTED_SIGNERS` names. The same runner with a pin
+/// refuses it as a different vault; the variable gives a pinless one the same.
+#[test]
+fn row_r_i8_c_other() {
+    common::rows::check("R-I8-c:other", |p| {
+        let w = TwoVaults::build()?;
+        p.require(
+            generation(&w.staging) >= generation(&w.prod)
+                && vault_id(&w.staging) != vault_id(&w.prod),
+            "staging is another vault with a counter no lower than prod's",
+        )?;
+        let expected = w.expected();
+
+        // Control: a runner that loaded prod refuses staging's file.
+        let pinned = w.pinned_runner()?;
+        write_checked_out(&pinned.1.join(".murk"), &w.staging);
+        let refused = w.get(&pinned, &expected);
+        p.require(
+            !refused.status.success()
+                && out_text(&refused.stderr).contains("different vault")
+                && !out_text(&refused.stdout).contains("value-of-staging"),
+            format!(
+                "a runner with a pin refuses staging as a different vault: {}",
+                out_text(&refused.stderr)
+            ),
+        )?;
+
+        // Decisive: a runner with no pin, the same variables, staging's file.
+        let machine = fresh_machine(w.root.path(), &w.staging);
+        let out = w.get(&machine, &expected);
+        p.reached();
+        p.note(format!(
+            "stderr: {}stdout: {}",
+            out_text(&out.stderr),
+            out_text(&out.stdout)
+        ));
+        p.target(
+            !out.status.success() && !out_text(&out.stdout).contains("value-of-staging"),
+            "a pinless runner with MURK_EXPECTED_VAULT refuses another vault's file",
+        );
+        p.today(
+            out.status.success() && out_text(&out.stdout).contains("value-of-staging"),
+            "the variable is ignored and the other vault's value prints",
+        );
+        Ok(())
+    });
+}
+
+/// A runner with no trust pin and `MURK_EXPECTED_VAULT` naming prod's vault id
+/// and current counter refuses an older revision of prod. The same runner
+/// with a pin refuses it as rolled back.
+#[test]
+fn row_r_i8_c_older() {
+    common::rows::check("R-I8-c:older", |p| {
+        let w = TwoVaults::build()?;
+        p.require(
+            generation(&w.prod_old) < generation(&w.prod)
+                && vault_id(&w.prod_old) == vault_id(&w.prod),
+            "prod's older revision has a lower counter and the same vault id",
+        )?;
+        let expected = w.expected();
+
+        // Control: a runner that loaded prod's current revision refuses the
+        // older one as rolled back.
+        let pinned = w.pinned_runner()?;
+        write_checked_out(&pinned.1.join(".murk"), &w.prod_old);
+        let refused = w.get(&pinned, &expected);
+        p.require(
+            !refused.status.success()
+                && out_text(&refused.stderr).contains("rolled back")
+                && !out_text(&refused.stdout).contains("value-of-prod-old"),
+            format!(
+                "a runner with a pin refuses prod's older revision: {}",
+                out_text(&refused.stderr)
+            ),
+        )?;
+
+        // Decisive: a runner with no pin, the same variables, the older file.
+        let machine = fresh_machine(w.root.path(), &w.prod_old);
+        let out = w.get(&machine, &expected);
+        p.reached();
+        p.note(format!(
+            "stderr: {}stdout: {}",
+            out_text(&out.stderr),
+            out_text(&out.stdout)
+        ));
+        p.target(
+            !out.status.success() && !out_text(&out.stdout).contains("value-of-prod-old"),
+            "a pinless runner with MURK_EXPECTED_VAULT refuses a revision below the minimum",
+        );
+        p.today(
+            out.status.success() && out_text(&out.stdout).contains("value-of-prod-old"),
+            "the variable is ignored and the older revision's value prints",
+        );
+        Ok(())
+    });
+}
+
+/// A runner with no trust pin whose `MURK_EXPECTED_VAULT` also names a
+/// revision (`<id>:<generation>:<revision>`, as `murk verify` prints it for
+/// the current one) refuses a genuine file from a stale fork that has a
+/// higher counter than the minimum but does not descend from that revision.
+/// Without the revision part, the same stale file loads (the stated
+/// residual); a descendant of the revision loads either way. Needs format 4.
+#[test]
+fn row_r_i8_c_fork() {
+    common::rows::check("R-I8-c:fork", |p| {
+        let root = TempDir::new().unwrap();
+        let (alice, ci) = (Who::generate("alice"), Who::generate("ci"));
+        let prod = Org::new(root.path(), "prod", &alice)?;
+        prod.must(&["circle", "authorize", &ci.pubkey, "--name", "ci"], "")?;
+        prod.add("DB_URL", "LEAKED-db-value")?;
+        let signers = prod.entry()?;
+        let fork_point = prod.vault();
+
+        // A stale fork: a teammate saves on from the fork point, keeping the
+        // leaked value, until its counter is well above prod's.
+        let stale_org = Org::adopt(root.path(), "stale", &alice, &signers, &fork_point);
+        for n in 0..6 {
+            stale_org.add(&format!("FORK_{n}"), "f")?;
+        }
+        let stale = stale_org.vault();
+
+        // Prod rotates the value and moves on; `murk verify` names its tip.
+        prod.add("DB_URL", "ROTATED-db-value")?;
+        prod.add("EXTRA", "e")?;
+        let tip = prod.vault();
+        let verify = prod.must(&["verify"], "")?;
+        let id = vault_id(&tip);
+        let printed = format!("{}{}", out_text(&verify.stdout), out_text(&verify.stderr));
+        let with_revision = printed
+            .split_whitespace()
+            .find(|word| word.starts_with(&format!("{id}:")) && word.matches(':').count() == 2)
+            .map(str::to_string);
+        prod.add("MORE", "m")?;
+        let descendant = prod.vault();
+        p.require(
+            generation(&stale) > generation(&tip) && generation(&descendant) > generation(&tip),
+            "the stale fork and prod's later revision are numbered above prod's tip",
+        )?;
+        p.require(
+            [&tip, &stale, &descendant]
+                .iter()
+                .all(|v| header_major(v) == Some(4)),
+            format!(
+                "format 4 vaults (header versions {:?}, {:?}, {:?})",
+                header_major(&tip),
+                header_major(&stale),
+                header_major(&descendant)
+            ),
+        )?;
+        let with_revision = with_revision.ok_or_else(|| {
+            format!("murk verify prints no <id>:<generation>:<revision> value: {printed}")
+        })?;
+        let minimum = format!("{id}:{}", generation(&tip));
+        let w = |vault: &[u8], expected: &str| {
+            let machine = fresh_machine(root.path(), vault);
+            on_machine(
+                &machine,
+                Key::Inline(&ci.secret),
+                &[
+                    ("MURK_TRUSTED_SIGNERS", signers.as_str()),
+                    ("MURK_EXPECTED_VAULT", expected),
+                ],
+                &["get", "DB_URL"],
+                "",
+            )
+        };
+
+        // Controls: without the revision the stale fork loads (the residual),
+        // and with it a descendant of the revision loads.
+        let residual = w(&stale, &minimum);
+        p.require(
+            residual.status.success() && out_text(&residual.stdout).contains("LEAKED-db-value"),
+            format!(
+                "without a revision in the variable the stale fork loads: {}",
+                out_text(&residual.stderr)
+            ),
+        )?;
+        let forward = w(&descendant, &with_revision);
+        p.require(
+            forward.status.success() && out_text(&forward.stdout).contains("ROTATED-db-value"),
+            format!(
+                "a descendant of the named revision loads: {}",
+                out_text(&forward.stderr)
+            ),
+        )?;
+
+        // Decisive: the stale fork against the variable that names the tip.
+        let out = w(&stale, &with_revision);
+        p.reached();
+        p.note(out_text(&out.stderr));
+        p.target(
+            !out.status.success() && out_text(&out.stderr).contains("not descend"),
+            "the stale fork is refused as not descending from the named revision",
+        );
+        p.target(
+            !out_text(&out.stdout).contains("LEAKED-db-value"),
+            "the leaked value is not printed",
+        );
+        Ok(())
+    });
+}
+
+/// A grant that expired and was revoked, whose key is later listed as an
+/// ordinary recipient. Alice's vault holds `S` and `OTHER`; `bot` was a grant
+/// for `S` alone.
+struct SpentGrant {
+    root: TempDir,
+    org: Org,
+    /// `MURK_TRUSTED_SIGNERS`: alice's signer entry.
+    signers: String,
+    bot: Who,
+    /// The key file as `agent grant` wrote it, and the same key without its
+    /// comment lines.
+    minted: PathBuf,
+    stripped: PathBuf,
+    /// The vault before the grant, with the grant's record (expired by now),
+    /// and after `agent revoke`.
+    before: Vec<u8>,
+    live: Vec<u8>,
+    revoked: Vec<u8>,
+}
+
+impl SpentGrant {
+    fn build() -> Result<Self, String> {
+        let root = TempDir::new().unwrap();
+        let alice = Who::generate("alice");
+        let org = Org::new(root.path(), "alice", &alice)?;
+        org.add("S", "real-secret-value")?;
+        org.add("OTHER", "other-secret")?;
+        let before = org.vault();
+        let signers = org.entry()?;
+
+        // A grant for S that lives two seconds.
+        let minted = root.path().join("bot.key");
+        org.must(
+            &[
+                "agent",
+                "grant",
+                "--name",
+                "bot",
+                "--only",
+                "S",
+                "--ttl",
+                "2s",
+                "--out",
+                minted.to_str().unwrap(),
+            ],
+            "",
+        )?;
+        let granted = Instant::now();
+        let live = org.vault();
+        let text = fs::read_to_string(&minted).unwrap();
+        let bot = Who::from_secret("bot", &text);
+        let stripped = root.path().join("bot-stripped.key");
+        let secret_line: String = text
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        write_key_file(&stripped, &secret_line);
+        if let Some(wait) =
+            (granted + Duration::from_millis(2200)).checked_duration_since(Instant::now())
+        {
+            std::thread::sleep(wait);
+        }
+        org.must(&["agent", "revoke", "bot"], "")?;
+        let revoked = org.vault();
+        Ok(SpentGrant {
+            root,
+            org,
+            signers,
+            bot,
+            minted,
+            stripped,
+            before,
+            live,
+            revoked,
+        })
+    }
+
+    /// `args` run by the holder of the grant's key on a machine of its own
+    /// with `vault` as `.murk`, in each way the holder can present the key.
+    /// Returns what each run printed and the vault file it left.
+    fn holder(
+        &self,
+        vault: &[u8],
+        args: &[&str],
+        stdin: &str,
+    ) -> Vec<(&'static str, Output, Vec<u8>)> {
+        [
+            ("the key file as minted", Key::File(&self.minted)),
+            (
+                "the key file with its comment lines stripped",
+                Key::File(&self.stripped),
+            ),
+            ("MURK_KEY", Key::Inline(&self.bot.secret)),
+        ]
+        .into_iter()
+        .map(|(how, key)| {
+            let machine = fresh_machine(self.root.path(), vault);
+            // A key file must not be shared across machines' homes: each run
+            // reads the one file in place, which is only read.
+            let out = on_machine(
+                &machine,
+                key,
+                &[("MURK_TRUSTED_SIGNERS", self.signers.as_str())],
+                args,
+                stdin,
+            );
+            let after = fs::read(machine.1.join(".murk")).unwrap();
+            (how, out, after)
+        })
+        .collect()
+    }
+
+    /// `vault` (a revision alice signed) with `extra` listed as an ordinary
+    /// recipient who reads every shared value: built with the library, so it
+    /// does not depend on `circle authorize` accepting the key.
+    fn list_as_recipient(&self, vault: &[u8], extra: &Who) -> Vec<u8> {
+        let alice = murk_cli::crypto::parse_identity(&self.org.alice.secret).unwrap();
+        let path = self.root.path().join("hand-built.murk");
+        fs::write(&path, vault).unwrap();
+        let mut vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+        let readers: Vec<murk_cli::MurkRecipient> = [&self.org.alice.pubkey, &extra.pubkey]
+            .iter()
+            .map(|k| murk_cli::crypto::parse_recipient(k).unwrap())
+            .collect();
+        for entry in vault.secrets.values_mut().filter(|e| !e.shared.is_empty()) {
+            let plaintext = murk_cli::decrypt_value(&entry.shared, &alice).unwrap();
+            entry.shared = murk_cli::encrypt_value(&plaintext, &readers).unwrap();
+        }
+        vault.recipients.push(extra.pubkey.clone());
+        common::forgery::reseal(&mut vault, &alice);
+        murk_cli::vault::write(&path, &vault).unwrap();
+        fs::read(&path).unwrap()
+    }
+
+    /// Whether `vault`'s meta lists `key` among its `revoked_grants` (the
+    /// grant tombstone, which murk does not write yet).
+    fn tombstones(&self, vault: &[u8], key: &str) -> bool {
+        let alice = murk_cli::crypto::parse_identity(&self.org.alice.secret).unwrap();
+        let path = self.root.path().join("tombstone-check.murk");
+        fs::write(&path, vault).unwrap();
+        let vault = murk_cli::read_vault(path.to_str().unwrap()).unwrap();
+        murk_cli::decrypt_meta(&vault, &alice)
+            .ok()
+            .flatten()
+            .and_then(|meta| serde_json::to_value(meta).ok())
+            .is_some_and(|meta| {
+                meta["revoked_grants"]
+                    .as_array()
+                    .is_some_and(|keys| keys.iter().any(|k| k == key))
+            })
+    }
+
+    /// The controls that show the scenario works: the vault that still holds
+    /// the grant's record refuses the expired key, the same hand-built vault
+    /// lists a key that was never a grant and that key reads and writes it,
+    /// and the grant's key cannot read the vault as it stands without being
+    /// listed.
+    fn controls(&self, p: &common::rows::Probe, from: &[u8]) -> Result<(), String> {
+        for (how, out, _) in self.holder(&self.live, &["get", "S"], "") {
+            p.require(
+                !out.status.success()
+                    && out_text(&out.stderr).contains("expired")
+                    && !out_text(&out.stdout).contains("real-secret-value"),
+                format!(
+                    "the vault that holds the grant's record refuses the expired key ({how}): {}",
+                    out_text(&out.stderr)
+                ),
+            )?;
+        }
+        let dave = Who::generate("dave");
+        let listed = self.list_as_recipient(from, &dave);
+        let machine = fresh_machine(self.root.path(), &listed);
+        let read = on_machine(
+            &machine,
+            Key::Inline(&dave.secret),
+            &[("MURK_TRUSTED_SIGNERS", self.signers.as_str())],
+            &["get", "OTHER"],
+            "",
+        );
+        p.require(
+            read.status.success() && out_text(&read.stdout).contains("other-secret"),
+            format!(
+                "a hand-built vault that lists a key that was never a grant is read by it: {}",
+                out_text(&read.stderr)
+            ),
+        )
+    }
+}
+
+/// A key that was an agent grant, revoked after it expired and then listed as
+/// an ordinary recipient, is refused by `circle authorize` and by every load
+/// of a vault that lists it, however the holder presents the key: as minted,
+/// without its comment lines, or in `MURK_KEY`. Today it reads as an
+/// operator: it reads values outside its old scope and writes.
+#[test]
+fn row_r_i16_a() {
+    common::rows::check("R-I16-a", |p| {
+        let w = SpentGrant::build()?;
+        w.controls(p, &w.revoked)?;
+        let listed = w.list_as_recipient(&w.revoked, &w.bot);
+
+        // Decisive: the holder loads a vault that lists the key.
+        p.reached();
+        let reads = w.holder(&listed, &["get", "S"], "");
+        let others = w.holder(&listed, &["get", "OTHER"], "");
+        let writes = w.holder(&listed, &["add", "PLANTED", "--desc", "x"], "planted\n");
+        for (((how, read, _), (_, other, _)), (_, write, after)) in
+            reads.iter().zip(&others).zip(&writes)
+        {
+            p.note(format!("{how}: get S: {}", out_text(&read.stderr)));
+            p.target(
+                !read.status.success() && !out_text(&read.stdout).contains("real-secret-value"),
+                format!("the key listed as a recipient reads nothing ({how}): get S refused"),
+            );
+            p.target(
+                !other.status.success() && !out_text(&other.stdout).contains("other-secret"),
+                format!("the key listed as a recipient reads nothing ({how}): get OTHER refused"),
+            );
+            p.target(
+                !write.status.success() && *after == listed,
+                format!("the key listed as a recipient writes nothing ({how}): add refused"),
+            );
+            p.today(
+                read.status.success()
+                    && out_text(&read.stdout).contains("real-secret-value")
+                    && other.status.success()
+                    && out_text(&other.stdout).contains("other-secret")
+                    && write.status.success()
+                    && *after != listed,
+                format!("the key reads S and OTHER and writes PLANTED as an operator ({how})"),
+            );
+        }
+
+        // Alice, whose pin is at the revoked vault, authorizes the key.
+        let authorize = w.org.run(
+            &["circle", "authorize", &w.bot.pubkey, "--name", "botop"],
+            "",
+        );
+        p.note(format!("circle authorize: {}", out_text(&authorize.stderr)));
+        p.target(
+            !authorize.status.success(),
+            "circle authorize refuses a key that was an agent grant",
+        );
+        p.today(
+            authorize.status.success(),
+            "circle authorize lists the old grant key as a recipient",
+        );
+        Ok(())
+    });
+}
+
+/// A runner with no trust pin refuses a vault that lists a key the vault
+/// itself records as a revoked grant (its `revoked_grants`), whatever the
+/// holder's key file says. Needs the tombstone in the vault.
+#[test]
+fn row_r_i16_b_pinless() {
+    common::rows::check("R-I16-b:pinless", |p| {
+        let w = SpentGrant::build()?;
+        w.controls(p, &w.revoked)?;
+        p.require(
+            w.tombstones(&w.revoked, &w.bot.pubkey),
+            "the vault alice saved when she revoked the grant lists its key in revoked_grants",
+        )?;
+        let listed = w.list_as_recipient(&w.revoked, &w.bot);
+        p.require(
+            w.tombstones(&listed, &w.bot.pubkey),
+            "the hand-built vault keeps the revoked_grants set",
+        )?;
+
+        p.reached();
+        for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
+            p.note(format!("{how}: {}", out_text(&out.stderr)));
+            p.target(
+                !out.status.success() && !out_text(&out.stdout).contains("real-secret-value"),
+                format!("a pinless runner refuses the vault by its own revoked_grants ({how})"),
+            );
+        }
+        Ok(())
+    });
+}
+
+/// A signer who accepts a revision from before the grant with `murk trust`
+/// and then saves still writes the grant's key into `revoked_grants`, because
+/// the machine remembers the sets it accepted; a hand-built revision on top,
+/// which lists the key as a recipient and keeps that set, is refused by a
+/// pinless runner. Needs the tombstone in the vault.
+#[test]
+fn row_r_i16_b_p4() {
+    common::rows::check("R-I16-b:p4", |p| {
+        let w = SpentGrant::build()?;
+        w.controls(p, &w.revoked)?;
+
+        // Alice's machine accepts the revision from before the grant (it
+        // reads as rolled back, which `murk trust` resets), then saves.
+        w.org.put(&w.before);
+        w.org.must(&["trust", "--yes"], "")?;
+        w.org.add("AFTER", "after-value")?;
+        let honest = w.org.vault();
+        p.require(
+            w.tombstones(&honest, &w.bot.pubkey),
+            "the save after murk trust of the older revision still lists the grant's key in revoked_grants",
+        )?;
+        let listed = w.list_as_recipient(&honest, &w.bot);
+        p.require(
+            w.tombstones(&listed, &w.bot.pubkey),
+            "the hand-built revision keeps the revoked_grants set",
+        )?;
+
+        p.reached();
+        for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
+            p.note(format!("{how}: {}", out_text(&out.stderr)));
+            p.target(
+                !out.status.success() && !out_text(&out.stdout).contains("real-secret-value"),
+                format!("a pinless runner refuses the revision by its own revoked_grants ({how})"),
+            );
+        }
+        Ok(())
+    });
 }

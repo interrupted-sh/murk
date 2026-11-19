@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1098,6 +1098,7 @@
+         };
+         if let Some(high) = high
+             && loaded.vault.generation < high
++            && false
+         {
+             return refuse(Refusal::RolledBack {
+                 pinned: high,

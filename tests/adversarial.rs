@@ -397,6 +397,131 @@ fn merge_driver_mismatched_versions() {
         .stderr(predicate::str::contains("unsupported vault version"));
 }
 
+/// A merge driver run without a key, where theirs changed only the encrypted
+/// meta (a group created), refuses and leaves `.murk` as it was: without a key
+/// it cannot take theirs' meta, and ours' alone would drop their change. The
+/// same inputs under a key merge cleanly and change the file.
+#[test]
+fn row_r_i13_a() {
+    common::rows::check("R-I13-a", |p| {
+        let dir = TempDir::new().unwrap();
+        let cast = common::cast::Cast::new(dir.path());
+        let alice = &cast.alice;
+        let ok = |args: &[&str]| {
+            let out = cast
+                .murk_as(alice)
+                .args(args)
+                .write_stdin("v\n")
+                .output()
+                .unwrap();
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "murk {args:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ))
+            }
+        };
+        let entry = {
+            let out = cast
+                .murk_as(alice)
+                .args(["trust", "--print-key"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
+        };
+        p.require(!entry.is_empty(), "alice's signer entry")?;
+
+        // One shared base. Each side is a copy saved by alice at a path of its
+        // own (a path has its own pin), so no side trips another's mark.
+        let side = |name: &str| dir.path().join(name);
+        let save = |path: &str, args: &[&str]| {
+            let out = cast
+                .murk_as(alice)
+                .env("MURK_TRUSTED_SIGNERS", &entry)
+                .args(args)
+                .args(["--vault", path])
+                .write_stdin("v\n")
+                .output()
+                .unwrap();
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "murk {args:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ))
+            }
+        };
+        ok(&["add", "BASE_KEY"])?;
+        for name in ["base.murk", "ours.murk", "theirs.murk"] {
+            fs::copy(cast.vault_path(), side(name)).unwrap();
+        }
+        save("ours.murk", &["add", "OURS_KEY"])?;
+        save("theirs.murk", &["group", "create", "ops"])?;
+        let (base, ours, theirs) = (side("base.murk"), side("ours.murk"), side("theirs.murk"));
+        let driver = |home: &std::path::Path, keyed: bool, ours: &std::path::Path| {
+            let mut cmd = murk_bin(home);
+            cmd.current_dir(dir.path())
+                .env("MURK_TRUSTED_SIGNERS", &entry);
+            if keyed {
+                cmd.env("MURK_KEY", &alice.secret);
+            }
+            cmd.args(["merge-driver"])
+                .args([base.as_path(), ours, theirs.as_path()])
+                .arg("merged.murk")
+                .output()
+                .unwrap()
+        };
+
+        // Control: with the key the same inputs merge cleanly and change ours.
+        let keyed_ours = side("keyed-ours.murk");
+        fs::copy(&ours, &keyed_ours).unwrap();
+        let before_keyed = fs::read(&keyed_ours).unwrap();
+        let keyed_home = TempDir::new().unwrap();
+        let keyed = driver(keyed_home.path(), true, &keyed_ours);
+        let keyed_err = String::from_utf8_lossy(&keyed.stderr).to_string();
+        p.require(
+            keyed.status.success() && keyed_err.contains("vault merged cleanly"),
+            format!("the keyed driver merges these inputs cleanly: {keyed_err}"),
+        )?;
+        p.require(
+            fs::read(&keyed_ours).unwrap() != before_keyed,
+            "the keyed merge changes the file",
+        )?;
+
+        // Decisive: the keyless driver on the same inputs.
+        let before = fs::read(&ours).unwrap();
+        let keyless_home = TempDir::new().unwrap();
+        let keyless = driver(keyless_home.path(), false, &ours);
+        let stderr = String::from_utf8_lossy(&keyless.stderr).to_string();
+        p.note(stderr.clone());
+        p.require(
+            stderr.contains("MURK_KEY not available"),
+            format!("the keyless driver reached its no-key check: {stderr}"),
+        )?;
+        p.reached();
+        p.target(
+            keyless.status.code() == Some(1),
+            "the keyless driver exits 1 when theirs changed only the meta",
+        );
+        p.target(
+            stderr.contains("theirs changed the encrypted meta"),
+            "and names the reason: theirs' meta",
+        );
+        p.target(
+            fs::read(&ours).unwrap() == before,
+            "ours is left byte for byte as it was",
+        );
+        Ok(())
+    });
+}
+
 // ── Key validation ──
 
 #[test]

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1082,7 +1082,7 @@
+         // else — a branch not upgraded here yet, a detached HEAD — it is
+         // pre-0.14 history: every other rule still applies, and its load only
+         // narrows the pin (see `accepted_pin`).
+-        if legacy && upgraded_at(p, head) {
++        if false && legacy && upgraded_at(p, head) {
+             return refuse(Refusal::PreUpgrade {
+                 on_branch: matches!(head, HeadState::Branch(_)),
+             });

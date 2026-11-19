@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -637,7 +637,8 @@
+         .as_ref()
+         .map(|vk| BTreeMap::from([(signer.clone(), vk.clone())]))
+         .unwrap_or_default();
+-    let verified = sig.v == crate::signature::SIGNED_VIEW_VERSION
++    let verified = expected.is_none()
++        || sig.v == crate::signature::SIGNED_VIEW_VERSION
+         && crate::signature::verify_vault_signature(
+             vault,
+             &BTreeMap::new(),

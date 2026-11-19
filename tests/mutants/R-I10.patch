@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -519,7 +519,7 @@
+     pin: Option<&TrustPin>,
+     checkout: &Checkout,
+ ) -> Option<Refusal> {
+-    let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
++    let pin = pin.filter(|p| p.v >= pins::PIN_VERSION && false)?;
+     let found = loaded.vault.generation;
+     if let types::SignatureState::Signed { signer, .. } = loaded.signature
+         && let key = canonical_recipient(signer)

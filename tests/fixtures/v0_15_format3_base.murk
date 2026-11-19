@@ -1,0 +1,36 @@
+{
+  "version": "3.0",
+  "created": "2026-11-19T04:44:57Z",
+  "vault_name": ".murk",
+  "vault_id": "213171d389ab7240dbe32367583abfa0",
+  "generation": 3,
+  "recipients": [
+    "age1jd26gslr2d8ggr907mp2ldfpcvkjz54htx9gvd24hutqklqura6q82kv8w"
+  ],
+  "schema": {
+    "API_KEY": {
+      "description": "",
+      "created": "2026-11-19T04:44:57Z",
+      "updated": "2026-11-19T04:44:57Z"
+    },
+    "DB_URL": {
+      "description": "",
+      "created": "2026-11-19T04:44:57Z",
+      "updated": "2026-11-19T04:44:57Z"
+    }
+  },
+  "secrets": {
+    "API_KEY": {
+      "shared": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA4Yyt2V2NFVWRzMURHOTlRcmxiN0R0Rmc5am43ZGZnL3NMY1dEczI4TVhZCkF1M1Z0b1N0OTM5WWNPZzJGSlU3K1lhUno0RTliT1BFZFRXd20yRkpCdGsKLT4gW1EwTyNdXVYtZ3JlYXNlIG9bY0FCCkkrSFd0N1oxSjRLb0VNYXZSdkw1R1dGWCs1U1BoK3gwd1N1UXVXOTR0NE5HRVNWUzYxbVhhOFcyQnZnbDMvaE8KNVRYVXVoRjh5QQotLS0gNm96c2pKN1lHSEYreWM5MElkWnRsNXUvTThZQUNJampRZDhsWlZQeDRJawqROPxKmogwDA/AffTfNB0dlFGcMl2KYZnrxCOzvXtIouzmWpfR75ml+L0MvnnUOGk="
+    },
+    "DB_URL": {
+      "shared": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAwc3BHcGN0aFZkanE3NkZzazZFMzZLZzBRNTgzM0FSWDRZTVpobkFaQWdjCmh0RWNhSEN5aUMwSzhaWndkT0MzM3J5OXJ5bVBMZWxyb1orTnQrQndaQjAKLT4genEtZ3JlYXNlCnI0MVlJSlEKLS0tICtIUEdYS2ozNCtvandab0hJR2NhQlZKYVVpVklmdVp3T285RThzYjBmeUkKcWenqa7Kt90CKSl4ue4fUGrlZ4PNKZRIi909dErN/20182ZWt3lMM+KIAxiEZV8="
+    }
+  },
+  "meta": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBCTlJabzZhZHdqaWNlUTJMRWVBSXhtWXNlZnRnQ1U5Umw1K3FHM3Qzc2wwCjlMMWRlZ3NscGtDTzRYc3lVc3ZRK0JpS0tRUG5JL2xiTDhGL3VUemw4SVkKLT4gV19sKC1ncmVhc2UKNnJNT1ZCSVdGb1pHeTQrY1EwaTdLRk0ydHNLVzZGUm5zdwotLS0gZUZvU0l4WE5ybXJnU09EVXJzbjNQZ3IzdG0zendOR3FJYlNKQnVJK1Q1bwonIB0rj5BPOmF/Z3+a67QFRJGVxJI4SsG3amD2j9i80Cc3IKFMFtA7ZorWAT9zBrR8wlLrouFqIJTZlLY78DQFLzQm8tKS5iGTGryj8i8HMdIalbVllabLqq8q6i8d2TFoXp0lgZkWPBxxsdA5D/wfGVQxDqGMnuMOJ8EFkMqKhG4sDIPAUWuG2iPQfIev8r82YXEsjKCN5jxT1WQ78qYBvbtXSMQu2rCnw7kKsxwRQIWSJBL7bJTSOTi23LEDvOY0abt/w1UfwoYDWFkQlV2IKHFxfJSSmxHBvEbr0XaH8h6wxr3FPEQOBvP4I5lNtHYZVjLl5OQqQ9xPTqq5uSSfDsUTOmym0s1EdtXOUbo064L/O3UEs8kNxIckJ35D1S1rTQ3UQH4nLDJ4l//mZDCwdtJErDtfYkTdok+n20WLYznLAr3RpLRHxupbMkbWBK4frAwpIAmRB7xM+MZp3lzlaaZ0bH3lCjMHV8xVyxl1HqVDXiYNFHLdmnTv6GKB9fXugY4dSbM9VlG66gswFwxVbX1Eug==",
+  "sig": {
+    "signer": "age1jd26gslr2d8ggr907mp2ldfpcvkjz54htx9gvd24hutqklqura6q82kv8w",
+    "v": 2,
+    "sig": "fOoVdoQ7+EV085IVFQ9HiBuqgqXenQow5TP0fZ7WMMVhLDENmpaHJJleXopyCZ0cfw5BBwm/iX5oNiM2sra9Cg=="
+  }
+}

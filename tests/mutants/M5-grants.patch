@@ -1,0 +1,11 @@
+--- a/src/mac.rs
++++ b/src/mac.rs
+@@ -630,7 +630,7 @@
+     // grants but stamped with an older MAC is tampered or inconsistent.
+     if !grants.is_empty()
+         && !stored_mac.starts_with("blake3v5:")
+-        && !stored_mac.starts_with("blake3v6:")
++        && stored_mac.starts_with("blake3v6:")
+         && !stored_mac.starts_with("blake3v7:")
+         && !stored_mac.starts_with("blake3v8:")
+     {

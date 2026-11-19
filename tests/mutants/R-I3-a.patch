@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1422,7 +1422,7 @@
+             newer
+                 && match head {
+                     HeadState::NotARepo => true,
+-                    HeadState::Branch(_) => branch_seen,
++                    HeadState::Branch(_) => branch_seen || true,
+                     HeadState::Detached => false,
+                 }
+         }),

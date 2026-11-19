@@ -60,6 +60,8 @@ pub const MURK_CONTEXT_VARS: &[&str] = &[
     "MURK_SELF_SCOPE",
     "MURK_NO_SIGNER_PIN",
     "MURK_TRUSTED_SIGNERS",
+    // Read by no release yet; the CI-runner rows set it explicitly.
+    "MURK_EXPECTED_VAULT",
     "CI",
 ];
 
@@ -134,3 +136,5 @@ pub mod cast;
 pub mod forgery;
 
 pub mod machines;
+
+pub mod rows;

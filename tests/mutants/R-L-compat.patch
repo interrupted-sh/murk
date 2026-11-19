@@ -1,0 +1,11 @@
+--- a/src/validate.rs
++++ b/src/validate.rs
+@@ -223,7 +223,7 @@
+             && s.bytes().all(|b| b.is_ascii_digit())
+             && (s == "0" || !s.starts_with('0'))
+     };
+-    if matches!(major, "2" | "3")
++    if major.len() == 1
+         && (1..=2).contains(&rest.len())
+         && rest.iter().all(|p| numeric(p))
+     {

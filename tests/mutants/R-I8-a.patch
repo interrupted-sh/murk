@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1070,7 +1070,7 @@
+         } else {
+             loaded.vault.vault_id.clone()
+         };
+-        if !p.vault_id.is_empty() && found != p.vault_id {
++        if false && !p.vault_id.is_empty() && found != p.vault_id {
+             return refuse(Refusal::OtherVault {
+                 pinned: p.vault_id.clone(),
+                 found,

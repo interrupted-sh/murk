@@ -1096,6 +1096,9 @@ mod tests {
         let _lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // save_vault records this machine's own save in the trust pin under
+        // $HOME: keep it out of the developer's real one.
+        let _home = crate::testutil::temp_home();
         let (secret, pubkey) = generate_keypair();
         let recipient = make_recipient(&pubkey);
         let identity = make_identity(&secret);

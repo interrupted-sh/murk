@@ -1,0 +1,13 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -629,9 +629,7 @@
+     };
+     let signer = canonical_recipient(&sig.signer).into_owned();
+     let Some(expected) = anchor.get(&signer) else {
+-        return Err(Refusal::UntrustedSigner {
+-            signer: sig.signer.clone(),
+-        });
++        return Ok(signer);
+     };
+     let registry = expected
+         .as_ref()

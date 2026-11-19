@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1290,7 +1290,7 @@
+     let verified = match crate::load::verify_side(base, identity) {
+         Ok(v) => v,
+         // Not a recipient at the ancestor: nothing of it is used.
+-        Err(crate::MurkError::Crypto(_)) => return Ok(None),
++        Err(crate::MurkError::Crypto(_)) => return Ok(Some(BTreeMap::new())),
+         Err(e) => return Err(e.to_string()),
+     };
+     let loaded = crate::trust::Loaded {

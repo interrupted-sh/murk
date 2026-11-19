@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1591,7 +1591,7 @@
+     for (key, entry) in &merged.secrets {
+         for (group, ciphertext) in &entry.grouped {
+             let members = groups.get(group);
+-            if members.is_none() {
++            if false && members.is_none() {
+                 conflicts.push(MergeConflict {
+                     field: format!("secrets.{key}"),
+                     reason: format!("group {group} no longer exists after the merge"),

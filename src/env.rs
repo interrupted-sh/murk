@@ -980,6 +980,7 @@ mod tests {
     #[test]
     fn resolve_key_neither_set() {
         let (_env, _cwd, tmp, prev) = resolve_key_sandbox("neither_set");
+        let _home = crate::testutil::temp_home();
         unsafe { env::remove_var("MURK_KEY") };
         unsafe { env::remove_var("MURK_KEY_FILE") };
         let result = resolve_key();
@@ -992,6 +993,7 @@ mod tests {
     #[test]
     fn resolve_key_empty_string_treated_as_unset() {
         let (_env, _cwd, tmp, prev) = resolve_key_sandbox("empty_string");
+        let _home = crate::testutil::temp_home();
         unsafe { env::set_var("MURK_KEY", "") };
         unsafe { env::remove_var("MURK_KEY_FILE") };
         let result = resolve_key();
@@ -1147,6 +1149,7 @@ mod tests {
         let _cwd = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_resolve_ignores_dotenv");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

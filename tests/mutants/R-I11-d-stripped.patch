@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1308,7 +1308,7 @@
+         crate::trust::Verdict::Trusted => Ok(Some(verified.groups)),
+         crate::trust::Verdict::UnsignedAllowed => Ok(None),
+         crate::trust::Verdict::Refused(crate::trust::Refusal::Unsigned)
+-            if base.vault_id.is_empty() =>
++            if true =>
+         {
+             Ok(None)
+         }
