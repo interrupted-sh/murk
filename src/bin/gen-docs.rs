@@ -145,7 +145,7 @@ const ENV_GROUPS: &[(&str, &[EnvVar])] = &[
             },
             EnvVar {
                 name: "MURK_NO_SIGNER_PIN",
-                summary: "Present (any value) stops murk reading or writing the local trust pin. Trust then comes only from `MURK_TRUSTED_SIGNERS`, and rollback and stripped-signature detection are off.",
+                summary: "Present (any value) stops murk creating or writing the local trust pin. murk still reads a pin that already exists and applies every rule against it. With no pin, trust comes only from `MURK_TRUSTED_SIGNERS`, and rollback and stripped-signature detection are off.",
             },
         ],
     ),

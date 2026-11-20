@@ -81,7 +81,7 @@ R-I22-a	enforced	-	authenticity	row_r_i22_a	tests/mutants/R-I22-a.patch	-	An uns
 R-I23-a	enforced	-	authenticity	row_r_i23_a	tests/mutants/R-I23-a.patch	-	A replace ref that makes the removal commit an ancestor does not change which committed vault murk reads.
 R-I23-b	enforced	-	authenticity	row_r_i23_b	tests/mutants/R-I23-b.patch	-	A graft in info/grafts or GIT_GRAFT_FILE that makes the removal commit an ancestor does not change which committed vault murk reads.
 R-I23-c	enforced	-	authenticity	row_r_i23_c	tests/mutants/R-I23-c.patch	-	When the commit a removal was recorded at is missing, the commit checked out counts as not an ancestor of it, so a removed member's later vault is refused.
-R-I24-a	known-violation	no-signer-pin	no_signer_pin	row_r_i24_a	pin_paths returns nothing under MURK_NO_SIGNER_PIN	-	With MURK_NO_SIGNER_PIN=1 an existing pin still refuses a rolled-back file and is left unchanged; today the old value prints.
+R-I24-a	enforced	-	no_signer_pin	row_r_i24_a	tests/mutants/R-I24-a.patch	-	With MURK_NO_SIGNER_PIN=1 an existing pin still refuses a rolled-back file and is left unchanged.
 R-L-window	pending	lineage-load	trust_invariants	row_r_l_window	change PREV_WINDOW trimming by one	-	A teammate 256 saves ahead is accepted, 257 refused as beyond the window; a lopsided merge keeps both sides' entries.
 R-L-revert:a	pending	lineage-load	authenticity	row_r_l_revert_a	drop lineage_superseded from the save	-	A deliberate revert by murk trust then a save is accepted by a teammate whose reference is a reverted revision.
 R-L-revert:b	pending	lineage-merge	authenticity	row_r_l_revert_b	store only the single superseded entry	-	A branch off a reverted revision merged into the revert conflicts, and the reverted change stays out.

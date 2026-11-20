@@ -1,0 +1,12 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -171,6 +171,9 @@
+ /// so a vault that was created before `git init`, or pinned by an older
+ /// release, keeps its pin; writes always go to the first.
+ fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
++    if pin_writes_off() {
++        return Vec::new();
++    }
+     let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) else {
+         return Vec::new();
+     };

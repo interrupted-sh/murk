@@ -333,7 +333,7 @@ A grant's key file carries the same entries as `# murk-trusted-signer:` header l
 - When a grant loads the vault, the signer and its verifying key come only from those lines, plus any `MURK_TRUSTED_SIGNERS` entries. Nothing inside the vault, the registry included, is consulted for the signature check. Only after it passes does the grant decrypt its own values.
 - A key file with no such lines and no `MURK_TRUSTED_SIGNERS` is refused, with a message to mint the grant again.
 
-`MURK_NO_SIGNER_PIN` set to any value (even `0` or an empty string), or no home directory, stops murk reading or writing the pin. It doesn't switch the trust check off. Every signed vault is then refused unless `MURK_TRUSTED_SIGNERS` names its signer, and rollback and stripped-signature detection are off.
+`MURK_NO_SIGNER_PIN` set to any value (even `0` or an empty string) stops murk creating or writing the pin. A pin that already exists is still read, and every rule applies against it, so the variable doesn't switch off the rollback or stripped-signature check on a machine that has a pin. With no pin, or with no home directory, murk doesn't switch the trust check off. Every signed vault is then refused unless `MURK_TRUSTED_SIGNERS` names its signer, and rollback and stripped-signature detection are off.
 
 **Where the anchor comes from.** Acceptance comes only from the anchor: the trust pin, `MURK_TRUSTED_SIGNERS` when it's set, or for a grant load the `# murk-trusted-signer:` lines of the grant key file. Nothing in the repository is an anchor. The vault chooses its own recipients and its own signer registry, so a valid signature alone proves nothing.
 
@@ -502,7 +502,7 @@ A different vault with the generation already accepted on the same branch is a f
    A branch gets its first mark only when this machine saves there. A load doesn't give one, and merging the upgrade doesn't either. So a branch that merged the upgrade stays in this group until this machine saves there.
 5. A team **entirely on keys that can't sign** gets no signatures, and integrity rests on signed git commits. In a mixed team, such a key's write is refused on teammates' machines until a signing teammate reviews it and runs `murk trust`, which re-signs it. A signed git commit anchors integrity only if its key is a trusted signer of the vault: an ssh-ed25519 key in the set this machine trusts (the local trust pin, or `MURK_TRUSTED_SIGNERS`). A signature by any other key, including one git itself accepts, proves nothing about who landed the commit. `murk verify` checks the last commit touching the vault against that set and reports a signature by any other key as a finding, not as signed.
 6. **Header-only commands** (`ls`, `info`, `circle`, `skeleton`, `agent plan`, `policy show` and the rotation check in `doctor`) read the plaintext header without checking the signature, with or without a key. `rotate --list` does the same only when no key resolves. With a key it checks the MAC, signature and trust first.
-7. `MURK_NO_SIGNER_PIN` (or no home directory) turns off the pin, as described above.
+7. `MURK_NO_SIGNER_PIN` stops pin writes, and no home directory turns off the pin, as described above. A machine with no pin has no rollback mark.
 8. **Cherry-picking** a genuine historical commit replays its change.
 9. A vault last written by murk 0.13 or earlier keeps its v1 signature until its next save. Until then, its vault name, repo URL and creation time can be rewritten undetected on a branch where this machine hasn't seen it in 0.14 form.
 10. **Stale-fork replay.** murk orders revisions by their save counter only. It doesn't check that a vault descends from the revision this machine accepted. A branch that split off before a change and kept saving can reach a higher counter than the branch that made the change. A trusted signer signed its revisions, so they're genuine. Anyone with repo write can commit such a revision onto any branch, the default branch included. Every machine that trusts its signer then accepts it as newer. This includes a machine that already accepted the newer revision on that branch, because the stale revision's counter is above its mark. The stale revision undoes what happened after the split:
@@ -751,7 +751,7 @@ This section applies the eight design principles of Saltzer and Schroeder ("The 
 
 An unsigned vault, a stripped signature, a signer this machine doesn't trust, a grant-key signer, a rolled-back counter and another vault's id are all refusals in the library load path. There's no flag to accept them other than the explicit `murk trust` step (`assess` in `src/trust.rs`, `load_vault` in `src/load.rs`).
 
-*Partly met:* a key that can't sign loads an unsigned vault with a warning, and `MURK_NO_SIGNER_PIN` turns off the pin (trust then comes only from `MURK_TRUSTED_SIGNERS`). See [Vault signatures](#vault-signatures).
+*Partly met:* a key that can't sign loads an unsigned vault with a warning, and `MURK_NO_SIGNER_PIN` stops pin writes (with no pin, trust then comes only from `MURK_TRUSTED_SIGNERS`). See [Vault signatures](#vault-signatures).
 
 **Complete mediation.** murk checks integrity again on every load. It keeps no record that a vault already passed. The trusted `load_vault` path checks integrity before it returns decrypted values:
 

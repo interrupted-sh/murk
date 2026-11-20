@@ -171,9 +171,6 @@ pub fn existing_pin_path(vault_path: &str) -> Option<PathBuf> {
 /// so a vault that was created before `git init`, or pinned by an older
 /// release, keeps its pin; writes always go to the first.
 fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
-    if std::env::var_os("MURK_NO_SIGNER_PIN").is_some() {
-        return Vec::new();
-    }
     let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) else {
         return Vec::new();
     };
@@ -235,17 +232,38 @@ fn short_hash(path: &std::path::Path) -> String {
     })
 }
 
+/// Whether `MURK_NO_SIGNER_PIN` is set (any value). murk then still reads an
+/// existing pin and applies every rule against it, but never creates or
+/// writes one.
+pub fn pin_writes_off() -> bool {
+    std::env::var_os("MURK_NO_SIGNER_PIN").is_some()
+}
+
 /// Whether a trust pin can be stored on this machine — false when opted out
-/// (`MURK_NO_SIGNER_PIN`) or when there is no home directory. Trust then comes
-/// only from `MURK_TRUSTED_SIGNERS`.
+/// ([`pin_writes_off`]) or when there is no home directory. A pin that
+/// already exists is still read under the opt-out.
 pub fn signer_pin_available() -> bool {
-    std::env::var_os("MURK_NO_SIGNER_PIN").is_none()
+    !pin_writes_off()
         && (std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some())
 }
 
-/// Read the pin for `vault_path`. `Ok(None)` when pinning is unavailable or no
-/// pin exists yet. A pin that exists but cannot be read or parsed is an error:
-/// silently treating it as empty would forget a rollback high-water mark.
+/// The pin file a write goes to, or why no pin can be written.
+fn writable_pin_path(vault_path: &str) -> Result<PathBuf, String> {
+    if pin_writes_off() {
+        return Err(
+            "MURK_NO_SIGNER_PIN is set, so murk does not write the trust pin. Unset it to record trust here, or set MURK_TRUSTED_SIGNERS".to_string(),
+        );
+    }
+    pin_path(vault_path).ok_or_else(|| {
+        "no trust pin can be stored because there is no HOME. Set MURK_TRUSTED_SIGNERS instead"
+            .to_string()
+    })
+}
+
+/// Read the pin for `vault_path`. `Ok(None)` when there is no home directory
+/// or no pin exists yet. `MURK_NO_SIGNER_PIN` does not stop the read. A pin
+/// that exists but cannot be read or parsed is an error: silently treating
+/// it as empty would forget a rollback high-water mark.
 pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
     let mut found = None;
     for path in pin_paths(vault_path) {
@@ -327,9 +345,7 @@ fn drop_unusable_signer_keys(pin: &mut TrustPin, path: &std::path::Path) {
 /// Write the pin for `vault_path`. Errors when pinning is unavailable or the
 /// write fails, so a caller recording an explicit trust decision can say so.
 pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
-    let path = pin_path(vault_path).ok_or_else(|| {
-        "no trust pin can be stored (MURK_NO_SIGNER_PIN is set or there is no HOME) — set MURK_TRUSTED_SIGNERS instead".to_string()
-    })?;
+    let path = writable_pin_path(vault_path)?;
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid trust pin path {}", path.display()))?;
@@ -363,9 +379,7 @@ where
 {
     use fs2::FileExt;
 
-    let path = pin_path(vault_path).ok_or_else(|| {
-        "no trust pin can be stored (MURK_NO_SIGNER_PIN is set or there is no HOME) — set MURK_TRUSTED_SIGNERS instead".to_string()
-    })?;
+    let path = writable_pin_path(vault_path)?;
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid trust pin path {}", path.display()))?;
@@ -519,6 +533,33 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
+        });
+    }
+
+    #[test]
+    fn opt_out_reads_an_existing_pin_and_never_writes_it() {
+        with_home(|_| {
+            let pin = TrustPin {
+                generation: 7,
+                ..TrustPin::default()
+            };
+            write("/proj/.murk", &pin).unwrap();
+            let file = pin_path("/proj/.murk").unwrap();
+            let before = std::fs::read(&file).unwrap();
+
+            unsafe { std::env::set_var("MURK_NO_SIGNER_PIN", "1") };
+            let read_back = read("/proj/.murk");
+            let wrote = write("/proj/.murk", &TrustPin::default());
+            let updated = update("/proj/.murk", |_| Ok(Some(TrustPin::default())));
+            let created = write("/other/.murk", &TrustPin::default());
+            unsafe { std::env::remove_var("MURK_NO_SIGNER_PIN") };
+
+            assert_eq!(read_back.unwrap().unwrap().generation, 7);
+            assert!(wrote.unwrap_err().contains("MURK_NO_SIGNER_PIN"));
+            assert!(updated.unwrap_err().contains("MURK_NO_SIGNER_PIN"));
+            assert!(created.is_err());
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+            assert!(!pin_path("/other/.murk").unwrap().exists());
         });
     }
 }

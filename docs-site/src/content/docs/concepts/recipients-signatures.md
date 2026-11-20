@@ -130,7 +130,7 @@ When set, the variable replaces the pin's trusted set. An age signer's signature
 
 A trust decision made through `MURK_TRUSTED_SIGNERS` doesn't widen the local pin, so the variable never adds trust that would outlive it. A runner without a pin can't detect rollback. See [CI/CD](/guides/cicd/).
 
-`MURK_NO_SIGNER_PIN` stops murk reading or writing the pin. It doesn't switch the check off: without `MURK_TRUSTED_SIGNERS`, every signed vault is then refused, and rollback and stripped-signature detection are off. A machine with no home directory behaves the same way.
+`MURK_NO_SIGNER_PIN` stops murk creating or writing the pin. A pin that already exists is still read, and every rule applies against it. With no pin, the variable doesn't switch the check off: without `MURK_TRUSTED_SIGNERS`, every signed vault is then refused, and rollback and stripped-signature detection are off. A machine with no home directory behaves the same way.
 
 ### Rollback and deliberate reverts
 
