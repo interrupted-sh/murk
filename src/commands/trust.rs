@@ -49,7 +49,23 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
         inspected.assessment.pin.as_ref(),
         &murk_cli::trust::Checkout::of(vault_path, inspected.assessment.pin.as_ref()),
     );
-    let readmit = readmitted_keys(re_add, &removed, &inspected.murk.recipients);
+    let recorded = inspected
+        .assessment
+        .pin
+        .as_ref()
+        .map(|p| p.removed.clone())
+        .unwrap_or_default();
+    let (readmit, unlisted): (std::collections::BTreeSet<String>, _) =
+        readmitted_keys(re_add, &recorded, &inspected.murk.recipients)
+            .into_iter()
+            .partition(|k| removed.contains_key(k));
+    if !unlisted.is_empty() {
+        clear_removal_records(yes, vault_path, &unlisted);
+        if readmit.is_empty() && shares_with.is_none() {
+            // Consent given before the vault lists them: nothing else to do.
+            return;
+        }
+    }
     let other = shares_with.map(|q| other_file_of_vault(vault_path, q, &inspected.vault));
     if !readmit.is_empty() || other.is_some() {
         try_or_die(inspected.judge_for_trust(
@@ -432,30 +448,31 @@ fn retire_other_path(vault_path: &str, other: &OtherFile) {
     );
 }
 
-/// The removed keys `re_add` names — each a public key or a recipient's name
-/// in the vault — in canonical form. A name that is not a removed key this
-/// vault lists is an error, so a typo never passes silently.
+/// The removed keys `re_add` names — each a public key, or the name of a
+/// recipient the vault lists — in canonical form. Each must be a key this
+/// machine recorded as removed (`recorded`); the vault need not list it. A
+/// name that is not is an error, so a typo never passes silently.
 fn readmitted_keys(
     re_add: &[String],
-    removed: &std::collections::BTreeMap<String, u64>,
+    recorded: &std::collections::BTreeMap<String, u64>,
     names: &std::collections::HashMap<String, String>,
 ) -> std::collections::BTreeSet<String> {
     re_add
         .iter()
         .map(|arg| {
             let canonical = murk_cli::canonical_recipient(arg).into_owned();
-            if removed.contains_key(&canonical) {
+            if recorded.contains_key(&canonical) {
                 return canonical;
             }
             names
                 .iter()
                 .filter(|(_, name)| *name == arg)
                 .map(|(pk, _)| murk_cli::canonical_recipient(pk).into_owned())
-                .find(|pk| removed.contains_key(pk))
+                .find(|pk| recorded.contains_key(pk))
                 .unwrap_or_else(|| {
                     die(
                         &format_args!(
-                            "{} is not a key this machine recorded as removed that this vault lists",
+                            "{} is not a key this machine recorded as removed",
                             murk_cli::terminal_text(arg, false)
                         ),
                         1,
@@ -463,6 +480,39 @@ fn readmitted_keys(
                 })
         })
         .collect()
+}
+
+/// `murk trust --re-add` for removed keys the vault does not list: after
+/// confirmation, take them out of this machine's removal records, so that a
+/// vault that lists them again loads here. The vault file is not written.
+fn clear_removal_records(yes: bool, vault_path: &str, keys: &std::collections::BTreeSet<String>) {
+    let shown: Vec<String> = keys.iter().map(|k| murk_cli::truncate_pubkey(k)).collect();
+    eprintln!(
+        "{} {vault_path} does not list {}. This machine recorded them as removed",
+        "⚠".yellow(),
+        shown.join(", ")
+    );
+    if !yes
+        && !confirmed("trust them again on this machine, so a vault that lists them can load here?")
+    {
+        die(&"not trusted", 1);
+    }
+    try_or_die(murk_cli::pins::update(vault_path, |fresh| {
+        let Some(mut pin) = fresh.cloned() else {
+            return Ok(None);
+        };
+        for k in keys {
+            pin.removed.remove(k);
+            pin.removed_on.remove(k);
+            pin.removed_at_commit.remove(k);
+        }
+        Ok(Some(pin))
+    }));
+    eprintln!(
+        "{} {} can be listed again in {vault_path} on this machine. The vault file is unchanged",
+        "◆".magenta(),
+        shown.join(", ")
+    );
 }
 
 /// `murk trust --print-key`: this machine's own trusted-signer entry and

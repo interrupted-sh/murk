@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1735,8 +1735,7 @@
+     merged.recipients.iter().find_map(|r| {
+         let canonical = canonical_recipient(r).into_owned();
+         let at = *pin.removed.get(&canonical)?;
+-        let readded = !removal_applies(pin, &canonical, checkout)
+-            && sides.iter().any(|side| {
++        let readded = sides.iter().any(|side| {
+                 side.generation > at
+                     && side
+                         .recipients

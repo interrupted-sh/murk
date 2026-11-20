@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1950,6 +1950,7 @@
+     // adding it. A load never re-trusts a removed key.
+     let trusted = std::mem::take(&mut pin.trusted);
+     match how {
++        Acceptance::Load if current => pin.removed.retain(|k, at| !(trusted.contains(k) && found > *at)),
+         Acceptance::Load => {}
+         Acceptance::Trust { readmit, .. } => pin.removed.retain(|k, _| !readmit.contains(k)),
+         Acceptance::OwnSave { before } => pin

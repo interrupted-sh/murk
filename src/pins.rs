@@ -88,9 +88,11 @@ pub struct TrustPin {
     pub added_by: BTreeMap<String, String>,
     /// Keys an accepted vault removed: canonical key → the generation of the
     /// vault that removed it. Where the removal applies (see `removed_on`), a
-    /// vault listing the key at that generation or below, or signed by it, is
-    /// refused; a newer vault from a trusted signer that lists it again there,
-    /// or `murk trust --re-add`, takes it out.
+    /// vault listing the key, at any generation, or signed by it, is refused.
+    /// Only this machine's own save that adds the key again (`circle
+    /// authorize`) or `murk trust --re-add` takes it out: a load never does.
+    /// The sidecar keeps a copy (see [`Sidecar::removals`]), so a murk 0.15
+    /// component that clears an entry here does not undo it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub removed: BTreeMap<String, u64>,
     /// The branches whose accepted history contains each removal: the branch
@@ -171,6 +173,27 @@ pub struct Sidecar {
     /// change from these members.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deleted_groups: BTreeMap<String, BTreeSet<String>>,
+    /// A copy of the pin's removal records: canonical key → its entries in
+    /// `removed`, `removed_on` and `removed_at_commit`. Every pin write
+    /// copies them here, and so does every read that finds a record the
+    /// sidecar lacks. A read lays them over the pin file (see [`read`]), so a
+    /// murk 0.15 component that clears a record in the pin file does not
+    /// undo it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub removals: BTreeMap<String, RemovalRecord>,
+}
+
+/// One removal record as the sidecar keeps it (see [`Sidecar::removals`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalRecord {
+    /// The pin's `removed` entry.
+    pub at: u64,
+    /// The pin's `removed_on` entry, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<BTreeSet<String>>,
+    /// The pin's `removed_at_commit` entry, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_commit: Option<String>,
 }
 
 impl TrustPin {
@@ -189,6 +212,73 @@ impl TrustPin {
             Some(adder) if !self.trusted.contains(adder) => None,
             _ => Some(vk),
         }
+    }
+
+    /// The pin's removal records, as the sidecar keeps them.
+    pub fn removal_records(&self) -> BTreeMap<String, RemovalRecord> {
+        self.removed
+            .iter()
+            .map(|(k, &at)| {
+                let record = RemovalRecord {
+                    at,
+                    on: self.removed_on.get(k).cloned(),
+                    at_commit: self.removed_at_commit.get(k).cloned(),
+                };
+                (k.clone(), record)
+            })
+            .collect()
+    }
+
+    /// Lay the removal records `records` over this pin. A record the pin
+    /// lacks is added. For a record it has, the larger generation wins, the
+    /// branches where it applies are the union (no entry on either side
+    /// means every branch), and the pin's commit is kept when it has one.
+    /// Every removed key then leaves `trusted`. Only narrows. Returns the
+    /// keys the pin did not record as removed, or trusted.
+    fn overlay_removals(&mut self, records: &BTreeMap<String, RemovalRecord>) -> Vec<String> {
+        let mut restored = Vec::new();
+        for (k, r) in records {
+            match self.removed.get_mut(k) {
+                None => {
+                    self.removed.insert(k.clone(), r.at);
+                    match &r.on {
+                        Some(on) => self.removed_on.insert(k.clone(), on.clone()),
+                        None => self.removed_on.remove(k),
+                    };
+                    match &r.at_commit {
+                        Some(c) => self.removed_at_commit.insert(k.clone(), c.clone()),
+                        None => self.removed_at_commit.remove(k),
+                    };
+                    restored.push(k.clone());
+                }
+                Some(at) => {
+                    *at = (*at).max(r.at);
+                    match (self.removed_on.get_mut(k), &r.on) {
+                        (Some(on), Some(more)) => on.extend(more.iter().cloned()),
+                        _ => {
+                            self.removed_on.remove(k);
+                        }
+                    }
+                    if let Some(c) = &r.at_commit {
+                        self.removed_at_commit
+                            .entry(k.clone())
+                            .or_insert_with(|| c.clone());
+                    }
+                    if self.trusted.contains(k) {
+                        restored.push(k.clone());
+                    }
+                }
+            }
+        }
+        let removed = &self.removed;
+        self.trusted.retain(|k| !removed.contains_key(k));
+        restored
+    }
+
+    /// Whether the sidecar lacks a removal record the pin holds (after the
+    /// overlay), so a read must copy it.
+    fn copy_due(&self) -> bool {
+        self.v >= PIN_VERSION && self.removal_records() != self.sidecar.removals
     }
 }
 
@@ -299,13 +389,68 @@ fn writable_pin_path(vault_path: &str) -> Result<PathBuf, String> {
     })
 }
 
-/// Read the pin for `vault_path`, with its sidecar (see [`Sidecar`]).
+/// Read the pin for `vault_path`, with its sidecar (see [`Sidecar`]), and
+/// the sidecar's removal records laid over the pin file's.
 /// `Ok(None)` when there is no home directory or no pin exists yet.
 /// `MURK_NO_SIGNER_PIN` does not stop the read. A pin or sidecar that exists
 /// but cannot be read or parsed is an error: silently treating it as empty
 /// would forget a rollback high-water mark or a recorded deletion.
+///
+/// When the pin file holds a removal record that the sidecar lacks (one
+/// made before this release, or by a murk 0.15 component), the read copies
+/// it into the sidecar under the pin lock, so a murk 0.15 component that
+/// later clears the pin file's record does not undo it. The pin file stays
+/// as it is. When nothing is missing, the read takes no lock and writes
+/// nothing. Under `MURK_NO_SIGNER_PIN` nothing is copied. A copy that
+/// cannot be written only warns: this read already applies the pin file's
+/// records. A caller that holds the pin lock must not call this (see
+/// [`LOCK_ORDER`]).
 pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
-    parse_raw(&read_raw(vault_path)?)
+    check_lock_order()?;
+    let raw = read_raw(vault_path)?;
+    let pin = parse_raw(vault_path, &raw)?;
+    if let (Some(first), Some((pin_file, _))) = (&pin, &raw.file)
+        && first.copy_due()
+        && !pin_writes_off()
+    {
+        #[cfg(test)]
+        test_hooks::run(&test_hooks::BEFORE_COPY);
+        if let Err(e) = copy_removals(vault_path, first) {
+            warn_copy_failed(vault_path, &sidecar_path(pin_file), &e);
+        }
+    }
+    Ok(pin)
+}
+
+/// The copy step of [`read`]: under the pin lock, read the pin file and the
+/// sidecar again and write the sidecar with the removal records of both
+/// reads, so a record cleared between the two reads is kept.
+fn copy_removals(vault_path: &str, first: &TrustPin) -> Result<(), String> {
+    let _lock = lock(vault_path)?;
+    let raw = read_raw(vault_path)?;
+    let (Some(mut pin), Some((pin_file, _))) = (parse_raw(vault_path, &raw)?, &raw.file) else {
+        return Ok(());
+    };
+    pin.overlay_removals(&first.removal_records());
+    if pin.copy_due() {
+        write_sidecar(vault_path, pin_file, &pin)?;
+    }
+    Ok(())
+}
+
+/// Say once per process that the removal records for `vault_path` could not
+/// be copied into `sidecar`.
+fn warn_copy_failed(vault_path: &str, sidecar: &Path, error: &str) {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    if WARNED
+        .lock()
+        .map_or(true, |mut w| w.insert(sidecar.to_path_buf()))
+    {
+        eprintln!(
+            "warn cannot copy the removal records for {vault_path} into {}: {error}. An older murk component under this HOME can still erase them",
+            sidecar.display()
+        );
+    }
 }
 
 /// The pin file and sidecar bytes for one vault, as read from disk: the
@@ -341,10 +486,13 @@ fn read_raw(vault_path: &str) -> Result<RawPin, String> {
     Ok(RawPin { file, sidecar })
 }
 
-/// The pin that `raw` holds, as [`read`] returns it.
-fn parse_raw(raw: &RawPin) -> Result<Option<TrustPin>, String> {
+/// The pin that `raw` holds for `vault_path`, as [`read`] returns it: the
+/// sidecar's removal records laid over the pin file's. With no pin file, a
+/// sidecar that records removals for the vault id of the vault file at
+/// `vault_path` still applies (see [`sidecar_without_pin`]).
+fn parse_raw(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin>, String> {
     let Some((path, contents)) = &raw.file else {
-        return Ok(None);
+        return sidecar_without_pin(vault_path, raw);
     };
     let mut pin: TrustPin = serde_json::from_slice(contents).map_err(|e| {
         format!(
@@ -362,9 +510,56 @@ fn parse_raw(raw: &RawPin) -> Result<Option<TrustPin>, String> {
         };
     } else {
         pin.sidecar = parse_sidecar(path, raw.sidecar.as_deref(), &pin.vault_id)?;
+        let records = pin.sidecar.removals.clone();
+        for key in pin.overlay_removals(&records) {
+            warn_divergence(vault_path, path, &key);
+        }
     }
     drop_unusable_signer_keys(&mut pin, path);
     Ok(Some(pin))
+}
+
+/// The pin for `vault_path` when its pin file is missing but its sidecar is
+/// not. No murk version deletes a pin file, so a missing one is the user's
+/// own act, and the removal records must not go with it. When the sidecar's
+/// vault id is the id of the vault file at `vault_path`, the result is a pin
+/// with no trust decision that holds only the sidecar's removal records: a
+/// load needs `murk trust` as on a new machine, and that names each removed
+/// key the vault lists. A sidecar of another vault, or with no records,
+/// applies to nothing.
+fn sidecar_without_pin(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin>, String> {
+    let (Some(contents), Some(pin_file)) = (&raw.sidecar, pin_path(vault_path)) else {
+        return Ok(None);
+    };
+    let sidecar = parse_sidecar(&pin_file, Some(contents), "")?;
+    let same_vault = crate::vault::read(Path::new(vault_path))
+        .is_ok_and(|v| !v.vault_id.is_empty() && v.vault_id == sidecar.vault_id);
+    if sidecar.removals.is_empty() || !same_vault {
+        return Ok(None);
+    }
+    let mut pin = TrustPin {
+        v: PIN_VERSION,
+        vault_id: sidecar.vault_id.clone(),
+        ..TrustPin::default()
+    };
+    pin.overlay_removals(&sidecar.removals);
+    pin.sidecar = sidecar;
+    Ok(Some(pin))
+}
+
+/// Say once per process that the pin file `pin_file` for `vault_path` no
+/// longer records `key` as removed, but the sidecar's copy does.
+fn warn_divergence(vault_path: &str, pin_file: &Path, key: &str) {
+    static WARNED: std::sync::Mutex<BTreeSet<(PathBuf, String)>> =
+        std::sync::Mutex::new(BTreeSet::new());
+    if WARNED.lock().map_or(true, |mut w| {
+        w.insert((pin_file.to_path_buf(), key.to_string()))
+    }) {
+        eprintln!(
+            "warn the trust pin for {vault_path} no longer records {} as removed, but the copy of this release does. An older murk component (0.15 or earlier) under this HOME probably accepted a vault that lists them: a murk CLI earlier on PATH, the merge driver that git runs, or a binding. murk keeps them removed. Upgrade every murk component on this machine. If you re-added them on purpose with the older component, run `murk trust --vault {vault_path} --re-add {key}` with this release",
+            crate::truncate_pubkey(key)
+        );
+    }
 }
 
 /// The sidecar file of the pin file `pin_file`: `<hash>.lineage.json`.
@@ -538,9 +733,10 @@ fn drop_unusable_signer_keys(pin: &mut TrustPin, path: &std::path::Path) {
 
 /// Write the pin for `vault_path` and its sidecar, the sidecar first: a
 /// crash between the two leaves the newer records in the sidecar, which only
-/// narrows. The sidecar takes the pin's vault id and this vault's place in
-/// its repository. Errors when pinning is unavailable or the write fails, so
-/// a caller recording an explicit trust decision can say so.
+/// narrows. A crash after a cleared record reaches the sidecar leaves it in
+/// the pin file, and the next read copies it back. Errors when pinning is
+/// unavailable or the write fails, so a caller recording an explicit trust
+/// decision can say so.
 pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
     let path = writable_pin_path(vault_path)?;
     let parent = path
@@ -559,21 +755,31 @@ pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
     }
     let mut pin = pin.clone();
     pin.v = PIN_VERSION;
+    write_sidecar(vault_path, &path, &pin)?;
+    #[cfg(test)]
+    test_hooks::fail_after_sidecar()?;
+    let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
+    write_pin_file(&path, json.as_bytes())
+        .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))
+}
+
+/// Write the sidecar of the pin file `pin_file` from `pin`: its sidecar
+/// fields, the pin's vault id, the pin's removal records, and this vault's
+/// place in its repository.
+fn write_sidecar(vault_path: &str, pin_file: &Path, pin: &TrustPin) -> Result<(), String> {
     let (repo_dir, rel) = vault_location(vault_path).unwrap_or_default();
     let sidecar = Sidecar {
         v: SIDECAR_VERSION,
         vault_id: pin.vault_id.clone(),
         repo_dir,
         path: rel,
-        ..std::mem::take(&mut pin.sidecar)
+        removals: pin.removal_records(),
+        ..pin.sidecar.clone()
     };
-    let sidecar_file = sidecar_path(&path);
+    let sidecar_file = sidecar_path(pin_file);
     let json = serde_json::to_string_pretty(&sidecar).map_err(|e| format!("trust pin: {e}"))?;
     write_pin_file(&sidecar_file, json.as_bytes())
-        .map_err(|e| format!("cannot write trust pin {}: {e}", sidecar_file.display()))?;
-    let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
-    write_pin_file(&path, json.as_bytes())
-        .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))
+        .map_err(|e| format!("cannot write trust pin {}: {e}", sidecar_file.display()))
 }
 
 /// Read, change and write the pin for `vault_path` and its sidecar under an
@@ -581,8 +787,9 @@ pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
 /// one repository share a pin — never write from a stale read: a lowered
 /// rollback mark, or keys and grants another process just learned, lost. `f`
 /// gets the pin as it is now and returns the pin to write, or `None` to leave
-/// it, or an error to report. A caller may hold the vault lock, never the
-/// pin lock (see [`LOCK_ORDER`]).
+/// it, or an error to report. With `None`, the sidecar still gets a copy of
+/// any removal record it lacks (see [`read`]). A caller may hold the vault
+/// lock, never the pin lock (see [`LOCK_ORDER`]).
 pub fn update<F>(vault_path: &str, f: F) -> Result<(), String>
 where
     F: FnOnce(Option<&TrustPin>) -> Result<Option<TrustPin>, String>,
@@ -590,15 +797,22 @@ where
     let path = writable_pin_path(vault_path)?;
     let _lock = open_lock(&path)?;
     let current = read_held(vault_path)?;
-    match f(current.as_ref())? {
-        Some(pin) => write(vault_path, &pin),
-        None => Ok(()),
+    if let Some(pin) = f(current.as_ref())? {
+        return write(vault_path, &pin);
     }
+    if let Some(pin) = current.filter(TrustPin::copy_due)
+        && let Some(pin_file) = existing_pin_path(vault_path)
+        && let Err(e) = write_sidecar(vault_path, &pin_file, &pin)
+    {
+        warn_copy_failed(vault_path, &sidecar_path(&pin_file), &e);
+    }
+    Ok(())
 }
 
-/// [`read`] for a caller that holds the pin lock: it takes no lock.
+/// [`read`] for a caller that holds the pin lock: it takes no lock and
+/// copies nothing.
 fn read_held(vault_path: &str) -> Result<Option<TrustPin>, String> {
-    parse_raw(&read_raw(vault_path)?)
+    parse_raw(vault_path, &read_raw(vault_path)?)
 }
 
 /// The lock order, which every write path follows:
@@ -728,10 +942,13 @@ pub enum Publish {
 
 impl Snapshot {
     /// Read the trust state for `vault_path` and the target file `target`
-    /// (the vault file for a save, git's `%A` for the merge driver).
+    /// (the vault file for a save, git's `%A` for the merge driver). The
+    /// first read is [`read`], so a removal record the sidecar lacks is
+    /// copied before the token is taken.
     pub fn take(vault_path: &str, target: &Path) -> Result<Self, String> {
+        read(vault_path)?;
         let raw = read_raw(vault_path)?;
-        let pin = parse_raw(&raw)?;
+        let pin = parse_raw(vault_path, &raw)?;
         let token = Token {
             pin: raw,
             target: read_target(target)?,
@@ -824,6 +1041,20 @@ pub(crate) mod test_hooks {
         pub(crate) static UNDER_LOCK: Hook = const { RefCell::new(None) };
         /// In a save, just before the vault is signed.
         pub(crate) static BEFORE_SIGN: Hook = const { RefCell::new(None) };
+        /// In [`super::read`], after the unlocked read found a record to
+        /// copy, before the pin lock is taken.
+        pub(crate) static BEFORE_COPY: Hook = const { RefCell::new(None) };
+        /// Whether [`super::write`] fails after it wrote the sidecar and
+        /// before it writes the pin file.
+        pub(crate) static FAIL_AFTER_SIDECAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// The injected failure of [`FAIL_AFTER_SIDECAR`].
+    pub(crate) fn fail_after_sidecar() -> Result<(), String> {
+        if FAIL_AFTER_SIDECAR.with(std::cell::Cell::get) {
+            return Err("injected failure after the sidecar write".into());
+        }
+        Ok(())
     }
 
     /// Set `hook` on this thread.
@@ -1239,6 +1470,338 @@ mod tests {
             );
             assert_eq!(pin_update, Err(LOCK_ORDER.to_string()));
             assert_eq!(read(&vp).unwrap(), None, "nothing wrote a pin");
+        });
+    }
+
+    // -- the sidecar copy of the removal records --
+
+    const BOB: &str = "age1bob";
+
+    /// A pin for `/proj/.murk` whose file records bob as removed at 4 on
+    /// `main`, as murk 0.15 writes it: no sidecar.
+    fn pin_without_copy() -> PathBuf {
+        let pin = TrustPin {
+            v: PIN_VERSION,
+            vault_id: "id-1".into(),
+            generation: 4,
+            trusted: BTreeSet::from(["age1alice".to_string()]),
+            removed: BTreeMap::from([(BOB.to_string(), 4)]),
+            removed_on: BTreeMap::from([(BOB.to_string(), BTreeSet::from(["main".to_string()]))]),
+            removed_at_commit: BTreeMap::from([(BOB.to_string(), "c0ffee".to_string())]),
+            ..TrustPin::default()
+        };
+        let file = pin_path("/proj/.murk").unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_string_pretty(&pin).unwrap()).unwrap();
+        file
+    }
+
+    /// The sidecar of `pin_file` as written, or `None`.
+    fn sidecar_on_disk(pin_file: &Path) -> Option<Sidecar> {
+        let bytes = std::fs::read(sidecar_path(pin_file)).ok()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// How many times [`read`] went on to copy (the pin lock is taken only
+    /// then), counted on this thread.
+    fn count_copies() -> std::rc::Rc<std::cell::Cell<u32>> {
+        let copies = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = copies.clone();
+        test_hooks::set(&test_hooks::BEFORE_COPY, move || seen.set(seen.get() + 1));
+        copies
+    }
+
+    #[test]
+    fn row_r_l_oldpin_copy() {
+        // (a) The first read copies a pin-file record into the sidecar and
+        // leaves the pin file. (b) The next read finds nothing to copy: it
+        // takes no lock and writes nothing.
+        with_home(|_| {
+            let file = pin_without_copy();
+            let pin_bytes = std::fs::read(&file).unwrap();
+            let copies = count_copies();
+            read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(copies.get(), 1);
+            let sidecar = sidecar_on_disk(&file).expect("the first read writes the sidecar");
+            let pin: TrustPin = serde_json::from_slice(&pin_bytes).unwrap();
+            assert_eq!(sidecar.removals, pin.removal_records());
+            assert_eq!(
+                sidecar.vault_id, "id-1",
+                "the copy records the pin's vault id"
+            );
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                pin_bytes,
+                "the pin file is unchanged"
+            );
+
+            let meta = std::fs::metadata(sidecar_path(&file)).unwrap();
+            read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(copies.get(), 1, "the second read does not copy");
+            let again = std::fs::metadata(sidecar_path(&file)).unwrap();
+            assert_eq!(meta.modified().unwrap(), again.modified().unwrap());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(meta.ino(), again.ino(), "the sidecar was not rewritten");
+            }
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_copy_union() {
+        // A murk 0.15 component clears the record between the unlocked read
+        // and the copy under the lock: the copy keeps it.
+        with_home(|_| {
+            let file = pin_without_copy();
+            let hook_file = file.clone();
+            test_hooks::set(&test_hooks::BEFORE_COPY, move || {
+                let mut pin: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&hook_file).unwrap()).unwrap();
+                pin["removed"] = serde_json::json!({});
+                pin["removed_on"] = serde_json::json!({});
+                pin["removed_at_commit"] = serde_json::json!({});
+                std::fs::write(&hook_file, pin.to_string()).unwrap();
+            });
+            read("/proj/.murk").unwrap().unwrap();
+            let sidecar = sidecar_on_disk(&file).expect("the copy was written");
+            assert_eq!(sidecar.removals.get(BOB).map(|r| r.at), Some(4));
+            let pin = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(pin.removed.get(BOB), Some(&4), "the record still applies");
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_held() {
+        // A pin update that writes no pin still copies the record.
+        with_home(|_| {
+            let file = pin_without_copy();
+            let pin_bytes = std::fs::read(&file).unwrap();
+            update("/proj/.murk", |_| Ok(None)).unwrap();
+            let sidecar = sidecar_on_disk(&file).expect("the update copies the record");
+            assert_eq!(sidecar.removals.get(BOB).map(|r| r.at), Some(4));
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                pin_bytes,
+                "the pin file is unchanged"
+            );
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_removals() {
+        // A murk 0.15 component clears bob's record in the pin file and
+        // trusts him again. The sidecar, which it never opens, keeps the
+        // copy, and a read lays it over the pin file.
+        with_home(|_| {
+            let file = pin_without_copy();
+            read("/proj/.murk").unwrap().unwrap();
+            let sidecar_bytes = std::fs::read(sidecar_path(&file)).unwrap();
+            let mut old: Pin015 = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            old.removed = serde_json::json!({});
+            old.removed_on = serde_json::json!({"age1bob": ["feature"]});
+            old.removed_at_commit = serde_json::Value::Null;
+            old.trusted = serde_json::json!(["age1alice", BOB]);
+            old.generation = serde_json::json!(13);
+            std::fs::write(&file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+
+            let pin = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(pin.removed.get(BOB), Some(&4));
+            assert_eq!(
+                pin.removed_on.get(BOB),
+                Some(&BTreeSet::from(["main".to_string()])),
+                "the copy's branches replace those of a cleared record"
+            );
+            assert_eq!(
+                pin.removed_at_commit.get(BOB).map(String::as_str),
+                Some("c0ffee")
+            );
+            assert!(!pin.trusted.contains(BOB), "bob is not trusted");
+            assert_eq!(std::fs::read(sidecar_path(&file)).unwrap(), sidecar_bytes);
+        });
+    }
+
+    #[test]
+    fn the_overlay_takes_the_wider_removal() {
+        let mut pin = TrustPin {
+            removed: BTreeMap::from([(BOB.to_string(), 4), ("age1carol".to_string(), 6)]),
+            removed_on: BTreeMap::from([
+                (BOB.to_string(), BTreeSet::from(["main".to_string()])),
+                (
+                    "age1carol".to_string(),
+                    BTreeSet::from(["main".to_string()]),
+                ),
+            ]),
+            trusted: BTreeSet::from([BOB.to_string()]),
+            ..TrustPin::default()
+        };
+        let records = BTreeMap::from([
+            (
+                BOB.to_string(),
+                RemovalRecord {
+                    at: 7,
+                    on: Some(BTreeSet::from(["dev".to_string()])),
+                    at_commit: Some("c1".into()),
+                },
+            ),
+            (
+                "age1carol".to_string(),
+                RemovalRecord {
+                    at: 2,
+                    on: None,
+                    at_commit: None,
+                },
+            ),
+        ]);
+        let restored = pin.overlay_removals(&records);
+        assert_eq!(
+            restored,
+            vec![BOB.to_string()],
+            "bob was trusted in the pin file"
+        );
+        assert_eq!(
+            pin.removed,
+            BTreeMap::from([(BOB.to_string(), 7), ("age1carol".into(), 6)])
+        );
+        assert_eq!(
+            pin.removed_on.get(BOB),
+            Some(&BTreeSet::from(["dev".to_string(), "main".to_string()]))
+        );
+        assert_eq!(
+            pin.removed_on.get("age1carol"),
+            None,
+            "no entry applies everywhere"
+        );
+        assert!(pin.trusted.is_empty());
+    }
+
+    #[test]
+    fn row_r_l_oldpin_order() {
+        // The sidecar is written before the pin file. (a) A write that adds
+        // a record and fails after the sidecar leaves the record in the
+        // sidecar, so it applies. (b) A write that clears it and fails there
+        // leaves it in the pin file: the next read keeps it and copies it
+        // back, and the user runs the command again.
+        with_home(|_| {
+            let file = pin_path("/proj/.murk").unwrap();
+            let pin = TrustPin {
+                v: PIN_VERSION,
+                vault_id: "id-1".into(),
+                trusted: BTreeSet::from(["age1alice".to_string()]),
+                ..TrustPin::default()
+            };
+            write("/proj/.murk", &pin).unwrap();
+            let mut added = pin.clone();
+            added.removed.insert(BOB.to_string(), 4);
+            test_hooks::FAIL_AFTER_SIDECAR.with(|f| f.set(true));
+            let failed = write("/proj/.murk", &added);
+            test_hooks::FAIL_AFTER_SIDECAR.with(|f| f.set(false));
+            assert!(failed.is_err());
+            assert!(sidecar_on_disk(&file).unwrap().removals.contains_key(BOB));
+            let on_disk: TrustPin = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            assert!(
+                !on_disk.removed.contains_key(BOB),
+                "the pin file was not written"
+            );
+            let read_back = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(
+                read_back.removed.get(BOB),
+                Some(&4),
+                "(a) the record applies"
+            );
+
+            write("/proj/.murk", &read_back).unwrap();
+            let mut cleared = read("/proj/.murk").unwrap().unwrap();
+            cleared.removed.remove(BOB);
+            test_hooks::FAIL_AFTER_SIDECAR.with(|f| f.set(true));
+            let failed = write("/proj/.murk", &cleared);
+            test_hooks::FAIL_AFTER_SIDECAR.with(|f| f.set(false));
+            assert!(failed.is_err());
+            assert!(sidecar_on_disk(&file).unwrap().removals.is_empty());
+            let pin = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(
+                pin.removed.get(BOB),
+                Some(&4),
+                "(b) the record still applies"
+            );
+            let copy = sidecar_on_disk(&file).unwrap();
+            assert_eq!(copy.removals.get(BOB).map(|r| r.at), Some(4));
+            write("/proj/.murk", &pin).unwrap();
+            let on_disk: TrustPin = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            assert_eq!(
+                on_disk.removed.get(BOB),
+                Some(&4),
+                "the next write mirrors it"
+            );
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_other_vault() {
+        // An older murk accepted another vault at this path: the pin records
+        // id-2, the sidecar id-1 with bob's removal. The sidecar is dropped,
+        // so the new vault is judged with no record for bob.
+        with_home(|_| {
+            let file = pin_without_copy();
+            read("/proj/.murk").unwrap().unwrap();
+            let mut pin: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            pin["vault_id"] = serde_json::json!("id-2");
+            pin["removed"] = serde_json::json!({});
+            pin["removed_on"] = serde_json::json!({});
+            pin["removed_at_commit"] = serde_json::json!({});
+            std::fs::write(&file, pin.to_string()).unwrap();
+            let read_back = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(read_back.vault_id, "id-2");
+            assert!(
+                read_back.removed.is_empty(),
+                "no record of the old vault applies"
+            );
+            assert_eq!(read_back.sidecar, Sidecar::default());
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_no_pin() {
+        // The pin file is gone, its sidecar is not. The sidecar's records
+        // apply to the vault of its id, with no trust decision, and to no
+        // other vault.
+        with_home(|home| {
+            let dir = Path::new(home).join("proj");
+            std::fs::create_dir_all(&dir).unwrap();
+            let vault_file = dir.join(".murk");
+            let vp = vault_file.to_str().unwrap();
+            let mut vault = crate::testutil::empty_vault();
+            vault.vault_id = "00112233445566778899aabbccddeeff".into();
+            std::fs::write(&vault_file, serde_json::to_string(&vault).unwrap()).unwrap();
+            let pin = TrustPin {
+                v: PIN_VERSION,
+                vault_id: "00112233445566778899aabbccddeeff".into(),
+                trusted: BTreeSet::from(["age1alice".to_string()]),
+                removed: BTreeMap::from([(BOB.to_string(), 4)]),
+                ..TrustPin::default()
+            };
+            write(vp, &pin).unwrap();
+            std::fs::remove_file(pin_path(vp).unwrap()).unwrap();
+
+            let read_back = read(vp).unwrap().expect("the sidecar applies");
+            assert_eq!(read_back.removed.get(BOB), Some(&4));
+            assert!(!read_back.has_trust(), "no trust decision comes with it");
+
+            vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
+            std::fs::write(&vault_file, serde_json::to_string(&vault).unwrap()).unwrap();
+            assert_eq!(read(vp).unwrap(), None, "another vault's file reads no pin");
+        });
+    }
+
+    #[test]
+    fn a_read_under_the_pin_lock_is_a_lock_order_error() {
+        with_home(|_| {
+            pin_without_copy();
+            let held = lock("/proj/.murk").unwrap();
+            assert_eq!(read("/proj/.murk"), Err(LOCK_ORDER.to_string()));
+            drop(held);
+            assert!(read("/proj/.murk").unwrap().is_some());
         });
     }
 }

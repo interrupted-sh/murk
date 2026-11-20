@@ -1,0 +1,14 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -415,9 +415,8 @@
+     {
+         #[cfg(test)]
+         test_hooks::run(&test_hooks::BEFORE_COPY);
+-        if let Err(e) = copy_removals(vault_path, first) {
+-            warn_copy_failed(vault_path, &sidecar_path(pin_file), &e);
+-        }
++        copy_removals(vault_path, first)?;
++        let _ = pin_file;
+     }
+     Ok(pin)
+ }

@@ -1268,12 +1268,13 @@ fn regenerate_meta(
     }
 
     let pin = crate::pins::read(vault_path)?;
+    let checkout = crate::trust::Checkout::of(vault_path, pin.as_ref());
     if let Some(conflict) = result_conflict(
         identity,
         merged,
         &meta,
         &ours_meta,
-        pin.as_ref(),
+        (vault_path, pin.as_ref(), &checkout),
         ours,
         theirs,
     ) {
@@ -1415,20 +1416,25 @@ fn merged_generation(
 /// Why the merged result must not be signed by the merging key, if it must
 /// not: the group rule a load applies (a membership change needs a member's
 /// signature) must hold for that key against ours, or every machine would
-/// refuse the result; a key removed on this machine may come back only
-/// through a side numbered past its removal — older sides that merely still
-/// list it must not carry it into a result numbered and signed past
-/// everything; and the result must leave no group orphaned (see
-/// [`orphan_conflict`]).
+/// refuse the result; a key removed on this machine must stay out where its
+/// removal applies, and elsewhere may come back only through a side numbered
+/// past its removal (see [`crate::trust::removed_key_kept_by_merge`]); and
+/// the result must leave no group orphaned (see [`orphan_conflict`]).
+/// `trust` is the vault path, the pin and the checkout merged into.
 fn result_conflict(
     identity: &crate::crypto::MurkIdentity,
     merged: &Vault,
     meta: &Meta,
     ours_meta: &Meta,
-    pin: Option<&crate::pins::TrustPin>,
+    trust: (
+        &str,
+        Option<&crate::pins::TrustPin>,
+        &crate::trust::Checkout,
+    ),
     ours: &Vault,
     theirs: &Vault,
 ) -> Option<MergeConflict> {
+    let (vault_path, pin, checkout) = trust;
     let no_deletions = BTreeMap::new();
     if let Ok(me) = identity.pubkey_string()
         && let Some(group) = crate::trust::group_change_violation(
@@ -1446,13 +1452,25 @@ fn result_conflict(
             ),
         });
     }
-    if let Some((key, at)) = crate::trust::removed_key_kept_by_merge(pin, merged, &[ours, theirs]) {
-        return Some(MergeConflict {
-            field: format!("recipients.{}", recipient_label(&key)),
-            reason: format!(
+    if let Some((key, at)) =
+        crate::trust::removed_key_kept_by_merge(pin, merged, &[ours, theirs], checkout)
+    {
+        let canonical = crate::recipients::canonical_recipient(&key).into_owned();
+        let reason = if pin.is_some_and(|p| crate::trust::removal_applies(p, &canonical, checkout))
+        {
+            format!(
+                "{} was removed from this vault at generation {at} on this machine, and the merged result lists them. Merge the branch that removed them first. To re-add them on purpose, review the change, run `murk trust --vault {vault_path} --re-add {canonical}`, and merge again",
+                crate::truncate_pubkey(&key)
+            )
+        } else {
+            format!(
                 "rolled back: {} was removed from this vault at generation {at} on this machine, and neither side re-adds them in a newer revision — merge the branch that removed them first",
                 crate::truncate_pubkey(&key)
-            ),
+            )
+        };
+        return Some(MergeConflict {
+            field: format!("recipients.{}", recipient_label(&key)),
+            reason,
         });
     }
     orphan_conflict(merged, meta)

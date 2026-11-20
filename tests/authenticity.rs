@@ -25,6 +25,9 @@ mod load_rows;
 /// Invariant rows about the merge driver.
 #[path = "authenticity/merge_rows.rs"]
 mod merge_rows;
+/// Invariant rows about removed members and the sidecar copy of their records.
+#[path = "authenticity/removal_rows.rs"]
+mod removal_rows;
 
 /// One person's machine: a HOME of their own, working in `repo`.
 struct Machine {
@@ -3230,9 +3233,9 @@ fn resign_as(path: &Path, as_signer: &str, holder: &Machine) {
 /// listing him (alice-signed) loaded from a branch, his own older signed
 /// revision, a newer vault signed by his key and built from a revision older
 /// than the removal, the same arriving as a merge side, and `murk trust`
-/// that does not name him are all refused. Trust comes back only through a
-/// newer vault from a trusted signer that re-adds him, or `murk trust
-/// --re-add` naming his key.
+/// that does not name him are all refused. Trust comes back only through
+/// this machine's own `circle authorize` of him, or `murk trust --re-add`
+/// naming his key.
 #[test]
 fn removal_is_permanent_on_the_machine_that_accepted_it() {
     let base = TempDir::new().unwrap();
@@ -3388,7 +3391,8 @@ fn removal_is_permanent_on_the_machine_that_accepted_it() {
 /// before Bob ever signs; Alice's machine pins it on Mallory's word, and even
 /// accepts a vault "signed by Bob" with it — which proves only that Mallory
 /// holds that key. Once Alice removes Mallory, the entry stops counting: a
-/// vault signed as Bob with Mallory's key is refused as unconfirmed. Alice's
+/// vault signed as Bob with Mallory's key, which no longer lists her, is
+/// refused as unconfirmed. Alice's
 /// own writes never vouch for the entry, so Carol, a third machine that
 /// learns keys only from Alice's writes, refuses it too.
 #[test]
@@ -3463,7 +3467,10 @@ fn a_registry_entry_stops_counting_once_whoever_added_it_is_removed() {
         .stdout("m2\n");
     let accepted = fs::read(repo.join(".murk")).unwrap();
 
-    // Mallory prepares a later vault as Bob, numbered past the removal.
+    // Mallory prepares a later vault as Bob, numbered past the removal. It
+    // does not list her (a vault that lists a removed member is refused on
+    // that alone), so only the key bound to Bob's name can refuse it. The
+    // MAC is recomputed with alice's key, which still reads the meta.
     set_pin_generation(&mallory, &repo, 40);
     mallory
         .with_key(&repo, &mallory_key)
@@ -3471,6 +3478,15 @@ fn a_registry_entry_stops_counting_once_whoever_added_it_is_removed() {
         .write_stdin("evil\n")
         .assert()
         .success();
+    {
+        let path = repo.join(".murk");
+        let mut vault: murk_cli::types::Vault =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        vault.recipients.retain(|r| *r != mallory.pubkey());
+        let id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+        common::forgery::reseal(&mut vault, &id);
+        fs::write(&path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
+    }
     resign_as(&repo.join(".murk"), &bob.pubkey(), &mallory);
     let forged = fs::read(repo.join(".murk")).unwrap();
     fs::write(repo.join(".murk"), &accepted).unwrap();

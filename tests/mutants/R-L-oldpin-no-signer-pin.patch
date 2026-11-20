@@ -1,0 +1,10 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -411,7 +411,6 @@
+     let pin = parse_raw(vault_path, &raw)?;
+     if let (Some(first), Some((pin_file, _))) = (&pin, &raw.file)
+         && first.copy_due()
+-        && !pin_writes_off()
+     {
+         #[cfg(test)]
+         test_hooks::run(&test_hooks::BEFORE_COPY);

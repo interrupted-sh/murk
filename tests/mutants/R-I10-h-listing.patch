@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -691,7 +691,7 @@
+     loaded.vault.recipients.iter().find_map(|r| {
+         let key = canonical_recipient(r);
+         let removed_at = *pin.removed.get(key.as_ref())?;
+-        removal_applies(pin, &key, checkout).then(|| Refusal::RemovedKey {
++        (found <= removed_at && removal_applies(pin, &key, checkout)).then(|| Refusal::RemovedKey {
+             key: r.clone(),
+             removed_at,
+             found,
