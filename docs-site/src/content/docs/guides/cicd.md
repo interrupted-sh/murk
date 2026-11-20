@@ -315,6 +315,21 @@ back. A runner without a pin never checks group changes either. See the [threat
 model](/security/threat-model/#vault-signatures) (what it doesn't prevent,
 item 10).
 
+A runner whose trust pin recorded a removal refuses such a revision when it
+lists the removed member. A runner that loads only with
+`MURK_TRUSTED_SIGNERS` never records a removal, so it gets no such refusal.
+This is deliberate. The runner trusts only the signers in the variable, so it
+already refuses a vault that a removed member signed. If such loads recorded
+removals, any signer named in the variable could lock a member out on that
+runner. So:
+
+- A job that only reads the vault can load with `MURK_TRUSTED_SIGNERS` and
+  rely on the minimum in `MURK_EXPECTED_VAULT`. Raise the minimum after each
+  rotation and each revoke.
+- A job that saves to the vault should keep a trust pin (a runner that keeps
+  its home directory, after one `murk trust`) and load without
+  `MURK_TRUSTED_SIGNERS`, or rely on that minimum.
+
 A teammate with a hardware or `ssh-rsa` key writes the vault unsigned. CI
 refuses that vault until a signing teammate runs `murk trust` and commits the
 re-signed vault. When `MURK_TRUSTED_SIGNERS` is set, every key refuses an

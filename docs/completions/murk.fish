@@ -273,7 +273,7 @@ complete -c murk -n "__fish_murk_using_subcommand group; and __fish_seen_subcomm
 complete -c murk -n "__fish_murk_using_subcommand verify" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand verify" -l signature-only -d 'Check only the vault signature, with no key'
 complete -c murk -n "__fish_murk_using_subcommand verify" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c murk -n "__fish_murk_using_subcommand trust" -l re-add -d 'Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it' -r
+complete -c murk -n "__fish_murk_using_subcommand trust" -l re-add -d 'Trust a key this machine recorded as removed from the vault, or holds as a revoked agent grant, again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key, or holding a revoked grant, is never trusted without it' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l shares-identity-with -d 'Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l yes -d 'Accept without asking, for scripts. Review the vault first'

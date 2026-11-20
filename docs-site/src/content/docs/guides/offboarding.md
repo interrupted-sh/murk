@@ -101,10 +101,20 @@ each sensitive secret they could read.
 survive the revocation.
 
 After a machine accepts the vault that removed them, it refuses every vault
-that the revoked key signs, on every branch. It also refuses an older
-revision that still lists them as a rollback, on each branch that the revoke
-has reached. [Trusting a signer](/concepts/recipients-signatures/#trusting-a-signer)
+that the revoked key signs, on every branch. It also refuses a vault that
+still lists them, at any save counter, on each branch that the revoke has
+reached. A newer revision does not bring them back on that machine: only
+its own `murk circle authorize`, or `murk trust --re-add KEY` after review,
+does. [Trusting a signer](/concepts/recipients-signatures/#trusting-a-signer)
 gives the full removal rule and its one exception.
+
+This protection is per machine. A fresh clone, a runner without a trust pin,
+a runner that loads only with `MURK_TRUSTED_SIGNERS`, and an agent grant have
+no record of the removal. An older murk component (0.15 or earlier) on the
+same machine, for example the merge driver git runs or a Python or Node
+binding, doesn't check the record at all. Upgrade every murk component on
+each machine together. See the
+[threat model](/security/threat-model/#vault-signatures), limit 10.
 
 Revoke on the main branch. A revoke on an unmerged branch does not change
 the vaults on main. Until you merge it, they are still a recipient on main

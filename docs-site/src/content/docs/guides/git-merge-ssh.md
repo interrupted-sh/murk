@@ -107,7 +107,8 @@ With a key, the driver checks **both sides** as a load does:
 - the MAC,
 - a valid signature from a signer that this machine trusts, not an agent
   grant,
-- the same vault id,
+- the same vault id, and no second vault file with that id in the checkout,
+- the vault id and minimum in `MURK_EXPECTED_VAULT`, when it's set,
 - for a side that changed the vault, a save counter above the common
   ancestor's.
 
@@ -116,13 +117,14 @@ counts as a change and which group memberships the sides are judged
 against. Without that check, a parent that an attacker chose (a
 cherry-pick, a `git apply --3way`) could shape the merge.
 
-The driver merges an ancestor that your key cannot read conservatively. Any
-difference in the encrypted metadata is then a conflict. It refuses an ancestor
-that fails its checks. An unsigned ancestor from before 0.14 is the
-exception. murk cannot check it, and accepts it as history. So a forged
-ancestor of that kind, in a commit that you cherry-pick or rebase, can set
-values back to an older revision without a conflict. Check what you merged
-with `murk diff` (below) before you push.
+The ancestor is an authority on what changed only when your key can read
+it, it is signed, and its signer is one this machine trusts now (and has
+not recorded as removed). Then the merge is three-way. Otherwise the merge is
+two-way: every difference between ours and theirs is a conflict, the driver
+keeps ours, and it signs nothing. So an unsigned or forged ancestor, or one
+that a removed member signed, can't set values back. The one exception is a
+merge where both sides are still 0.13 vaults. That merge is three-way over
+the ancestor as it is.
 
 A side that 0.13 wrote is judged like a load of it on the branch that you
 merge into. For these rules, see step 7 of [upgrading to
@@ -131,23 +133,89 @@ default branch before you merge branches that still have 0.13 vaults.
 
 ### The merge result
 
-If the ancestor or a side fails, the merge is a conflict that names it. The
-driver then writes no new MAC or signature.
+If the ancestor or a side fails its checks, the driver writes nothing. The
+working file stays ours, byte for byte, and git reports a conflict. The
+message names the input that failed, for example "theirs failed its
+authenticity check: …". Nothing is signed, and the trust pin doesn't change.
 
 Otherwise, the driver writes the merged vault with a new MAC and signs it
-with your key. It stays unsigned only when your key cannot sign. The driver
+with your key. It stays unsigned only when your key can't sign. The driver
 numbers it above both sides and above every vault that this machine has
-accepted.
+accepted. It writes no trust pin: your next load records the result.
 
-Without a key, the driver cannot verify or sign. So it refuses any merge
+Before it signs, the driver checks that this machine would load the merged
+vault. If it wouldn't, the driver writes nothing and says "this machine would
+refuse the merged vault, so murk does not sign it", with the reason.
+
+Without a key, the driver can't verify or sign. So it refuses any merge
 that needs new integrity data. It exits 1, and git reports a conflict. Abort
 the merge (`git merge --abort`) and run it again with your key available.
 
 The merged vault has your signature, so it must pass the group rule that a
 load applies. A member of a group must sign each change to its membership.
-When the merge changes a group's membership and your key is not in that
+When the merge changes a group's membership and your key isn't in that
 group, the result is a conflict that says so. A member of the group must do
-that merge.
+that merge. A merge that would leave a group that holds values with no
+member who is a recipient is a conflict too. Add a member to the group, or
+clear its values with `murk rm KEY --group GROUP`, then merge again.
+
+### Your first write can't be a merge
+
+When you join a vault with an age key, the other machines don't know your
+signing key yet. Your first signed write shows it to them (see [A new
+teammate's first write](/concepts/recipients-signatures/#a-new-teammates-first-write)).
+Your own machine must have confirmed your signing key too, before the
+driver signs a merge with it. Until then, a merge stops with "this machine
+would refuse the merged vault" and keeps ours.
+
+Make one ordinary save first, for example `murk add` or `murk describe`, and
+commit it. Then merge.
+
+### Removed members and revoked grants
+
+When your machine recorded that someone was removed from the vault, a merge
+side that lists them again is refused, at any save counter, and so is a
+merged result that lists them. A side that a removed member signed is
+refused too. To take a deliberate re-add:
+
+1. Abort the merge: `git merge --abort`.
+2. Review the change with `murk diff` against the other branch's vault file.
+3. Do one of these:
+   - Merge again. Run `git checkout --theirs -- .murk`. Run
+     `murk trust --vault .murk --re-add KEY`. Make this branch's own vault
+     changes again with murk. Commit.
+   - On this branch, run `murk circle authorize KEY` and commit. Merge again.
+     Both sides now add the key, so the recipient merge doesn't conflict on
+     it.
+
+A merged result that holds a grant for an agent key that your machine holds
+as revoked, or lists that key as a recipient, is a conflict too. Keep the
+side that revoked it.
+
+### Cherry-pick and revert
+
+A cherry-pick of a vault commit runs the driver with that commit's parent as
+the common ancestor.
+
+- When the parent is genuine and a signer this machine trusts now signed it,
+  the change applies as it does in git, and your key signs the result. That
+  includes a change that this branch already has or later undid: the change
+  comes back.
+- When the parent is unsigned, forged, unreadable or signed by a key outside
+  the trusted set, the cherry-pick conflicts on every difference and keeps
+  this branch's values.
+- When the commit's vault file is older than its parent's (a revert commit,
+  or a restored file), murk refuses it as rolled back and leaves this
+  branch's vault file as it was.
+
+`git revert` of a vault commit that a later vault commit follows stops with a
+conflict, and leaves the vault file as it was. To revert the newest vault
+commit, git writes the older file without a merge. murk then refuses it as
+rolled back until you run `murk trust` (see [Rollback and deliberate
+reverts](/concepts/recipients-signatures/#rollback-and-deliberate-reverts)).
+
+Before you push a cherry-pick, check its vault change with `murk diff`
+(below).
 
 ### Reviewing a merge
 
@@ -205,11 +273,12 @@ instead of a file name, because git does not pass the name.
 ### When the driver stops
 
 Some refusals leave the file as ours, without conflict markers: no key, a
-save counter at its limit, an agent grant key, or a failed write of the
-merged vault. The message says that nothing was written and theirs was not
-merged. Do not commit the file as it is, because that drops their changes.
-Set your key and run the merge again, or keep one side and redo the other
-side's changes with murk.
+save counter at its limit, an agent grant key, an ancestor or side that
+fails its checks, a result this machine would refuse, or a failed write of
+the merged vault. The message says that nothing was written and theirs was
+not merged. Do not commit the file as it is, because that drops their
+changes. Set your key and run the merge again, or keep one side and redo the
+other side's changes with murk.
 
 ### Merges that never run the driver
 
@@ -243,13 +312,15 @@ stops the merge in these cases:
 - both sides changed the agent policy differently,
 - a side, or the common ancestor, fails the checks above (MAC, signature,
   trusted signer, grant key, vault id, save counter),
-- the merge changes a group's membership and your key is not in that group.
+- the merge changes a group's membership and your key is not in that group,
+- the merge leaves a group that holds values with no member who is a
+  recipient,
+- a side or the result lists a member this machine recorded as removed, or
+  holds an agent grant this machine holds as revoked.
 
-When both sides changed the recipients in the same way and the ancestor is
-an unsigned vault from before 0.14, the driver is stricter. Every secret
-whose value differs between the sides conflicts. So does every secret that
-your key cannot read (a group you are not in), because the driver cannot
-compare it.
+When the common ancestor is not an authority (above), the driver is
+stricter. Every difference between ours and theirs conflicts, and the
+driver keeps ours.
 
 To avoid recipient conflicts, authorize and revoke teammates on the main
 branch, not on a side branch that also changes secrets. A revoke on a side

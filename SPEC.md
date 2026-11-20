@@ -297,6 +297,12 @@ The `expires_at` TTL is enforced by the murk binary at read time, though not cry
 
 `github_pins` maps a GitHub username to the SHA-256 fingerprints of the keys that `circle authorize github:USER` fetched. On the next authorize for that user, murk compares them and stops if the set changed (unless you pass `--force`). The signature covers `github_pins`, and the MAC does not. The field is omitted when empty.
 
+`revoked_grants` maps a canonical grant key to its revocation ids: each id is 16 random bytes as 32 lowercase hex characters. It records that the key was an agent grant in this vault and its grant record left. The signature covers it (through the meta ciphertext), and the MAC does not, so the MAC prefix stays `blake3v8:`. murk 0.15 and earlier parse the meta without it and drop it on their next save. The field is omitted when empty. Rule 10 under [Trust](#trust) says how loads use it. Writes follow these rules:
+
+- **Events.** A write gives a key a new id when (1) a save drops its grant record (`agent revoke`, the pruning of an expired grant, the old key of `agent grant --renew`), (2) a clean keyed merge drops a grant record that ours or theirs held, or (3) a save on branch B holds no grant record for a key that this machine saw live on B (`grants_live_on`), and the commit checked out and the sighting's commit are related by ancestry in either direction. Event 3 then removes that sighting. A sighting of `""`, or no commit checked out, counts as related. A git failure counts as not related.
+- **The id rule.** An event mints an id for a key only when no input of the write already holds an id for that key that this machine has not re-admitted. The inputs are the parent's set (both sides' sets for a merge) and the sidecar's `revoked_grants_seen`.
+- **Union.** Every save, re-sign and keyed merge writes the union of the parent's set (both sides' for a merge), `revoked_grants_seen` and the new ids, less the ids in `readmitted_grants`. A key left with no ids is left out. A two-way merge writes the union too, although its result is unsigned.
+
 A grant record whose `pubkey` is the key that opened the meta was written by a meta writer: grants never open the meta. When that key is an operator key the trust rules know (rule 5 under [Trust](#trust)), the vault is refused as tampering. Otherwise the record is ignored on load and dropped by the next save, and it never makes that key a grant.
 
 ### Integrity
@@ -352,7 +358,7 @@ Two signing-capable key types, both plain Ed25519 (RFC 8032, `ed25519-dalek`):
 - **age**: an Ed25519 key derived from the raw 32-byte X25519 secret with `blake3::derive_key("murk.vault.signing.ed25519.v1", age_key_bytes)`, as in murk 0.13. The BIP39 phrase recovers it. Its verifying key cannot be computed from the `age1…` recipient, so the signer records it in the meta's `signers` registry on every save.
 - **ssh-ed25519**: the SSH key is itself an Ed25519 signing key, parsed from the OpenSSH private key. Its verifying key is the one embedded in the `ssh-ed25519 …` recipient string.
 
-`ssh-rsa` and plugin/hardware identities cannot sign, so their saves are written unsigned.
+`ssh-rsa` and plugin/hardware identities cannot sign, so their saves are written unsigned. Rule 1 under [Trust](#trust) says when such a vault loads, and what it may not change without `murk trust`.
 
 ### Verifying keys
 
@@ -406,9 +412,13 @@ A valid signature proves that some key listed as a recipient signed the vault, a
 - On a branch this machine accepted, an older vault and a different vault at the same counter are refused until a person accepts them with `murk trust`.
 - A signer's pinned signing key never changes. A key bound to a name on someone else's word stops counting when that someone is removed.
 - An agent grant key is never a trusted signer, and an operator key is never recorded as a grant.
-- A change to a group's membership is signed by a member of that group, except removing a member who left the vault.
-- A key removed from the vault stays removed on this machine: its later signatures are refused everywhere, and an older vault that still lists it is refused where the removal applies, until a deliberate re-add.
+- A change to a group's membership is signed by a member of that group, except removing a member who left the vault. A group deleted from an accepted vault is created again only by one of its former members, while one of them is still a recipient.
+- A key removed from the vault stays removed on this machine: its later signatures are refused everywhere, and a vault that still lists it is refused where the removal applies, at any generation. Only this machine's own save that adds the key, `murk trust --re-add` here, or the acceptance of another vault at this path clears the record. No load and no merge does.
+- On a machine that saw the revocation, a key that was an agent grant in a vault is never accepted as a reader of that vault again after its grant record leaves, unless `murk trust --re-add` on that machine re-admits the revocations it showed.
+- An unsigned vault never widens what this machine encrypts to: every recipient, grant and group membership it carries must be one this machine accepted.
+- Two vault files with one vault id in one checkout are never both accepted on this machine.
 - murk never writes a vault that every machine would refuse.
+- A save, a keyed merge and a re-sign publish a vault only if their checks passed against the pin and its sidecar as they are when the file is published, and only over the vault file bytes they read at the start.
 - Trust that comes from `MURK_TRUSTED_SIGNERS` never outlives the variable.
 
 ### Where the rules apply
@@ -419,7 +429,7 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
 
 ### Rules
 
-1. **Unsigned.** Refused when the loading key can sign (age, ssh-ed25519), or when `MURK_TRUSTED_SIGNERS` is set. Loaded with a warning otherwise (ssh-rsa, hardware/plugin keys): such a team relies on signed git commits.
+1. **Unsigned.** Refused when the loading key can sign (age, ssh-ed25519), or when `MURK_TRUSTED_SIGNERS` is set. For a key that cannot sign (ssh-rsa, hardware/plugin keys), it is refused until this machine holds a trust decision for the vault (an accepted load, `murk trust`, `murk init` or an own save). With one, the vault loads with a warning: such a team relies on signed git commits. Rules 2, 6, 8, 9 and 10 still apply to it. It may not widen what this machine encrypts to: a recipient, an agent grant or a group membership that the pin does not hold is refused until `murk trust` accepts it. A save by such a key refuses to write a vault that lists a recipient this machine has not accepted.
 2. **Stripped.** A vault this machine accepted signed that is now unsigned is refused, for every key.
 3. **Trusted signer.** The signer must be in `MURK_TRUSTED_SIGNERS` when that is set (it replaces the pin's set), otherwise in the pin's `trusted` set: the non-grant recipients of the last vault accepted here. With neither, the vault is refused until `murk trust`.
 4. **Signing key.** For an age signer, the registry key the signature verified under must be the one pinned for that signer (pin `signers`), or the one `MURK_TRUSTED_SIGNERS` gives for it. A trusted signer with no pinned key yet (a newly authorized teammate's first signed write) is refused until `murk trust` confirms the key: trust on first use. A different key for a signer whose key is pinned is refused outright, and `murk trust` will not accept it. An age key's verifying key is derived from its secret, so a second one for the same recipient is a forgery. ssh-ed25519 signers need no pinned key.
@@ -433,11 +443,13 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
    - A key the pin trusts as a signer is never recorded as a grant and stays a trusted signer. A pinned grant entry never overrides signer trust.
 6. **Identity and rollback.**
    - **Identity.** `vault_id` must match the pinned one.
+   - **One file for each vault id.** In a git checkout, a vault is refused when another git-tracked vault file (`.murk`, `.murk.*`, `*.murk`) carries its `vault_id`, unless the pin already records that id at this path (then murk warns). It is also refused when the sidecar of another path in the same repository records the id while that path is a tracked vault file, and when `murk trust --shares-identity-with` retired this path (see [The sidecar](#the-sidecar)). `murk trust` does not accept this refusal. `murk trust --vault P --shares-identity-with OTHER` chooses P. Outside git, and for a vault with no id, this rule does not apply.
+   - **Expected vault.** When `MURK_EXPECTED_VAULT` is set, `vault_id` must equal its id and `generation` must not be below its minimum (see [Trusted-signer entries](#trusted-signer-entries), CI). `murk trust` does not accept this refusal.
    - **Rollback.** `generation` must not be below the highest accepted on the git branch the vault is checked out on. A branch never seen here and a detached HEAD have no mark. Outside a git checkout, the single highest mark applies. The counter orders revisions, but it does not record where they came from. A genuine revision from a stale fork, signed by a trusted signer and numbered above the mark, passes this rule ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, item 10).
    - **History.** A load on a branch never accepted here, or on a detached HEAD, is history and never adds trust (see [Current and history loads](#current-and-history-loads)).
    - **Marks are per branch.** Every worktree of a repository shares one pin, but the marks are per branch. One worktree's save gives only its own branch a mark. A load never gives a branch its first mark, and a merge (git or the driver) does not either. So after a change is merged into a branch, that branch has no mark on this machine until this machine saves there (any write counts, not only a merge result).
    - **Branch names.** Where git's `core.ignorecase` is true, murk maps a branch name that HEAD spells in another case (`git checkout Main` for `main`) to the branch as stored, so its marks apply. In a repository on git's reftable ref backend, HEAD on disk is a stub, so murk asks git (`git symbolic-ref`) for the current branch, and per-branch marks work the same.
-7. **Groups.** A change to a group's membership must be signed by a member of that group as pinned (a new group by one of its members). Removing a member who left the vault entirely is exempt, because `circle revoke` does that for any recipient.
+7. **Groups.** A change to a group's membership must be signed by a member of that group as pinned (a new group by one of its members). Removing a member who left the vault entirely is exempt, because `circle revoke` does that for any recipient. The sidecar keeps the members of each group that an accepted vault deleted (`deleted_groups`). A vault that creates such a group again is judged as a change from those members: only one of them may create it, unless none of them is still a recipient.
 8. **Removal.** When this machine accepts a vault that removes a key from the trusted signers, the pin records the key in `removed` with that vault's generation, the branch the removal was made or accepted on in `removed_on`, and a commit in `removed_at_commit`.
    - **Recorded commit.** For a removal this machine makes (its own save), the commit is the one checked out when it saves, whether or not the removal is committed yet. Every commit at or before it existed before the removal. For a removal it accepts from another signer, the commit is the one checked out only when the vault file is exactly as committed there. Otherwise no commit is recorded.
    - **A vault the key signed.** From then on a vault signed by the key is refused on every branch, on a detached HEAD and outside git, in `MURK_TRUSTED_SIGNERS` mode too. There is one exception. It covers a vault the key signed, checked out on a branch the removal has not reached, at the recorded commit or an ancestor of it, with the vault file exactly as committed there. Its `generation` must also be at or below the one the key was removed at. Both the commit condition and the generation condition are needed.
@@ -445,7 +457,7 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
    - **An exempt vault.** A vault that passes the exception is treated as the key's own history from before the removal. It loads like any other, and it never makes the key trusted again. Because it is at or below the removal, a save over it that keeps the key is refused on a branch this machine never accepted (see below), so there it is read-only.
    - **No other vault is covered.** A vault at any other commit is not covered, even one in the history of a branch the removal reached (after a merge, rebase or squash of that branch). The exception fails closed. With no recorded commit (the removal was made or accepted outside git, accepted from an uncommitted vault file, or recorded by an older murk), or one git no longer has, there is none. murk never infers the commit from branch tips.
    - **Dropping the removal.** No vault drops the recorded removal except as described below.
-   - **Listing rule.** A vault that lists the key at that generation or below is refused as rolled back wherever the history contains the removal:
+   - **Listing rule.** A vault that lists the key is refused, at any generation, wherever the history contains the removal. At or below the generation of the removal it is refused as rolled back. Above it, the refusal says that the revision may re-add the key on purpose or be a stale fork, and names `murk trust --re-add`. The places are:
      - on the branch it was made or accepted on,
      - on any branch where this machine later accepts a vault at or after the removal that no longer lists the key (the removal was merged or pulled there),
      - on a detached HEAD,
@@ -455,13 +467,20 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
      - a branch this machine accepted before the removal reached it, and
      - a never-accepted branch checked out at the recorded commit or an ancestor of it, with the vault file exactly as committed there (an uncommitted change to the vault file loses the exemption).
    - **In the exempt places.** Reading there works. On a branch this machine accepted before, saves work too. On a never-accepted branch a save that would keep the key is still refused. Until the removal reaches a branch this machine accepted before, the key is still a recipient there, so every secret added or rotated on that branch is encrypted to it and readable by its owner. Loads on a never-accepted branch stay history, so they never add trust, and a vault there listing the key again never drops the removal.
-   - **Re-adding.** A newer vault from a trusted signer that lists the key again where the listing rule applies re-adds it. So does `murk trust --re-add` naming the key (the way out when the branch that made the removal is abandoned). A save over an older revision that still lists the key is refused where the listing rule applies, with a message to update to the vault that removed it. A save that adds the key itself (`circle authorize`) re-adds it on purpose.
+   - **Re-adding.** Only these clear the record, run by this release on this machine: this machine's own save that adds the key (`circle authorize`), `murk trust --re-add` naming the key, and the acceptance of another vault at this path. No load clears it, whatever its generation, and no merge does. `murk trust --re-add` for a key that the vault does not list clears the record and writes nothing, so a machine can consent before the re-add arrives. A save over an older revision that still lists the key is refused where the listing rule applies, with a message to update to the vault that removed it.
+   - **The sidecar copy.** The sidecar keeps a copy of the removal records, and every read of the pin lays that copy over the pin file (see [The sidecar](#the-sidecar)). So a record that an older murk erased from the pin file still applies.
    - **Merges.** A merge judges removals on every branch (see [Removed keys in a merge](#removed-keys-in-a-merge)). A removal recorded before `removed_on` existed applies everywhere ([B7](#b7-pins-written-before-014)).
 9. **Counter.** When the pin's overall mark is above 0, `generation` may be at most 1,000,000 above it. Above that, the vault is refused until `murk trust`.
    - **Hard limit.** A `generation` above 2^53 − 1 (the largest integer every JSON reader holds exactly) is refused as tampering, everywhere, and `murk trust` does not accept it. A vault at exactly 2^53 − 1 can still be accepted (through `murk trust`, say).
    - **Writes near the limit.** A save or keyed merge that would be numbered above the limit is refused before anything is written (a merge stops as a conflict and the working file is left as ours), so neither ever writes a vault that every machine refuses. A merge without a key never raises the counter itself: it keeps ours'.
    - **Recovery.** To write again, restore an earlier vault (from git, or an earlier copy outside git) and run `murk trust`. That is enough outside git, where `murk trust` lowers the overall mark. In a git checkout it lowers only the branch's mark, and a save is numbered from the pin's overall mark. So on a machine that accepted a vault at 2^53 − 1 there, every save and keyed merge stays refused until that machine's pin file is deleted (the refusal names it) and `murk trust` is run again.
    - **Forks.** The pin keeps a fingerprint (the first 16 bytes of the SHA-256 of the signature's base64 text, as hex) of the vault accepted at each branch's mark, and outside git at the overall mark. A different vault with the same generation on that branch is a fork: refused until `murk trust`. Two saves with the same counter on different branches are normal (two people saving from one revision), and the merge driver combines them.
+10. **Revoked agent grants.** A key is **tombstoned** on this machine when it has a revocation id, in the vault's `revoked_grants` (see [Meta](#meta)) or the sidecar's `revoked_grants_seen`, that the sidecar's `readmitted_grants` does not hold for it. On a machine with no pin, only the vault's own set counts.
+    - **A plain recipient.** A vault that lists a tombstoned key as a recipient without a grant record for it is refused on every load, current or history.
+    - **A grant.** A vault that holds a grant record (with its recipient entry) or an `agents` entry for a tombstoned key is refused on a current load, by `murk trust`, by every save and by the keyed merge result check. `circle authorize` refuses a tombstoned key.
+    - **History.** A history load of such a vault, which lists no tombstoned plain recipient, succeeds with a warning on stderr: "P holds a grant for K, which this machine holds as revoked (revocation ids …). It was read as history. A save, a merge or `murk trust` that keeps this grant is refused." It records no revocation id and no sighting.
+    - **Recovery.** Only `murk trust --re-add KEY` lifts these refusals (see [Accepting a vault: `murk trust`](#accepting-a-vault-murk-trust)). Plain `murk trust` does not accept them.
+    - Rule 5 still applies: a key in the pin's `grants` that is listed as a recipient without a current grant record is refused, so a save by murk 0.15 or earlier that dropped the set is still refused on a machine that saw the grant.
 
 ### Current and history loads
 
@@ -480,11 +499,11 @@ Reviewing a pull request from a trusted signer therefore never trusts what it ad
 
 ### What a load records
 
-A current load updates the pin: `trusted` becomes its non-grant recipients, `groups` is replaced, the counters move up, and the signer's verifying key and the registry entries of the vault's trusted recipients are recorded in `signers` where none was pinned. Keys that a current load drops from `trusted` are recorded in `removed` (rule 8).
+A current load updates the pin: `trusted` becomes its non-grant recipients, `groups` is replaced, the counters move up, and the signer's verifying key and the registry entries of the vault's trusted recipients are recorded in `signers` where none was pinned. Keys that a current load drops from `trusted` are recorded in `removed` (rule 8). In the sidecar, a current load adds the vault's `revoked_grants` to `revoked_grants_seen`, records a sighting of each grant key on the branch checked out (rule 10 and [Meta](#meta)), and records the members of each group the vault deleted in `deleted_groups`.
 
 A history load only narrows the pin. It adds grant keys to `grants`, raises the mark of a branch accepted before (it never gives a branch its first mark), and keeps `was_signed`. It never adds a trusted signer, a verifying key or a group member, so reading history (another branch, a detached HEAD, `murk diff`) never adds trust.
 
-When the trust came from `MURK_TRUSTED_SIGNERS`, the pin's `trusted`, `groups`, `signers`, `added_by` and `removed` are left unchanged, so the variable never widens trust that outlives it. A pin write that fails during a load only warns. `murk trust` and `murk init` record their result like a current load. The machine's own save changes `trusted` only by what the save itself added and removed, compared with the file it replaced. So a save over a vault read as history does not trust the keys that vault carried. Nothing from a refused or unverified vault is ever written to the pin.
+When the trust came from `MURK_TRUSTED_SIGNERS`, the pin's `trusted`, `groups`, `signers`, `added_by`, `removed`, `removed_on` and `removed_at_commit`, and the sidecar's `revoked_grants_seen`, `grants_live_on` and `deleted_groups`, are left unchanged, so the variable never widens trust that outlives it. Such a load never records a removal either. A runner that loads only with the variable therefore has no removal record. A pin write that fails during a load only warns. `murk trust` and `murk init` record their result like a current load. The machine's own save changes `trusted` only by what the save itself added and removed, compared with the file it replaced. So a save over a vault read as history does not trust the keys that vault carried. Nothing from a refused or unverified vault is ever written to the pin.
 
 ### Registry entries
 
@@ -521,6 +540,42 @@ The pin has these fields:
 
 `removed`, `removed_on` and `removed_at_commit` belong to one vault: accepting a vault with another `vault_id` clears them.
 
+### The sidecar
+
+Next to each pin, murk keeps a sidecar file, `<hash>.lineage.json`, under the pin's lock. murk 0.15 and earlier never open it, so an older murk that rewrites the pin cannot drop what it holds. Every pin write writes the sidecar first and the pin second, both atomically. The sidecar has these fields:
+
+- `v`: the sidecar version, 1
+- `vault_id`: the pin's vault id when this release last wrote the sidecar
+- `repo_dir`, `path` and `identity_siblings`: where this vault lives, and the paths that `murk trust --shares-identity-with` retired (rule 6)
+- `deleted_groups`: group name → its members when an accepted vault deleted it (rule 7)
+- `removals`: canonical key → a copy of the pin's three removal facts for it (`at`, `on`, `at_commit`; rule 8)
+- `revoked_grants_seen`: canonical grant key → every revocation id this machine accepted on a current load or own save (rule 10)
+- `readmitted_grants`: canonical grant key → the revocation ids `murk trust --re-add` re-admitted
+- `grants_live_on`: canonical grant key → branch (`""` outside git) → the commit checked out at the latest current load, own save or `murk trust` there whose vault held the key's grant record (`""` with no commit)
+
+These rules apply to the sidecar:
+
+- **Copy on read.** When the pin file holds a removal record that the sidecar's `removals` lacks, or holds one with a larger generation, a wider or absent `on`, or another `at_commit`, a read of the pin takes the pin lock and writes the sidecar. The pin file stays as it is. A read that finds nothing to copy takes no lock and writes nothing. Under `MURK_NO_SIGNER_PIN` there is no copy. When the sidecar cannot be written, murk warns once ("cannot copy the removal records for P into F: E. An older murk component under this HOME can still erase them") and the command goes on.
+- **Overlay.** Every read of the pin lays `removals` over the pin file before any rule sees it. A key the pin file lacks gets the sidecar's record. For a key in both, the generation is the larger of the two, `removed_on` is the union of both sets (no entry on either side means every branch), and the pin file's `removed_at_commit` is kept when it has one. Then every key in `removed` leaves `trusted`. The overlay only narrows: it never removes a record and never adds trust.
+- **Divergence.** When the overlay restores a key that the pin file no longer records as removed, murk keeps it removed and warns once: "the trust pin for P no longer records K as removed, but the copy of this release does. An older murk component (0.15 or earlier) under this HOME probably accepted a vault that lists them". The warning names the components to look for and `murk trust --re-add`. The next pin write mirrors the record back into the pin file.
+- **Another vault.** A sidecar whose `vault_id` differs from the pin's is ignored, with a warning, and the next write replaces it.
+- **No pin file.** A sidecar whose pin file is missing applies when the vault at the path has the sidecar's `vault_id`. It then counts as a pin with its removal records and no trust decision, so a load still needs `murk trust`.
+
+### Publication and locks
+
+There are two locks: the **vault lock**, `<vault>.lock` next to the vault file, one for each checkout path, and the **pin lock**, `<hash>.lock` next to the pin, which every worktree of a repository shares.
+
+- A thread takes the vault lock before the pin lock, never the reverse, and holds at most one of each.
+- While it holds the pin lock, it takes no other lock and runs no signature, prompt or editor. A request for a lock while the thread holds the pin lock is an error ("internal error: lock order …"), not a wait.
+
+A save (`save_vault`, and so every write command and the bindings' writes), the keyed merge driver's write of `%A`, and the re-sign of `murk trust` publish in three steps:
+
+1. **Snapshot.** Read the pin, the sidecar and the target file (the vault file, or `%A`), and keep their bytes, with the branch and the commit checked out, as a token.
+2. **Prepare.** Without the pin lock, run every check against the snapshot, build the meta, encrypt and sign, and write the result to a temporary file next to the target.
+3. **Publish.** Take the pin lock and read the token again. When it is unchanged, rename the temporary file over the target. A save then records itself in the pin and the sidecar under the same lock. A merge writes no pin: the next load records its result. When the pin, the sidecar, the branch or the commit changed, release the lock and start again from step 1. After 3 attempts, stop and write nothing ("the trust state for P changed 3 times while murk was saving. Nothing was written. Run the command again."). When the target file changed, stop at once and write nothing ("P changed on disk while murk was saving, so murk did not overwrite it."), because the change the caller asked for was made to the file as it was.
+
+A restart keeps the vault that the command loaded and changed. Every CLI write and binding write holds the vault lock from its load to its exit, so no murk writer changes the vault file at that path meanwhile.
+
 ### Accepting a vault: `murk trust`
 
 `murk trust` is the explicit trust step. It is needed:
@@ -540,13 +595,17 @@ Then it asks (or takes `--yes`). Accepting confirms only the signer's signing ke
 
 What `murk trust` does depends on the vault it accepts. A murk 0.13 file is handled as in [B6](#b6-murk-trust-on-013-files). For other files:
 
-- **An unsigned or stripped vault.** `murk trust` re-signs it with the key you run it with. The re-signing is a save: a 3.0 vault numbered past the mark, and the branch gets a mark, so commit the result. A key that cannot sign can accept only a stripped vault, by forgetting that a signed version was seen.
+- **An unsigned or stripped vault.** `murk trust` re-signs it with the key you run it with, when that key can sign. The re-signing is a save: a 3.0 vault numbered past the mark, and the branch gets a mark, so commit the result. A key that cannot sign accepts an unsigned vault without signing it: the first acceptance, or a recipient, grant or group membership that rule 1 refused. It accepts a stripped vault by forgetting that a signed version was seen. Where only a signature makes the vault acceptable (an unsigned vault under `MURK_TRUSTED_SIGNERS`, say), it refuses: "this vault must be re-signed to be trusted, and your key cannot sign".
 - **Another vault's file.** Accepting it replaces the trust state for that vault.
 - **Anything else** is pinned as shown, a rollback or fork acceptance resetting the branch's mark.
 
-`murk trust` refuses vaults signed by a grant key, with a changed signing key, or with a `generation` above 2^53 − 1. It also refuses to run for a grant identity.
+`murk trust` refuses vaults signed by a grant key, with a changed signing key, or with a `generation` above 2^53 − 1. It also refuses to run for a grant identity. It never accepts a vault that `MURK_EXPECTED_VAULT` refuses, two vault files with one vault id (see `--shares-identity-with` below), or a revoked agent grant (see `--re-add` below).
 
-A vault signed by a key recorded in `removed` is refused on every branch, and one that lists such a key is refused where its removal applies (rule 8). It is accepted only when each such key is named with `--re-add KEY` (its public key or its name in the vault). Naming it takes the key out of `removed`.
+A vault signed by a key recorded in `removed` is refused on every branch, and one that lists such a key is refused where its removal applies (rule 8). It is accepted only when each such key is named with `--re-add KEY` (its public key or its name in the vault). Naming it takes the key out of `removed`. When the vault does not list a named key, `murk trust --re-add` shows that the vault does not list it, asks, clears the record and writes nothing: "K can be listed again in P on this machine. The vault file is unchanged".
+
+`--re-add KEY` also re-admits a revoked agent grant (rule 10). murk shows the key, the vault's signer, and each revocation id this machine holds for the key, with where it comes from (the vault's set, or seen on this machine). After confirmation it adds exactly those ids to `readmitted_grants`, takes the key out of the pin's `grants`, and removes every sighting of the key from `grants_live_on`. When the vault lists the key and its own set holds an id for it, murk signs the vault again without the re-admitted ids. A key that cannot sign is refused there. When the vault does not list the key, the vault file is not written. A later revocation of the key gets a new id, which still counts. A name that is neither a removed key nor a revoked grant is an error.
+
+`--shares-identity-with OTHER` chooses this path when another vault file in the checkout has the same vault id (rule 6). OTHER must be a vault file in the same checkout with the same header vault id. murk records OTHER in the sidecar's `identity_siblings`, so it refuses OTHER on this machine from then on, and deletes OTHER's own pin and sidecar when they hold the same vault id. It does not delete the file OTHER.
 
 To revert a vault on purpose, accept the older file with `murk trust` and make a write. The steps are in [Rollback and deliberate reverts](https://murk.interrupted.sh/concepts/recipients-signatures/#rollback-and-deliberate-reverts).
 
@@ -554,13 +613,15 @@ To revert a vault on purpose, accept the older file with `murk trust` and make a
 
 `MURK_TRUSTED_SIGNERS` and an agent grant's key-file anchor use one entry format. An age signer is `age1…:<verifying key>` (the recipient, a colon, the base64 Ed25519 verifying key). An ssh-ed25519 signer is its public key line. `murk trust --print-key` prints the entry for the current key. In `MURK_TRUSTED_SIGNERS` entries are separated by commas or newlines. An invalid entry, or an age key without its verifying key, is an error.
 
-**CI.** A fresh runner has no pin. `MURK_TRUSTED_SIGNERS` (from a protected CI secret, in the entry format above) names the keys allowed to sign and the verifying keys their signatures must verify under. Never set it in a workflow file in the repository: that file is repository content, so whoever can push can choose the signers. Nothing from it is written to the pin as trust. Without a pin there is no rollback mark on a runner.
+**CI.** A fresh runner has no pin. `MURK_TRUSTED_SIGNERS` (from a protected CI secret, in the entry format above) names the keys allowed to sign and the verifying keys their signatures must verify under. Never set it in a workflow file in the repository: that file is repository content, so whoever can push can choose the signers. Nothing from it is written to the pin as trust, and no load under it records a removal. Without a pin there is no rollback mark on a runner.
 
-**Opting out.** `MURK_NO_SIGNER_PIN` (present with any value) stops murk creating or writing the pin. It does not stop murk reading a pin that already exists: every rule then applies against that pin, and the pin stays as it was. `murk verify` says that it read the pin and did not update it. With no pin, or with no home directory, murk does not switch the trust check off: every signed vault is refused unless `MURK_TRUSTED_SIGNERS` names its signer, and rollback and stripped-signature detection are off.
+`MURK_EXPECTED_VAULT=<vault id>:<minimum generation>` (from a protected CI variable) names the vault a runner may load: a 32-character lowercase hex vault id, and a whole number from 0 to 2^53 − 1. Every keyed load, every grant load (after the signature check, before any record is decrypted) and every merge side is refused when its `vault_id` differs or its `generation` is below the minimum, with or without a pin. The refusal comes after the pin's own refusals. `murk trust` cannot accept it. A value that does not parse is an error. So is a value with three parts ("this release of murk does not check a revision"), and a value that is set but empty ("set but empty — a CI secret or variable is usually missing"): to turn the check off, unset the variable. `murk verify` prints `<vault id>:<generation>` of the vault it checked on stdout, when it does not refuse the vault and the vault has an id.
+
+**Opting out.** `MURK_NO_SIGNER_PIN` (present with any value) stops murk creating or writing the pin and its sidecar, the copy on read included. It does not stop murk reading a pin that already exists: every rule then applies against that pin and its sidecar, and both stay as they were. `murk verify` says that it read the pin and did not update it. With no pin, or with no home directory, murk does not switch the trust check off: every signed vault is refused unless `MURK_TRUSTED_SIGNERS` names its signer, and rollback and stripped-signature detection are off.
 
 ### Historical revisions
 
-`trust::assess_revision` checks an older revision against `ever_trusted` without rollback or group checks, and never writes the pin, so a revision signed by a teammate revoked since still verifies. The merge driver uses it for the common ancestor. `murk diff` uses it for the revision it compares against.
+`trust::assess_revision` checks an older revision against `ever_trusted` without rollback or group checks, and never writes the pin, so a revision signed by a teammate revoked since still verifies. `murk diff` uses it for the revision it compares against. The merge driver judges the common ancestor by the current anchor instead (see [Keyed merge](#keyed-merge)).
 
 The revision is verified before anything in it is decrypted. murk checks its MAC and signature as a load does and refuses a revision that fails. It then checks the signer against the local trust pin, which is read and never extended. The signer must be one this machine ever trusted, with its pinned verifying key.
 
@@ -666,10 +727,12 @@ A copy that carries `murk-grant-expires` stops working at that expiry, whatever 
 ### What must hold
 
 - The driver never merges a vault as text, and never exits 0 with a file murk cannot read as a vault.
-- An input that fails authentication makes the merge a conflict. Nothing is re-MACed or signed, so the written file does not load where it differs from ours.
-- A keyed merge never writes a vault that every machine would refuse.
+- A keyed merge in which the ancestor, ours or theirs fails authentication writes nothing: the working file stays ours byte for byte, nothing is signed, and the pin is unchanged. An input that murk cannot parse is the one exception: the driver writes conflict markers, which never load as a vault.
+- An ancestor is an authority on what changed only when this machine would accept it now. Without an authority, every difference between ours and theirs is a conflict.
+- A keyed merge never signs a vault that this machine would refuse, and never writes a vault that every machine would refuse.
 - A clean merge without a key never changes anything the meta covers. A keyless merge with field conflicts exits 1 and may write changed covered fields under ours' MAC, so the file does not load where its covered content differs from ours.
-- A merge judges key removals on every branch.
+- A merge judges key removals and revoked agent grants on every branch.
+- A merge writes no pin.
 
 ### Inputs
 
@@ -685,30 +748,41 @@ A vault merge that would exit 0 first reads the written file back. If it does no
 
 **With a key** (`MURK_KEY`, `MURK_KEY_FILE`, or the stored key of the vault at `%P`, found as every other command finds it and not looked up in strict and agent mode), the driver checks both sides against the trust pin of `PATH` (git's `%P`, default `.murk`).
 
-A keyed merge first authenticates the common ancestor (MAC, signature, a signer this machine ever trusted; see [Historical revisions](#historical-revisions)). An ancestor from before 0.14 is covered in [B5](#b5-merges-with-013-inputs).
+A keyed merge authenticates all three inputs before it merges anything.
 
-The driver then checks ours and theirs the way a load does:
+**The ancestor.** The common ancestor must pass its MAC check (when the merging key can read it) and, when signed, its signature check under the key pinned for its signer. An ancestor that fails is refused (see **A failed input** below). An ancestor that passes is an **authority** only when the merging key can read it, it is signed, and `trust::ancestor_verdict` accepts it: its signer is in the current trusted set (the pin's, or `MURK_TRUSTED_SIGNERS`), was not recorded as removed, and it is the same vault as the pin and both sides. With an authority the merge is three-way. Without one it is **two-way**: the result is ours, every entry where ours and theirs differ is a conflict ("ours and theirs differ here, and no authority shows which side changed it, so the merge keeps ours"), and nothing is signed. The first conflict names the reason ("the common ancestor is not an authority on what changed (…)"). One exception: when ours and theirs are both murk 0.13 files (no `vault_id`, `generation` 0), the merge is three-way over the ancestor as it is. That choice looks at ours and theirs only, never at the ancestor. An ancestor from before 0.14 is covered in [B5](#b5-merges-with-013-inputs).
+
+**The sides.** The driver then checks ours and theirs the way a load does:
 
 - MAC and valid signature,
 - a signer this machine trusts, and not a grant,
-- the same `vault_id` (which two vaults copied from one 0.13 vault share, see [B4](#b4-vaults-from-murk-013)), and
-- for a side that changed the vault, a `generation` above the ancestor's.
+- the same `vault_id` (which two vaults copied from one 0.13 vault share, see [B4](#b4-vaults-from-murk-013)), and no second vault file with that id in the checkout (rule 6),
+- `MURK_EXPECTED_VAULT`, when it is set (rule 6),
+- for a side that changed the vault, a `generation` above the ancestor's ("rolled back: it changed the vault but its generation … is not above the common ancestor's …").
 
-Group changes are judged against the authenticated ancestor's membership. A side's `generation` is compared with the ancestor's, not with the pin's mark. A branch saved on another machine legitimately carries a lower counter than this machine has accepted, and its content enters the merge only as its change from the ancestor. A side (or ancestor) that fails is a conflict naming it. The driver then exits 1 and re-MACs and signs nothing: the written file holds the merge of both sides' secrets and recipients, keeps ours' meta and has no signature, so it does not load where it differs from ours. A side written by murk 0.13 is judged as [B5](#b5-merges-with-013-inputs) says.
+Group changes are judged against the authority ancestor's membership. A side's `generation` is compared with the ancestor's, not with the pin's mark. A branch saved on another machine legitimately carries a lower counter than this machine has accepted, and its content enters the merge only as its change from the ancestor. A side written by murk 0.13 is judged as [B5](#b5-merges-with-013-inputs) says.
 
-A merge that would change a group's membership relative to ours is a conflict when the merging key is not a member of that group, since every machine would refuse the result signed by it. Otherwise the merged vault gets a fresh MAC, `generation = max(ours, theirs, highest accepted) + 1`, and a v2 signature by the merging key (none if that key cannot sign). A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (rule 9 under [Trust](#trust)).
+**A failed input.** When the ancestor, ours or theirs fails, or the sides are different vaults, the driver writes nothing and exits 1. The working file stays ours byte for byte, and the message names the input ("theirs failed its authenticity check: …"). Nothing is signed and the pin is unchanged. An input that does not parse is handled under [Inputs](#inputs): conflict markers, which never load, so `git add` cannot settle the file on one side by accident.
+
+**The result.** A merge that would change a group's membership relative to ours is a conflict when the merging key is not a member of that group. A merge that leaves a group holding values with no member who is a current recipient is a conflict too ("after the merge, group G has no member who is a recipient …"): a merge has no `--allow-orphan`. Otherwise the merged vault gets a fresh MAC, `generation = max(ours, theirs, highest accepted) + 1`, and a v2 signature by the merging key (none if that key cannot sign). Before it signs, the driver judges the result the way a load on this machine would (`trust::merge_result_refusal`). When the load would refuse it, the driver writes nothing and exits 1: "this machine would refuse the merged vault, so murk does not sign it: …". This includes a member's first signed write: a merging key whose own signing key this machine has not confirmed yet cannot sign a merge. One ordinary save first confirms it. A keyed merge that would be numbered above 2^53 − 1 exits 1 and writes nothing, so the working file stays OURS (rule 9 under [Trust](#trust)).
+
+**Publication.** The driver writes `%A` under the pin lock, as [Publication and locks](#publication-and-locks) states, and writes no pin. The next load records the result as any load does.
 
 ### Removed keys in a merge
 
 A merge judges removals on every branch, whichever branch it merges into (rule 8 under [Trust](#trust)).
 
 - A side signed by a key this machine recorded as removed is refused.
-- A side that lists a removed key that the ancestor does not list, at or below the generation the key was removed at, is an older revision adding the key again. It is refused as rolled back.
-- A side that only still lists the key (a branch forked before the removal) passes this check. The merge then reports a conflict, because only one side removed a recipient. Take one side and redo the other side's change with murk.
+- A side that lists a removed key that the authority ancestor does not list is refused, at any generation. At or below the generation of the removal it is refused as rolled back. Above it, the message says that the side may re-add the key on purpose or be a stale fork, and gives the two ways to accept a deliberate re-add (keep that side and run `murk trust --re-add`, or `murk circle authorize` on this branch first). A side measured against a two-way ancestor has no authority ancestor, so it is refused whenever it lists a removed key.
+- A side that only still lists the key because the authority ancestor did (a branch forked before the removal) passes this check. The merge then reports a conflict, because only one side removed a recipient. Take one side and redo the other side's change with murk.
 
-If the merged recipients still list a removed key, some side numbered above the removal must list it. Otherwise the merge is a conflict and nothing is signed. A side's `generation` may be below the pin's mark. Let M be the higher of the pin's overall mark and the ancestor's `generation`. When M is above 0, a side's `generation` may be at most 1,000,000 above M. A side that sets a secret back to an older ciphertext, signed by a trusted signer, looks the same as a normal edit by that signer, so the merge accepts it.
+A merged result that lists a removed key where the removal applies is a conflict, whatever the sides' generations ("K was removed from this vault at generation G on this machine, and the merged result lists them …"). Elsewhere (a branch this machine accepted before the removal reached it), some side numbered above the removal must list it, or the merge is a conflict. Nothing is signed in either case. A side's `generation` may be below the pin's mark. Let M be the higher of the pin's overall mark and the ancestor's `generation`. When M is above 0, a side's `generation` may be at most 1,000,000 above M. A side that sets a secret back to an older ciphertext, signed by a trusted signer, looks the same as a normal edit by that signer, so the merge accepts it.
 
 A removal made on a branch while the removed member kept writing on another needs a manual recovery. The steps are in [Merging a removal into a branch the removed member wrote to](https://murk.interrupted.sh/guides/offboarding/#merging-a-removal-into-a-branch-the-removed-member-wrote-to).
+
+### Revoked agent grants in a merge
+
+A keyed merge writes the union of both sides' `revoked_grants` (see [Meta](#meta)), and gives an id to a grant record that the clean result drops. A result that holds a grant record for a key tombstoned on this machine (rule 10), or lists such a key as a plain recipient, is a conflict and nothing is signed ("the merged result holds agent grant key K, which this machine holds as revoked …").
 
 ### Keyless merge
 
@@ -723,13 +797,22 @@ Then you abort the merge and redo it with a key. A clean keyless merge keeps OUR
 
 ### Refusals and conflicts
 
-The refusals that write nothing (no key, the save-counter limit, an unaccepted 0.13 side, an agent grant key, a failed write of the merged vault, and any other error of the vault merge) leave OURS unchanged without markers. Each says so plainly: nothing was written, the working file is still ours, theirs was not merged, and committing it as it is drops their changes. If a failed write left the file different from ours, the message says that it may hold part of the merge instead. It then says how to finish (set the key and redo the merge, or keep one side and redo the other side's changes). A merge with field conflicts exits 1 and says that the file keeps ours for each conflict, keeps ours' integrity data, and must not be committed as it is.
+The refusals that write nothing (no key, the save-counter limit, an unaccepted 0.13 side, an agent grant key, an input that fails authentication, a result this machine would refuse, a failed write of the merged vault, and any other error of the vault merge) leave OURS unchanged without markers. Each says so plainly: nothing was written, the working file is still ours, theirs was not merged, and committing it as it is drops their changes. If a failed write left the file different from ours, the message says that it may hold part of the merge instead. It then says how to finish (set the key and redo the merge, or keep one side and redo the other side's changes). A merge with field conflicts exits 1 and says that the file keeps ours for each conflict, keeps ours' integrity data, and must not be committed as it is.
 
 ### The driver in git
 
 git passes the vault's path as `%P` (`murk merge-driver -- %O %A %B %P`) so the driver reads the right trust pin and finds that vault's stored key. A driver line without `%P` is covered in [B11](#b11-merge-driver-lines-from-before-014).
 
-A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served. A cherry-pick or `git apply --3way` of commits from history replays their genuine delta. That is git's semantics, not something the driver can tell apart. The driver also takes git's merge base as given and cannot tell that ours already contains theirs. A branch that carries an earlier genuine vault file on an older parent commit merges cleanly and applies that change again. A genuine revision from a stale fork merged as theirs reverts the changes ours made since ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 10 and 11).
+A merge done without the driver (GitHub's web merge, merge queues) either conflicts textually or produces a vault whose MAC and signature fail, so it is never served.
+
+**Cherry-pick and revert.** A cherry-pick, a revert and `git apply --3way` of a vault commit run the driver with the commit's parent (for a revert, the commit itself) as the common ancestor.
+
+- When that ancestor is an authority, the change applies as in git, and the merging key signs the result. That includes a change this branch already contains or later undid: it comes back.
+- When the ancestor is not an authority, the merge is two-way and keeps ours.
+- When the side's vault file is older than the ancestor's (a revert commit cherry-picked, or a file restored over later vault work), the side is refused as rolled back, and the working file stays ours byte for byte. So `git revert` of a vault commit that a later vault commit follows stops with a conflict.
+- Reverting the newest vault commit needs no merge: git writes the older file, and the next load refuses it as rolled back until `murk trust` (rule 6).
+
+The driver also takes git's merge base as given and cannot tell that ours already contains theirs. A branch that carries an earlier genuine vault file on an older parent commit merges cleanly and applies that change again. A genuine revision from a stale fork merged as theirs reverts the changes ours made since ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 8, 10 and 11).
 
 ---
 
@@ -744,7 +827,8 @@ A merge done without the driver (GitHub's web merge, merge queues) either confli
   - A vault signed by a key the writer listed as a recipient, unless its signer is trusted on this machine.
   - Another vault's file, by its id, unless both vaults were copied from one 0.13 vault and share it ([B4](#b4-vaults-from-murk-013)).
   - An older revision with a lower counter, on a branch where this machine has a counter mark.
-  - An unsigned vault, when the loading key can sign. A key that cannot sign (ssh-rsa, hardware or plugin) loads it with a warning instead, unless `MURK_TRUSTED_SIGNERS` is set (see [Trust](#trust)).
+  - An unsigned vault, when the loading key can sign or `MURK_TRUSTED_SIGNERS` is set. A key that cannot sign (ssh-rsa, hardware or plugin) loads it with a warning instead, once this machine has accepted the vault, and refuses one that adds a recipient, a grant or a group member this machine has not accepted (see [Trust](#trust), rule 1).
+  - A vault whose id another tracked vault file in the checkout shares, and with `MURK_EXPECTED_VAULT` set, a vault it does not name.
 
   A murk 0.13 revision has no counter, so [B4](#b4-vaults-from-murk-013) states where murk refuses it.
 
@@ -754,7 +838,8 @@ A merge done without the driver (GitHub's web merge, merge queues) either confli
 - Historical access after revocation: old `.murk` versions remain in git history. Always rotate credentials when revoking.
 - Fine-grained audit logging: use a secrets server for regulated environments.
 - Malicious recipients: any authorized recipient can decrypt all shared secrets.
-- A genuine revision from a stale fork with a higher counter, and a merge that applies again a change ours already undid ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 10 and 11).
+- A genuine revision from a stale fork with a higher counter, and a merge or cherry-pick that applies again a change ours already undid ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 8, 10 and 11). On a machine that recorded a removal, or saw a grant revoked, such a revision does not bring that member or grant back.
+- An older murk component (0.15 or earlier) on the same machine: it does not check removal records or revoked grants, and its saves drop the vault's record of revoked grants.
 - A process that runs as your OS user. It can read your key store and edit your trust pin. Only OS isolation contains it.
 
 **Treat your key like your SSH private key.** Never commit it. Never share it. This holds for a key file and for `MURK_KEY`.
@@ -855,9 +940,9 @@ To write on a branch before merging the upgrade, run `murk trust` there first. T
 
 ### B5. Merges with 0.13 inputs
 
-**A pre-0.14 ancestor.** An unsigned ancestor without a `vault_id` is accepted as pre-0.14 history. Its meta is not used: the sides' metas are then merged as if the ancestor were unreadable (any difference is a conflict), and group changes are judged against the pinned membership. Its secrets and policy still decide what counts as a change. A side's counter is not compared with it, since it has none.
+**A pre-0.14 ancestor.** An unsigned ancestor is not an authority (see [Keyed merge](#keyed-merge)). So when ours or theirs is a 0.14 vault, a merge over an unsigned pre-0.14 ancestor is two-way: every difference conflicts, the merge keeps ours, and nothing is signed. A forged pre-0.14 ancestor, for example the parent of a commit that a teammate cherry-picks or rebases, therefore cannot set values back.
 
-Git takes the ancestor from history, so someone with write access and no key can supply a forged one, for example as the parent of a commit that a teammate cherry-picks or rebases. With an older genuine 0.14 revision as the other side, that merge sets values and the agent policy back to that revision without a conflict, and the merging key signs the result.
+When ours and theirs are both 0.13 files (no `vault_id`, `generation` 0), the merge is three-way over the ancestor as it is. A side's counter is not compared with it, since it has none.
 
 **A 0.13 side.** A side written by murk 0.13 (no `vault_id` and no `generation`) carries no authenticated identity or order. The driver judges it like a load of it on the branch being merged into ([B4](#b4-vaults-from-murk-013)).
 

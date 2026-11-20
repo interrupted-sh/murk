@@ -492,10 +492,11 @@ pub enum Command {
         /// signing-key fingerprint (for teammates to confirm), then exit
         #[arg(long, conflicts_with = "yes")]
         print_key: bool,
-        /// Trust a key this machine recorded as removed from the vault again
-        /// (its public key, or its name in the vault). Repeat for each key.
-        /// A vault signed by or listing a removed key is never trusted
-        /// without it
+        /// Trust a key this machine recorded as removed from the vault, or
+        /// holds as a revoked agent grant, again (its public key, or its name
+        /// in the vault). Repeat for each key. A vault signed by or listing a
+        /// removed key, or holding a revoked grant, is never trusted without
+        /// it
         #[arg(long = "re-add", value_name = "KEY", conflicts_with = "print_key")]
         re_add: Vec<String>,
         /// Another vault file in this checkout with the same vault id. murk
