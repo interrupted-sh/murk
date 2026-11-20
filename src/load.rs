@@ -585,6 +585,7 @@ fn inspect_as_grant(
             env_signers: None,
             external: Some(anchor),
             expected,
+            shared_with: Vec::new(),
         },
         signer_vk: None,
         grant: true,
@@ -692,15 +693,18 @@ impl InspectedVault {
         })
     }
 
-    /// Judge this vault again as if the removed keys in `readmit` (canonical)
-    /// had never been removed: `murk trust --re-add`.
-    pub fn readmit(
+    /// Judge this vault again for `murk trust`: as if the removed keys in
+    /// `readmit` (canonical) had never been removed (`--re-add`), and with
+    /// `shares_with` as the other path of its vault id the user reviewed
+    /// (`--shares-identity-with`, a `/`-separated path in the checkout).
+    pub fn judge_for_trust(
         &mut self,
         vault_path: &str,
         readmit: &BTreeSet<String>,
+        shares_with: Option<&str>,
     ) -> Result<(), MurkError> {
-        self.assessment =
-            trust::assess(vault_path, &self.loaded(), None, readmit).map_err(MurkError::Trust)?;
+        self.assessment = trust::assess(vault_path, &self.loaded(), None, readmit, shares_with)
+            .map_err(MurkError::Trust)?;
         Ok(())
     }
 
@@ -717,7 +721,12 @@ impl InspectedVault {
         self,
         vault_path: &str,
     ) -> Result<(types::Vault, types::Murk, crypto::MurkIdentity), MurkError> {
-        let mut warnings = Vec::new();
+        let mut warnings: Vec<String> = self
+            .assessment
+            .shared_with
+            .iter()
+            .map(|other| trust::shared_identity_warning(vault_path, other))
+            .collect();
         match &self.assessment.verdict {
             trust::Verdict::Refused(_) => {
                 let msg = self.refusal_message(vault_path).unwrap_or_default();
@@ -751,6 +760,7 @@ impl InspectedVault {
                         pin.removed_on = prior.removed_on;
                         pin.removed_at_commit = prior.removed_at_commit;
                         pin.groups = prior.groups;
+                        pin.sidecar.deleted_groups = prior.sidecar.deleted_groups;
                         pin.accepted_pre_upgrade = prior.accepted_pre_upgrade;
                     }
                     Ok((fresh != Some(&pin)).then_some(pin))
@@ -822,12 +832,19 @@ fn inspect_read(
             env_signers: None,
             external: None,
             expected: None,
+            shared_with: Vec::new(),
         },
         signer_vk,
         grant: false,
     };
-    inspected.assessment = trust::assess(vault_path, &inspected.loaded(), None, &BTreeSet::new())
-        .map_err(MurkError::Trust)?;
+    inspected.assessment = trust::assess(
+        vault_path,
+        &inspected.loaded(),
+        None,
+        &BTreeSet::new(),
+        None,
+    )
+    .map_err(MurkError::Trust)?;
     let pubkey = inspected.identity.pubkey_string()?;
     drop_ghost_grants(&inspected.vault, &mut inspected.murk, &pubkey);
     Ok(inspected)

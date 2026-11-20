@@ -1,0 +1,11 @@
+--- a/src/commands/trust.rs
++++ b/src/commands/trust.rs
+@@ -420,7 +420,7 @@
+     let pinned_there =
+         try_or_die(murk_cli::pins::read(&other.arg)).is_some_and(|p| p.vault_id == id);
+     if pinned_there && let Some(file) = murk_cli::pins::existing_pin_path(&other.arg) {
+-        try_or_die(murk_cli::pins::remove(&file));
++        let _ = file;
+     }
+     eprintln!(
+         "{} this machine trusts the vault at {vault_path} only, and refuses {} from now on",

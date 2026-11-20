@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -999,7 +999,7 @@
+         if sidecar.identity_siblings.contains(&path) {
+             out.retired_by = Some(sidecar.path.clone());
+         }
+-        if tracked.contains(&sidecar.path) && !out.refused.contains(&sidecar.path) {
++        if !out.refused.contains(&sidecar.path) {
+             out.warned.retain(|w| *w != sidecar.path);
+             out.refused.push(sidecar.path);
+         }

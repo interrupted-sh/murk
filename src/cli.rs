@@ -498,6 +498,13 @@ pub enum Command {
         /// without it
         #[arg(long = "re-add", value_name = "KEY", conflicts_with = "print_key")]
         re_add: Vec<String>,
+        /// Another vault file in this checkout with the same vault id. murk
+        /// cannot tell two files with one vault id apart, and refuses such a
+        /// vault. Review both files, then name the other file here: this
+        /// machine trusts the vault at --vault and refuses the other path
+        /// from then on
+        #[arg(long, value_name = "PATH", conflicts_with = "print_key")]
+        shares_identity_with: Option<String>,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,

@@ -318,13 +318,14 @@ fn run() {
             yes,
             print_key,
             re_add,
+            shares_identity_with,
             vault,
         } => {
             let vault = murk_cli::resolve_vault_path(&vault);
             if print_key {
                 cmd_trust_print_key(&vault);
             } else {
-                cmd_trust(yes, &re_add, &vault);
+                cmd_trust(yes, &re_add, shares_identity_with.as_deref(), &vault);
             }
         }
         Command::Doctor { vault } => cmd_doctor(&murk_cli::resolve_vault_path(&vault)),

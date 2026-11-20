@@ -135,6 +135,16 @@ pub(crate) fn cmd_verify(vault_path: &str) {
             });
         }
     }
+    // Another tracked vault file with the same vault id, while this machine
+    // trusts the vault at this path: a load warns. A refusal is the trust
+    // finding above.
+    findings.extend(shared_identity_findings(
+        vault_path,
+        &murk_cli::trust::SharedIdentity {
+            warned: inspected.assessment.shared_with.clone(),
+            ..Default::default()
+        },
+    ));
     // The value for MURK_EXPECTED_VAULT, for a vault this key loads. It goes
     // to standard output alone, so a CI step can capture it.
     if !matches!(
@@ -484,6 +494,14 @@ pub(crate) fn cmd_doctor(vault_path: &str) {
         for issue in rotatable_issues(&vault, &orphaned, issues) {
             findings.push(rotation_finding(&issue));
         }
+        let pin = murk_cli::pins::read(vault_path).ok().flatten();
+        let shared = murk_cli::trust::shared_identity(
+            vault_path,
+            &murk_cli::trust::header_vault_id(&vault),
+            pin.as_ref(),
+            None,
+        );
+        findings.extend(shared_identity_findings(vault_path, &shared));
     }
 
     // ── Orphaned groups ──
@@ -497,4 +515,50 @@ pub(crate) fn cmd_doctor(vault_path: &str) {
     }
 
     report_findings(&findings, "repo");
+}
+
+/// Findings for other paths that share the vault id of the vault at
+/// `vault_path` (see `murk_cli::trust::shared_identity`): other tracked
+/// vault files in this checkout, and other paths' pins on this machine.
+fn shared_identity_findings(
+    vault_path: &str,
+    shared: &murk_cli::trust::SharedIdentity,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if let Some(by) = &shared.retired_by {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{vault_path} has the same vault id as {by}, and this machine trusts that vault at {by} only, so murk refuses {vault_path}"
+            ),
+            fix: Some(format!(
+                "use {by}, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {by}`"
+            )),
+        });
+    }
+    for other in shared
+        .refused
+        .iter()
+        .filter(|o| shared.retired_by.as_ref() != Some(o))
+    {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{other} has the same vault id as {vault_path}, so murk refuses {vault_path} on this machine"
+            ),
+            fix: Some(format!(
+                "remove the other file, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {other}`"
+            )),
+        });
+    }
+    for other in &shared.warned {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{other} has the same vault id as {vault_path}. This machine trusts this vault at {vault_path} only"
+            ),
+            fix: Some(format!("remove {other} if it is a copy")),
+        });
+    }
+    findings
 }

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -903,7 +903,7 @@
+     );
+     let mut shared_with = Vec::new();
+     let final_refusal = matches!(&verdict, Verdict::Refused(r) if !r.acceptable());
+-    if shared.refuses() {
++    if false && shared.refuses() {
+         if !final_refusal {
+             verdict = Verdict::Refused(Refusal::SharedVaultId {
+                 others: shared.refused,

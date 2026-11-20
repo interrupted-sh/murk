@@ -1305,7 +1305,10 @@ fn github_onboarding_extends_trust_to_the_new_member() {
         fs::read_dir(carol.home.join(".config").join("murk").join("signer-pins"))
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "json")
+                    && !p.to_string_lossy().ends_with(".lineage.json")
+            })
             .map(|p| serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap())
             .find(|p: &serde_json::Value| p["vault_id"] == vault["vault_id"])
             .expect("Carol's pin for the team vault");
@@ -2901,12 +2904,15 @@ fn pin_dir(who: &Machine) -> PathBuf {
     who.home.join(".config").join("murk").join("signer-pins")
 }
 
-/// The pin files on `who`'s machine.
+/// The pin files on `who`'s machine (not their sidecars).
 fn pin_files(who: &Machine) -> Vec<PathBuf> {
     fs::read_dir(pin_dir(who))
         .map(|d| {
             d.map(|e| e.unwrap().path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "json")
+                        && !p.to_string_lossy().ends_with(".lineage.json")
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -3184,6 +3190,7 @@ fn edit_pin(who: &Machine, repo: &Path, edit: impl FnOnce(&mut serde_json::Value
         .map(|e| e.unwrap().path())
         .find(|p| {
             p.extension().is_some_and(|e| e == "json")
+                && !p.to_string_lossy().ends_with(".lineage.json")
                 && serde_json::from_str::<serde_json::Value>(&fs::read_to_string(p).unwrap())
                     .is_ok_and(|pin| pin["vault_id"] == vault["vault_id"])
         })

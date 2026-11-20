@@ -1147,11 +1147,13 @@ fn result_conflict(
     ours: &Vault,
     theirs: &Vault,
 ) -> Option<MergeConflict> {
+    let no_deletions = BTreeMap::new();
     if let Ok(me) = identity.pubkey_string()
         && let Some(group) = crate::trust::group_change_violation(
             &merged.recipients,
             &meta.groups,
             &crate::trust::canonical_groups(&ours_meta.groups),
+            pin.map_or(&no_deletions, |p| &p.sidecar.deleted_groups),
             &me,
         )
     {

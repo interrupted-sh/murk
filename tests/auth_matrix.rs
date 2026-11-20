@@ -298,9 +298,12 @@ impl Fixture {
         );
 
         // Merge-driver inputs: base is the commit, ours the working vault,
-        // theirs the commit plus a new key.
+        // theirs the commit plus a new key. They are copies of the vault, so
+        // they live in a checkout of their own: in this one, murk refuses a
+        // second file with the vault id of the tracked `test.murk`.
         let merge = repo.join(".merge");
         fs::create_dir_all(&merge).unwrap();
+        git(&merge, &home, &["init", "-q"]);
         fs::write(merge.join("base.murk"), &base).unwrap();
         fs::write(merge.join("theirs.murk"), &base).unwrap();
         fs::copy(repo.join("test.murk"), merge.join("ours.murk")).unwrap();

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1985,7 +1985,7 @@
+     other_vault: bool,
+ ) {
+     let deleted = &mut pin.sidecar.deleted_groups;
+-    if !other_vault {
++    if false && !other_vault {
+         for (name, members) in &pin.groups {
+             if !groups.contains_key(name) {
+                 deleted.insert(name.clone(), members.clone());

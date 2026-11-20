@@ -10,7 +10,7 @@ use murk_cli::trust::{Refusal, Verdict};
 use murk_cli::types;
 use std::io::IsTerminal;
 
-pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
+pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>, vault_path: &str) {
     // Hold the vault lock: accepting an unsigned vault re-signs it.
     let _lock = try_or_die(
         murk_cli::vault::lock(std::path::Path::new(vault_path)).map_err(murk_cli::MurkError::Vault),
@@ -47,12 +47,48 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
         &murk_cli::trust::Checkout::of(vault_path, inspected.assessment.pin.as_ref()),
     );
     let readmit = readmitted_keys(re_add, &removed, &inspected.murk.recipients);
-    if !readmit.is_empty() {
-        try_or_die(inspected.readmit(vault_path, &readmit));
+    let other = shares_with.map(|q| other_file_of_vault(vault_path, q, &inspected.vault));
+    if !readmit.is_empty() || other.is_some() {
+        try_or_die(inspected.judge_for_trust(
+            vault_path,
+            &readmit,
+            other.as_ref().map(|o| o.path.as_str()),
+        ));
     }
 
     print_summary(vault_path, &inspected);
+    if let Some(other) = &other {
+        print_other_file(vault_path, &inspected.vault, other);
+    }
+    if let Verdict::Refused(Refusal::SharedVaultId { .. }) = &inspected.assessment.verdict {
+        let reason = inspected.refusal_message(vault_path).unwrap_or_default();
+        die(&reason, 1);
+    }
 
+    decide(
+        yes,
+        vault_path,
+        inspected,
+        &removed,
+        &readmit,
+        other.is_some(),
+    );
+    if let Some(other) = other {
+        retire_other_path(vault_path, &other);
+    }
+}
+
+/// The rest of `murk trust` once the vault is judged: accept it or refuse
+/// it. `sharing` says the user named another path of the vault with
+/// `--shares-identity-with`, which `murk trust` retires after this returns.
+fn decide(
+    yes: bool,
+    vault_path: &str,
+    inspected: murk_cli::InspectedVault,
+    removed: &std::collections::BTreeMap<String, u64>,
+    readmit: &std::collections::BTreeSet<String>,
+    sharing: bool,
+) {
     let head = murk_cli::trust::head_of(vault_path);
     let read_only = murk_cli::trust::pre_upgrade_read_only(
         inspected.assessment.pin.as_ref(),
@@ -85,6 +121,17 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
                 "{} accepted {vault_path} on this machine — the next write upgrades it to the 0.14 format; commit the result",
                 "◆".magenta()
             );
+            return;
+        }
+        Verdict::Trusted | Verdict::UnsignedAllowed if readmit.is_empty() && sharing => {
+            // Trusted here already: only the other path is retired.
+            if !yes
+                && !confirmed(
+                    "trust this vault at this path only, and refuse the other path on this machine?",
+                )
+            {
+                die(&"not trusted", 1);
+            }
             return;
         }
         Verdict::Trusted if readmit.is_empty() => {
@@ -120,7 +167,7 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
         if !yes && !confirmed("trust this vault and re-add the named keys on this machine?") {
             die(&"not trusted", 1);
         }
-        try_or_die(inspected.record_trust(vault_path, false, &readmit));
+        try_or_die(inspected.record_trust(vault_path, false, readmit));
         eprintln!("{} trusted {vault_path} on this machine", "◆".magenta());
         return;
     };
@@ -251,7 +298,7 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
                 fresh,
                 murk_cli::trust::Acceptance::Trust {
                     reset_counter,
-                    readmit: &readmit,
+                    readmit,
                 },
                 &head,
                 murk_cli::trust::accepted_commit_of(vault_path).as_deref(),
@@ -260,7 +307,7 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], vault_path: &str) {
             Ok(Some(pin))
         }));
     } else {
-        try_or_die(inspected.record_trust(vault_path, reset_counter, &readmit));
+        try_or_die(inspected.record_trust(vault_path, reset_counter, readmit));
     }
     eprintln!("{} trusted {vault_path} on this machine", "◆".magenta());
 }
@@ -274,6 +321,112 @@ fn confirmed(question: &str) -> bool {
         );
     }
     confirm(question)
+}
+
+/// The other path of the vault that `murk trust --shares-identity-with`
+/// names: the path as given, its `/`-separated path in the checkout, and the
+/// vault file there.
+struct OtherFile {
+    arg: String,
+    path: String,
+    vault: types::Vault,
+}
+
+/// Check that `arg` is another vault file in the same checkout as
+/// `vault_path`, with the vault id of `vault`. Stops with a message
+/// otherwise.
+fn other_file_of_vault(vault_path: &str, arg: &str, vault: &types::Vault) -> OtherFile {
+    let here = murk_cli::pins::vault_location(vault_path);
+    let there = murk_cli::pins::vault_location(arg);
+    let (Some((repo, path)), Some((other_repo, other_path))) = (here, there) else {
+        die(
+            &format_args!(
+                "--shares-identity-with needs {vault_path} and {arg} in one git checkout"
+            ),
+            1,
+        );
+    };
+    if repo != other_repo || path == other_path {
+        die(
+            &format_args!(
+                "{arg} is not another path in the checkout of {vault_path}\nname the other vault file with the same vault id"
+            ),
+            1,
+        );
+    }
+    let other = murk_cli::vault::read(std::path::Path::new(arg))
+        .unwrap_or_else(|e| die(&format_args!("cannot read {arg}: {e}"), 1));
+    if murk_cli::trust::header_vault_id(&other) != murk_cli::trust::header_vault_id(vault) {
+        die(
+            &format_args!(
+                "{arg} does not have the vault id of {vault_path}, so it is not another path of this vault\nnothing was recorded"
+            ),
+            1,
+        );
+    }
+    OtherFile {
+        arg: arg.to_string(),
+        path: other_path,
+        vault: other,
+    }
+}
+
+/// Show the other file's header next to the summary of the vault being
+/// trusted, so the user can compare the two before this machine refuses
+/// one of them.
+fn print_other_file(vault_path: &str, vault: &types::Vault, other: &OtherFile) {
+    let revision = |v: &types::Vault| {
+        let fp = murk_cli::trust::vault_fingerprint(v);
+        if fp.is_empty() {
+            "(none)".to_string()
+        } else {
+            fp
+        }
+    };
+    eprintln!("  revision    {}", revision(vault));
+    eprintln!(
+        "{} {} (refused on this machine after this step)",
+        "other file".bold(),
+        other.arg
+    );
+    eprintln!(
+        "  id          {}",
+        murk_cli::trust::header_vault_id(&other.vault)
+    );
+    eprintln!("  generation  {}", other.vault.generation);
+    match &other.vault.sig {
+        Some(sig) => eprintln!("  signed by   {} (not checked)", sig.signer.dimmed()),
+        None => eprintln!("  signed by   (unsigned)"),
+    }
+    eprintln!("  revision    {}", revision(&other.vault));
+    eprintln!(
+        "{} after this step, this machine trusts the vault at {vault_path} only",
+        "⚠".yellow()
+    );
+}
+
+/// Record `other` as another path of the vault at `vault_path` in its pin,
+/// so murk refuses `other` on this machine, and remove the pin and sidecar of
+/// `other` when they record the same vault id.
+fn retire_other_path(vault_path: &str, other: &OtherFile) {
+    try_or_die(murk_cli::pins::update(vault_path, |fresh| {
+        let mut pin = fresh
+            .cloned()
+            .ok_or_else(|| format!("no trust pin for {vault_path}"))?;
+        pin.sidecar.identity_siblings.insert(other.path.clone());
+        Ok(Some(pin))
+    }));
+    let id = murk_cli::trust::header_vault_id(&other.vault);
+    let pinned_there =
+        try_or_die(murk_cli::pins::read(&other.arg)).is_some_and(|p| p.vault_id == id);
+    if pinned_there && let Some(file) = murk_cli::pins::existing_pin_path(&other.arg) {
+        try_or_die(murk_cli::pins::remove(&file));
+    }
+    eprintln!(
+        "{} this machine trusts the vault at {vault_path} only, and refuses {} from now on",
+        "◆".magenta(),
+        other.arg
+    );
 }
 
 /// The removed keys `re_add` names — each a public key or a recipient's name

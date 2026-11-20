@@ -871,7 +871,8 @@ pub const ROWS: &[Row] = &[
     // ── Git ────────────────────────────────────────────────────────────
     row(
         "merge-driver BASE OURS THEIRS",
-        &["merge-driver", ".merge/base.murk", ".merge/ours.murk", ".merge/theirs.murk"],
+        // The vault's path, as git passes `%P`.
+        &["merge-driver", ".merge/base.murk", ".merge/ours.murk", ".merge/theirs.murk", "test.murk"],
         Check::Write {
             touches: &[],
             gains: &[],
