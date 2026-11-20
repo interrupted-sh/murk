@@ -222,6 +222,8 @@ Lists active grants: name, truncated pubkey, scope, and TTL status (time remaini
 
 Removes the grant and its ephemeral recipient (clearing the agent's private ciphertexts).
 
+The save also writes a revocation id for the grant key into the vault's encrypted record of revoked grants. Every machine on this release that accepts that vault refuses the key afterwards: as a recipient, as a grant record and in `circle authorize`. Expiry pruning and `agent grant --renew` (for the old key) do the same. Only `murk trust --re-add KEY` re-admits it (see [`murk trust`](#murk-trust)). Rule 10 under [Trust](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules) in SPEC.md has the details.
+
 The handed-off key can still decrypt old `.murk` versions from git history. So murk marks every key it could read as owing a rotation (`revoked_at`), as `circle revoke` does. Those keys are its scope, any key holding a private copy for it, and keys in groups it belonged to. A key is marked if it still has a shared value or a value in one of those groups. `agent grant --renew` marks the previous key's keys the same way.
 
 Rotation is the real close. `--rotate` (or the interactive prompt) re-prompts for a new value for each of those keys, in its own tier. The revoke and the rotated values are written together in one save. So a refused, short, or aborted batch writes nothing, and the grant is not revoked either. The error says how to revoke now and rotate afterwards. Nothing is saved either if the vault file changed on disk while murk waited for the values (see [`murk rotate`](#murk-rotate)). `--values-from FILE` supplies the values by name, as for `murk rotate`.
@@ -276,6 +278,8 @@ A group whose values no current recipient can read is orphaned. Its values stay 
 
 Revoking a recipient also revokes the agent grants whose key files trust it. [Revoking a recipient revokes the grants that trust it](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#revoking-a-recipient-revokes-the-grants-that-trust-it) in SPEC.md lists which grants, what murk deletes, and what it prints.
 
+When this machine saves the revoke, it records the removal in its trust pin. Every other machine records it when it accepts the vault. From then on, that machine refuses a vault that lists the revoked key, at any counter, wherever the removal applies. Only this machine's own `circle authorize` of the key, or `murk trust --re-add KEY` after review, brings the key back there (see [`murk trust`](#murk-trust)).
+
 Lists the secrets the revoked recipient had access to.
 
 With `--rotate`, murk prompts for a new value for each value they could read, in the same session, and re-encrypts it in its own tier. The shared value stays shared. A value in a group they belonged to stays in that group, encrypted to its remaining members. Values they could not read (other groups, your personal overrides) are not prompted for.
@@ -305,6 +309,12 @@ With `--member`, removes a recipient from the group and re-encrypts its secrets 
 ## `murk verify`
 
 Verifies vault integrity (MAC and signature), reports whether this machine trusts the signer and why not (the same reasons a load refuses with), checks who signed the last git commit that touched the vault, and runs safety checks without exporting secrets. Exits 1 on any finding.
+
+**Expected vault.** When verify does not refuse the vault and the vault has a vault id, it prints `ok expected vault  the value for MURK_EXPECTED_VAULT is:` on stderr and `<vault id>:<generation>` on stdout. The generation is the vault's current save counter. Store that line as the CI variable `MURK_EXPECTED_VAULT` (see [CI/CD](/guides/cicd/#name-the-expected-vault-and-a-minimum-counter)). `murk verify 2>/dev/null` prints only the value.
+
+**Shared vault ids.** verify and `murk doctor` report, under `identity`, another vault file in the checkout that has the same vault id, and say whether this machine refuses this path or the other one (see `--shares-identity-with` under [`murk trust`](#murk-trust)).
+
+**Removal records.** verify reads this machine's trust pin, so it also copies the pin's removal records into the pin's sidecar file, which murk 0.15 and earlier do not write. After you upgrade, run `murk verify` once in each checkout before an older murk component runs again (see the [threat model](/security/threat-model/#vault-signatures), limit 10).
 
 **Commit check.** Only when the vault has git history. A signed commit proves nothing about who the signer is: git vouches for any key it is told about, an attacker's throwaway key included.
 
@@ -339,6 +349,18 @@ Shows who signed the vault, then asks before it records the vault in the local t
 `--yes` accepts without asking. Without a terminal and without `--yes`, it only shows and exits 1.
 
 `--print-key` prints your own trusted-signer entry to stdout (`age1…:<verifying key>`, or the ssh-ed25519 key line) and your fingerprint to stderr, then exits.
+
+`--re-add KEY` (repeatable; a public key, or a name in the vault) trusts again a key this machine holds as removed or as a revoked agent grant.
+
+- **A removed key.** A vault signed by or listing a key this machine recorded as removed is refused until you name it. murk then asks "trust this vault and re-add the named keys on this machine?" and takes the key out of the removal record. When the vault does not list the key, murk says so, asks, clears the record and writes nothing: "KEY can be listed again in .murk on this machine. The vault file is unchanged". Run it on each machine that recorded the removal, after a member re-adds the key with `murk circle authorize`, or before.
+- **A revoked agent grant.** murk shows the key, the vault's signer, and each revocation id this machine holds for the key, marked "in the vault's revoked grant set" or "seen on this machine". After you confirm, it re-admits exactly those ids. A later revocation of the same key gets a new id, which counts again. When the vault lists the key and its own revoked grant set holds an id for it, murk signs the vault again without those ids, so commit the result. A key that cannot sign is refused there.
+- A name that is neither is an error: "KEY is not a key this machine recorded as removed or as a revoked agent grant".
+
+A re-add made with murk 0.15 or earlier does not count for this release. Run `--re-add` again with this release.
+
+`--shares-identity-with OTHER` settles two vault files in one checkout with the same vault id, which murk refuses because it cannot tell them apart. OTHER must be a vault file in the same checkout with that vault id. Review both files first. murk then trusts the vault at `--vault` only, refuses OTHER on this machine from then on, and prints "this machine trusts the vault at .murk only, and refuses OTHER from now on". When OTHER has its own trust pin for that vault id, murk deletes that pin. It does not delete the file OTHER.
+
+`murk trust` never accepts a vault that `MURK_EXPECTED_VAULT` refuses, two files with one vault id (use `--shares-identity-with`), or a revoked agent grant (use `--re-add`). For these it prints "refusing to trust it".
 
 ## `murk doctor`
 
@@ -401,7 +423,9 @@ How `diff` verifies the working vault and the revision at the ref, and when it r
 
 ## `murk merge-driver`
 
-Git merge driver for vault files, called by git (the command is hidden from help). Its rules are in [Merge](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#merge) in SPEC.md.
+Git merge driver for vault files, called by git (the command is hidden from help). Its rules are in [Merge](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#merge) in SPEC.md, and the [merge guide](/guides/git-merge-ssh/) explains them with examples.
+
+With a key, the driver authenticates the common ancestor, ours and theirs first. When one of them fails, it writes nothing: the working file stays ours byte for byte, and the driver exits 1 and names the input. Before it signs a result, it checks that this machine would accept it. Otherwise it writes nothing and says "this machine would refuse the merged vault, so murk does not sign it". A member's first write therefore cannot be a merge while this machine has not confirmed their own signing key. Make one ordinary save first. The driver writes no trust pin. The next load records the result.
 
 ## `murk setup-merge-driver`
 
