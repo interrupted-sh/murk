@@ -38,6 +38,12 @@ pub(crate) fn cmd_merge_driver(
     // `.murk.*`) merge as text, as git does without a driver. Everything else
     // is refused with both sides between conflict markers, so a routine
     // `git add` cannot commit one side as the resolution.
+    //
+    // This is the one refused input that does not leave ours as it was. An
+    // input that parses but fails authentication (see `run_merge_driver`)
+    // leaves the working file equal to ours, byte for byte. An input that
+    // cannot be parsed leaves conflict markers, which never load as a vault.
+    // In both cases nothing is signed and the trust pin is unchanged.
     let parses = sides.each_ref().map(|side| parses_as_vault(side));
     if parses != [true; 3] {
         // Both branches created the vault (`murk init --vault .murk.staging`
