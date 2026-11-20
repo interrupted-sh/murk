@@ -136,6 +136,22 @@ pub(crate) fn cmd_verify(vault_path: &str) {
         }
     }
 
+    // MURK_NO_SIGNER_PIN stops pin writes only: say whether the checks above
+    // ran against an existing pin, and that this run leaves it as it was.
+    if murk_cli::pins::pin_writes_off() {
+        if inspected.assessment.pin.is_some() {
+            eprintln!(
+                "{} pin  checked against this machine's trust pin. MURK_NO_SIGNER_PIN is set, so murk does not update the pin",
+                "ok".green().bold(),
+            );
+        } else {
+            eprintln!(
+                "{} pin  this machine has no trust pin for this vault. MURK_NO_SIGNER_PIN is set, so murk does not write one, and rollback and stripped-signature checks are off",
+                "warn".yellow().bold(),
+            );
+        }
+    }
+
     // Git anchor — is the vault's latest commit signed, and by someone this
     // vault trusts? The vault signature covers content; a signed commit covers
     // who landed it. A signature by a key the vault does not trust is no

@@ -905,8 +905,9 @@ fn keyed_merge_of_genuine_sides_signs_and_loads() {
         .stderr(predicate::str::contains("signed by trusted signer"));
 }
 
-/// With the pin store off, nothing on this machine records trust, so a
-/// secret-emitting load is refused until MURK_TRUSTED_SIGNERS names the signer.
+/// On a machine with no pin and the pin store off, nothing records trust, so
+/// a secret-emitting load is refused until MURK_TRUSTED_SIGNERS names the
+/// signer. (A pin that already exists is still read: see `no_signer_pin.rs`.)
 #[test]
 fn pinning_off_fails_closed_until_trusted_signers_are_given() {
     let dir = TempDir::new().unwrap();
@@ -917,7 +918,9 @@ fn pinning_off_fails_closed_until_trusted_signers_are_given() {
         .assert()
         .success();
 
+    let unpinned_home = TempDir::new().unwrap();
     murk(&dir, &key)
+        .env("HOME", unpinned_home.path())
         .env("MURK_NO_SIGNER_PIN", "1")
         .args(["get", "A", "--vault", "test.murk"])
         .assert()
@@ -930,12 +933,17 @@ fn pinning_off_fails_closed_until_trusted_signers_are_given() {
     let entry = String::from_utf8(out.stdout).unwrap().trim().to_string();
     assert!(entry.starts_with(&format!("{pubkey}:")), "{entry}");
     murk(&dir, &key)
+        .env("HOME", unpinned_home.path())
         .env("MURK_NO_SIGNER_PIN", "1")
         .env("MURK_TRUSTED_SIGNERS", &entry)
         .args(["get", "A", "--vault", "test.murk"])
         .assert()
         .success()
         .stdout("v\n");
+    assert!(
+        fs::read_dir(unpinned_home.path()).unwrap().next().is_none(),
+        "no pin is written under MURK_NO_SIGNER_PIN"
+    );
 }
 
 // ── rotate --list ──
