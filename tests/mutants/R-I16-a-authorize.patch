@@ -1,0 +1,11 @@
+--- a/src/recipients.rs
++++ b/src/recipients.rs
+@@ -182,7 +182,7 @@
+         )));
+     }
+ 
+-    if let Some(ids) = crate::trust::tombstoned(&murk.revoked_grants, None).get(&canonical) {
++    if let Some(ids) = crate::trust::tombstoned(&murk.revoked_grants, None).get("") {
+         return Err(MurkError::Recipient(format!(
+             "refusing to authorize {}: it was an agent grant in this vault and was revoked (revocation ids {}), and an agent grant key never reads this vault again\nif it was revoked by mistake, review it and run `murk trust --re-add {canonical}`",
+             truncate_pubkey(&canonical),

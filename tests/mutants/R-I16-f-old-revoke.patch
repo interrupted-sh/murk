@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -608,7 +608,7 @@
+         crate::trust::HeadState::NotARepo => Some(String::new()),
+         crate::trust::HeadState::Detached => None,
+     };
+-    let sighted: BTreeSet<String> = match (&branch, pin) {
++    let sighted: BTreeSet<String> = match (&branch, pin.filter(|_| false)) {
+         (Some(branch), Some(pin)) => {
+             let commit = crate::trust::commit_of(vault_path);
+             pin.sidecar

@@ -21,6 +21,7 @@ struct MetaState {
     recipients: HashMap<String, String>,
     groups: BTreeMap<String, Vec<String>>,
     grants: BTreeMap<String, types::GrantEntry>,
+    revoked_grants: types::RevokedGrants,
     legacy_mac: bool,
     github_pins: HashMap<String, Vec<String>>,
     signers: BTreeMap<String, String>,
@@ -111,6 +112,7 @@ fn empty_meta_state(
         recipients: HashMap::new(),
         groups: BTreeMap::new(),
         grants: BTreeMap::new(),
+        revoked_grants: BTreeMap::new(),
         legacy_mac: false,
         github_pins: HashMap::new(),
         signers: BTreeMap::new(),
@@ -188,6 +190,7 @@ fn resolve_meta_state(
             recipients: meta.recipients,
             groups: meta.groups,
             grants: meta.grants,
+            revoked_grants: meta.revoked_grants,
             legacy_mac: false,
             github_pins: meta.github_pins,
             signers: meta.signers,
@@ -222,6 +225,7 @@ fn resolve_meta_state(
         recipients: meta.recipients,
         groups: meta.groups,
         grants: meta.grants,
+        revoked_grants: meta.revoked_grants,
         legacy_mac,
         github_pins: meta.github_pins,
         signers: meta.signers,
@@ -277,6 +281,8 @@ pub(crate) struct VerifiedSide {
     pub names: HashMap<String, String>,
     pub groups: BTreeMap<String, Vec<String>>,
     pub grants: BTreeMap<String, types::GrantEntry>,
+    /// The vault's own revoked grant set (see [`types::Meta::revoked_grants`]).
+    pub revoked: types::RevokedGrants,
 }
 
 /// Verify one side of a merge the way a load does (meta, MAC, signature)
@@ -293,6 +299,7 @@ pub(crate) fn verify_side(
         names: state.recipients,
         groups: state.groups,
         grants: state.grants,
+        revoked: state.revoked_grants,
     })
 }
 
@@ -334,6 +341,7 @@ fn decrypt_vault_with_signature(
         recipients,
         groups,
         grants,
+        revoked_grants,
         legacy_mac,
         github_pins,
         signers,
@@ -399,6 +407,7 @@ fn decrypt_vault_with_signature(
             grouped,
             groups,
             grants,
+            revoked_grants,
             legacy_mac,
             github_pins,
             signers,
@@ -617,6 +626,7 @@ impl InspectedVault {
             names: &self.murk.recipients,
             groups: &self.murk.groups,
             grants: &self.murk.grants,
+            revoked: &self.murk.revoked_grants,
             loader_can_sign: self.identity.is_signing_capable(),
             operator_key: crypto::operator_key(&self.identity),
         }
@@ -713,10 +723,14 @@ impl InspectedVault {
     /// under its lock: if another process accepted a newer revision since, the
     /// vault is refused rather than recorded over it. Writing is best-effort —
     /// a pin that cannot be written (read-only home) only warns. Warnings about
-    /// the accepted vault land in [`types::Murk::warnings`]. When the
-    /// trust came from `MURK_TRUSTED_SIGNERS`, the pin's trusted set and its
-    /// record of the accepted murk 0.13 copy are left as they were, so the
-    /// environment variable never widens trust that outlives it.
+    /// the accepted vault land in [`types::Murk::warnings`], including one
+    /// for each revoked agent grant a history load holds (see
+    /// [`trust::history_grant_warnings`]). When the trust came from
+    /// `MURK_TRUSTED_SIGNERS`, the pin's trusted set, its record of the
+    /// accepted murk 0.13 copy and its record of agent grants are left as
+    /// they were, so the environment variable never widens trust that
+    /// outlives it. [`types::Murk::revoked_grants`] then holds the vault's
+    /// revoked grant set less the ids this machine re-admitted.
     pub fn into_trusted(
         self,
         vault_path: &str,
@@ -727,6 +741,7 @@ impl InspectedVault {
             .iter()
             .map(|other| trust::shared_identity_warning(vault_path, other))
             .collect();
+        let mut pin_after = self.assessment.pin.clone();
         match &self.assessment.verdict {
             trust::Verdict::Refused(_) => {
                 let msg = self.refusal_message(vault_path).unwrap_or_default();
@@ -761,8 +776,11 @@ impl InspectedVault {
                         pin.removed_at_commit = prior.removed_at_commit;
                         pin.groups = prior.groups;
                         pin.sidecar.deleted_groups = prior.sidecar.deleted_groups;
+                        pin.sidecar.revoked_grants_seen = prior.sidecar.revoked_grants_seen;
+                        pin.sidecar.grants_live_on = prior.sidecar.grants_live_on;
                         pin.accepted_pre_upgrade = prior.accepted_pre_upgrade;
                     }
+                    pin_after = Some(pin.clone());
                     Ok((fresh != Some(&pin)).then_some(pin))
                 });
                 if let Some(msg) = refused {
@@ -774,7 +792,21 @@ impl InspectedVault {
             }
             trust::Verdict::Trusted | trust::Verdict::UnsignedAllowed => {}
         }
+        if !self.grant {
+            let loaded = self.loaded();
+            warnings.extend(trust::history_grant_warnings(
+                vault_path,
+                &loaded,
+                self.assessment.pin.as_ref(),
+            ));
+        }
         let (vault, mut murk, identity) = (self.vault, self.murk, self.identity);
+        if !self.grant {
+            murk.revoked_grants = trust::without_readmitted(
+                trust::tombstoned(&murk.revoked_grants, None),
+                pin_after.as_ref(),
+            );
+        }
         if murk.legacy_mac {
             warnings.push(
                 "vault uses legacy unkeyed MAC — run any write command to upgrade to BLAKE3".into(),
@@ -920,6 +952,7 @@ pub fn decrypt_vault_revision(
         names: &side.names,
         groups: &side.groups,
         grants: &side.grants,
+        revoked: &side.revoked,
         loader_can_sign: identity.is_signing_capable(),
         operator_key: crypto::operator_key(identity),
     };

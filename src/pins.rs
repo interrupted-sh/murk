@@ -181,6 +181,25 @@ pub struct Sidecar {
     /// undo it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub removals: BTreeMap<String, RemovalRecord>,
+    /// Every revoked grant set (see [`crate::types::Meta::revoked_grants`])
+    /// this machine accepted for the vault on a current load, an own save or
+    /// `murk trust`: canonical grant key → revocation ids. A save writes them
+    /// back, so a murk 0.15 save that dropped the vault's set does not undo
+    /// a revocation here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub revoked_grants_seen: crate::types::RevokedGrants,
+    /// The revocation ids the user re-admitted with `murk trust --re-add`:
+    /// canonical grant key → the ids that command showed. Only those ids
+    /// stop counting; a later revocation of the key has a new id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub readmitted_grants: crate::types::RevokedGrants,
+    /// Where this machine saw each grant live: canonical grant key → branch
+    /// (`""` outside git) → the commit checked out at the latest current
+    /// load, own save or `murk trust` that held the key's grant record (`""`
+    /// with no commit). A save on that branch, on related history, that no
+    /// longer holds the record gives the key a revocation id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grants_live_on: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// One removal record as the sidecar keeps it (see [`Sidecar::removals`]).
@@ -1303,6 +1322,18 @@ mod tests {
                 BTreeSet::from(["age1alice".to_string(), "age1bob".to_string()]),
             );
             pin.sidecar.identity_siblings.insert("copy.murk".into());
+            pin.sidecar.revoked_grants_seen.insert(
+                "age1grant".into(),
+                BTreeSet::from(["00112233445566778899aabbccddeeff".to_string()]),
+            );
+            pin.sidecar.readmitted_grants.insert(
+                "age1other".into(),
+                BTreeSet::from(["ffeeddccbbaa99887766554433221100".to_string()]),
+            );
+            pin.sidecar.grants_live_on.insert(
+                "age1live".into(),
+                BTreeMap::from([("main".to_string(), String::new())]),
+            );
             write(vault, &pin).unwrap();
             let written = read(vault).unwrap().unwrap();
             assert_eq!(
@@ -1341,6 +1372,23 @@ mod tests {
                 (&after.sidecar.repo_dir, &after.sidecar.path),
                 (&written.sidecar.repo_dir, &written.sidecar.path),
                 "the repository and path survive"
+            );
+            assert_eq!(
+                (
+                    &after.sidecar.revoked_grants_seen,
+                    &after.sidecar.readmitted_grants,
+                    &after.sidecar.grants_live_on
+                ),
+                (
+                    &written.sidecar.revoked_grants_seen,
+                    &written.sidecar.readmitted_grants,
+                    &written.sidecar.grants_live_on
+                ),
+                "the revoked grants seen, the re-admitted ids and the live sightings survive"
+            );
+            assert!(
+                !written.sidecar.revoked_grants_seen.is_empty(),
+                "the sidecar holds the revoked grants seen"
             );
         });
     }

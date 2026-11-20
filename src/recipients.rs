@@ -147,8 +147,9 @@ pub fn list_recipients(
 /// Add a recipient to the vault and return the stored (canonical) pubkey.
 ///
 /// SSH keys are stored as `type base64`; a trailing comment becomes the display
-/// name when `name` is not given. Returns an error if the pubkey is invalid or
-/// the same key is already present, in any form.
+/// name when `name` is not given. Returns an error if the pubkey is invalid,
+/// the same key is already present, in any form, or the loaded state `murk`
+/// lists it as a revoked agent grant (see [`types::Murk::revoked_grants`]).
 pub fn authorize_recipient(
     vault: &mut types::Vault,
     murk: &mut types::Murk,
@@ -178,6 +179,14 @@ pub fn authorize_recipient(
     if let Some(why) = parsed.weakness() {
         return Err(MurkError::Recipient(format!(
             "invalid public key: {pubkey}: {why}"
+        )));
+    }
+
+    if let Some(ids) = crate::trust::tombstoned(&murk.revoked_grants, None).get(&canonical) {
+        return Err(MurkError::Recipient(format!(
+            "refusing to authorize {}: it was an agent grant in this vault and was revoked (revocation ids {}), and an agent grant key never reads this vault again\nif it was revoked by mistake, review it and run `murk trust --re-add {canonical}`",
+            truncate_pubkey(&canonical),
+            crate::trust::show_ids(ids.iter())
         )));
     }
 

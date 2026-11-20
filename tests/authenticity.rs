@@ -19,6 +19,9 @@ use tempfile::TempDir;
 mod common;
 use common::murk_bin;
 
+/// Invariant rows about revoked agent grants and their revocation ids.
+#[path = "authenticity/grant_rows.rs"]
+mod grant_rows;
 /// Invariant rows (see `tests/invariant_rows.tsv`) about loads and `murk trust`.
 #[path = "authenticity/load_rows.rs"]
 mod load_rows;

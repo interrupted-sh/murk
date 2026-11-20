@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1497,7 +1497,7 @@
+         .values()
+         .map(|g| crate::recipients::canonical_recipient(&g.pubkey).into_owned())
+         .collect();
+-    let granted = meta.grants.iter().find_map(|(name, g)| {
++    let granted = meta.grants.iter().filter(|_| false).find_map(|(name, g)| {
+         let key = crate::recipients::canonical_recipient(&g.pubkey).into_owned();
+         held.get(&key)
+             .map(|ids| (format!("grants.{name}"), key, ids))

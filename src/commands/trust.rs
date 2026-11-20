@@ -42,6 +42,30 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
         );
     }
 
+    // Revoked agent grants the user names with --re-add: shown, confirmed and
+    // re-admitted first, so the vault is judged below with them re-admitted.
+    let grant_keys = revoked_grant_keys(re_add, &inspected);
+    let re_add: Vec<String> = re_add
+        .iter()
+        .filter(|arg| {
+            let key = resolve_key(arg, &inspected.murk.recipients, |k| grant_keys.contains(k));
+            let removed = inspected
+                .assessment
+                .pin
+                .as_ref()
+                .is_some_and(|p| key.as_ref().is_some_and(|k| p.removed.contains_key(k)));
+            key.is_none() || removed
+        })
+        .cloned()
+        .collect();
+    if !grant_keys.is_empty() {
+        readmit_grants(yes, vault_path, &inspected, &grant_keys);
+        inspected = try_or_die(murk_cli::inspect_vault(vault_path));
+        if re_add.is_empty() && shares_with.is_none() {
+            return;
+        }
+    }
+
     // Keys this machine recorded as removed that the vault lists or is signed
     // by: trusted again only when named with --re-add.
     let removed = murk_cli::trust::removed_keys_in(
@@ -56,7 +80,7 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
         .map(|p| p.removed.clone())
         .unwrap_or_default();
     let (readmit, unlisted): (std::collections::BTreeSet<String>, _) =
-        readmitted_keys(re_add, &recorded, &inspected.murk.recipients)
+        readmitted_keys(&re_add, &recorded, &inspected.murk.recipients)
             .into_iter()
             .partition(|k| removed.contains_key(k));
     if !unlisted.is_empty() {
@@ -76,6 +100,22 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
     }
 
     print_summary(vault_path, &inspected);
+    // `murk trust` accepts the vault as current, so a revoked grant it holds
+    // is refused here even where a load reads it as history.
+    if let Some(refusal) = murk_cli::trust::tombstone_refusal(
+        &inspected.loaded(),
+        inspected.assessment.pin.as_ref(),
+        true,
+    ) {
+        let loaded = inspected.loaded();
+        let reason = murk_cli::trust::refusal_message(
+            vault_path,
+            &refusal,
+            &loaded,
+            inspected.assessment.pin.as_ref(),
+        );
+        die(&format_args!("refusing to trust it: {reason}"), 1);
+    }
     if let Some(other) = &other {
         print_other_file(vault_path, &inspected.vault, other);
     }
@@ -472,7 +512,7 @@ fn readmitted_keys(
                 .unwrap_or_else(|| {
                     die(
                         &format_args!(
-                            "{} is not a key this machine recorded as removed",
+                            "{} is not a key this machine recorded as removed or as a revoked agent grant",
                             murk_cli::terminal_text(arg, false)
                         ),
                         1,
@@ -480,6 +520,159 @@ fn readmitted_keys(
                 })
         })
         .collect()
+}
+
+/// The canonical key `arg` names: a public key for which `wanted` holds, or
+/// the name of a recipient whose key it holds for.
+fn resolve_key(
+    arg: &str,
+    names: &std::collections::HashMap<String, String>,
+    wanted: impl Fn(&String) -> bool,
+) -> Option<String> {
+    let canonical = murk_cli::canonical_recipient(arg).into_owned();
+    if wanted(&canonical) {
+        return Some(canonical);
+    }
+    names
+        .iter()
+        .filter(|(_, name)| *name == arg)
+        .map(|(pk, _)| murk_cli::canonical_recipient(pk).into_owned())
+        .find(|pk| wanted(pk))
+}
+
+/// The keys `re_add` names that this machine holds as revoked agent grants:
+/// a key with a revocation id it has not re-admitted (see
+/// [`murk_cli::trust::tombstoned`]), or a key it recorded as a grant
+/// (`pin.grants`) that is not a trusted signer.
+fn revoked_grant_keys(
+    re_add: &[String],
+    inspected: &murk_cli::InspectedVault,
+) -> std::collections::BTreeSet<String> {
+    let pin = inspected.assessment.pin.as_ref();
+    let tombstones = murk_cli::trust::tombstoned(&inspected.murk.revoked_grants, pin);
+    let is_grant = |k: &String| {
+        tombstones.contains_key(k)
+            || pin.is_some_and(|p| p.grants.contains(k) && !p.trusted.contains(k))
+    };
+    re_add
+        .iter()
+        .filter_map(|arg| resolve_key(arg, &inspected.murk.recipients, is_grant))
+        .collect()
+}
+
+/// `murk trust --re-add` for revoked agent grants `keys`. Shows each key,
+/// the vault's signer and every revocation id this machine holds for the
+/// key, with where it comes from. After confirmation, it re-admits exactly
+/// those ids (a later revocation gets a new id, which still counts), takes
+/// the key out of `pin.grants`, and forgets where this machine saw it live.
+/// When the vault lists a key and its own set holds an id for it, the vault
+/// is signed again without those ids; a key that cannot sign is refused.
+/// When the vault does not list a key, the vault file is not written.
+fn readmit_grants(
+    yes: bool,
+    vault_path: &str,
+    inspected: &murk_cli::InspectedVault,
+    keys: &std::collections::BTreeSet<String>,
+) {
+    let pin = inspected.assessment.pin.as_ref();
+    let own = murk_cli::trust::tombstoned(&inspected.murk.revoked_grants, None);
+    let held = murk_cli::trust::tombstoned(&own, pin);
+    let signer = match &inspected.murk.signature {
+        types::SignatureState::Signed { signer, .. } => {
+            murk_cli::trust::label(&inspected.murk.recipients, signer)
+        }
+        types::SignatureState::Unsigned => "(unsigned)".to_string(),
+    };
+    let listed: std::collections::BTreeSet<String> = inspected
+        .vault
+        .recipients
+        .iter()
+        .map(|r| murk_cli::canonical_recipient(r).into_owned())
+        .collect();
+    for key in keys {
+        eprintln!(
+            "{} {} was an agent grant in {vault_path}, and this machine holds it as revoked",
+            "⚠".yellow(),
+            murk_cli::trust::label(&inspected.murk.recipients, key)
+        );
+        eprintln!("  key          {key}");
+        eprintln!("  vault signer {signer}");
+        let ids = held.get(key).cloned().unwrap_or_default();
+        for id in &ids {
+            let from = if own.get(key).is_some_and(|o| o.contains(id)) {
+                "in the vault's revoked grant set"
+            } else {
+                "seen on this machine"
+            };
+            eprintln!(
+                "  revocation   {} ({from})",
+                murk_cli::trust::show_ids(std::iter::once(id))
+            );
+        }
+        if ids.is_empty() {
+            eprintln!("  this machine recorded it as an agent grant, and no revocation id");
+        }
+    }
+    let resign: Vec<&String> = keys
+        .iter()
+        .filter(|k| listed.contains(*k) && own.contains_key(*k))
+        .collect();
+    if !resign.is_empty() && !inspected.identity.is_signing_capable() {
+        die(
+            &"this vault must be re-signed to re-admit them, and your key cannot sign\nask a teammate with an age or ssh-ed25519 key to review it and run `murk trust --re-add`",
+            1,
+        );
+    }
+    if !yes
+        && !confirmed(
+            "re-admit these agent grant keys on this machine, for the revocations shown only?",
+        )
+    {
+        die(&"not trusted", 1);
+    }
+    try_or_die(murk_cli::pins::update(vault_path, |fresh| {
+        let mut pin = fresh.cloned().unwrap_or_default();
+        for key in keys {
+            let ids = held.get(key).cloned().unwrap_or_default();
+            pin.sidecar
+                .readmitted_grants
+                .entry(key.clone())
+                .or_default()
+                .extend(ids);
+            pin.sidecar
+                .readmitted_grants
+                .retain(|_, ids| !ids.is_empty());
+            pin.grants.remove(key);
+            pin.sidecar.grants_live_on.remove(key);
+        }
+        Ok(Some(pin))
+    }));
+    if resign.is_empty() {
+        eprintln!(
+            "{} re-admitted the revocations shown on this machine. The vault file is unchanged",
+            "◆".magenta()
+        );
+        return;
+    }
+    // Sign again, so the vault's own set no longer holds the ids re-admitted
+    // (a save writes the set less them).
+    let again = try_or_die(murk_cli::inspect_vault(vault_path));
+    if let Some(reason) = again.refusal_message(vault_path) {
+        die(
+            &format_args!(
+                "re-admitted the revocations shown on this machine, but {vault_path} is refused for another reason, so it was not signed again:\n{reason}"
+            ),
+            1,
+        );
+    }
+    let murk_cli::InspectedVault {
+        mut vault, murk, ..
+    } = again;
+    save_vault(vault_path, &mut vault, &murk, &murk);
+    eprintln!(
+        "{} re-admitted the revocations shown and signed {vault_path} again — commit the result so teammates get it",
+        "◆".magenta()
+    );
 }
 
 /// `murk trust --re-add` for removed keys the vault does not list: after

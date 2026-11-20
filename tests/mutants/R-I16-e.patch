@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1848,7 +1848,7 @@
+     let mut set = meta.revoked_grants.clone();
+     let mut minted = BTreeSet::new();
+     for key in sides.into_iter().flat_map(keys) {
+-        if !merged.contains(&key) && !held.contains_key(&key) && minted.insert(key.clone()) {
++        if !merged.contains(&key) && !held.contains_key(&key) && minted.insert(key.clone()) && false {
+             set.entry(key)
+                 .or_default()
+                 .insert(crate::save::new_vault_id());

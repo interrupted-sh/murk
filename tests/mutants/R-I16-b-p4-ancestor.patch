@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -658,7 +658,7 @@
+         |cwd| cwd.join(vault_path),
+     );
+     let dir = abs.parent().unwrap_or(Path::new("."));
+-    crate::git::is_ancestor(dir, seen, commit) || crate::git::is_ancestor(dir, commit, seen)
++    crate::git::is_ancestor(dir, seen, commit)
+ }
+ 
+ /// Refuse a save that writes a grant key this machine holds as revoked (see

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -812,7 +812,7 @@
+     pin: Option<&TrustPin>,
+     current: bool,
+ ) -> Option<Refusal> {
+-    let tombstones = tombstoned(loaded.revoked, pin);
++    let tombstones = tombstoned(loaded.revoked, None);
+     if tombstones.is_empty() {
+         return None;
+     }
