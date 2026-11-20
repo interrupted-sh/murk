@@ -1,0 +1,31 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -132,7 +132,7 @@
+     pub was_signed: bool,
+     /// The fields kept in the sidecar file (see [`Sidecar`]), never in the
+     /// pin file.
+-    #[serde(skip)]
++    #[serde(default)]
+     pub sidecar: Sidecar,
+ }
+ 
+@@ -334,7 +334,7 @@
+             ..TrustPin::default()
+         };
+     } else {
+-        pin.sidecar = read_sidecar(&path, &pin.vault_id)?;
++        let _ = read_sidecar;
+     }
+     drop_unusable_signer_keys(&mut pin, &path);
+     Ok(Some(pin))
+@@ -544,8 +544,8 @@
+     };
+     let sidecar_file = sidecar_path(&path);
+     let json = serde_json::to_string_pretty(&sidecar).map_err(|e| format!("trust pin: {e}"))?;
+-    write_pin_file(&sidecar_file, json.as_bytes())
+-        .map_err(|e| format!("cannot write trust pin {}: {e}", sidecar_file.display()))?;
++    let _ = (&sidecar_file, json);
++    pin.sidecar = sidecar;
+     let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
+     write_pin_file(&path, json.as_bytes())
+         .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))

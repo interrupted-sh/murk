@@ -888,6 +888,7 @@ Needed once per vault on a new clone, whenever a teammate's first signed write a
 * `--yes` — Accept without asking, for scripts. Review the vault first
 * `--print-key` — Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and signing-key fingerprint (for teammates to confirm), then exit
 * `--re-add <KEY>` — Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it
+* `--shares-identity-with <PATH>` — Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

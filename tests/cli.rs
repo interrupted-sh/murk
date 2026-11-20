@@ -614,15 +614,13 @@ fn two_vaults_with_different_recipients_are_each_read_with_their_own_keys() {
         }
     }
 
-    // Trust pins stay per vault: one pin file for each.
+    // Trust pins stay per vault: one pin file for each (sidecars aside).
     let pins = fs::read_dir(dir.path().join(".config/murk/signer-pins"))
         .unwrap()
         .filter(|e| {
-            e.as_ref()
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|x| x == "json")
+            let name = e.as_ref().unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.ends_with(".json") && !name.ends_with(".lineage.json")
         })
         .count();
     assert_eq!(pins, 2, "expected one trust pin per vault");

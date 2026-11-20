@@ -28,12 +28,15 @@
 //!   there with `murk trust` once this machine had seen the vault in 0.14
 //!   form, so that copy, and only it, may be written (upgraded) there.
 //!
+//! Fields new in this release live in a sidecar file next to the pin (see
+//! [`Sidecar`]), which murk 0.15 never opens.
+//!
 //! The pin is written only by an accepted load, an explicit `murk trust`, or
 //! this machine's own save — never from an unverified vault. See
 //! [`crate::trust`] for the rules applied against it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +130,47 @@ pub struct TrustPin {
     /// Whether a signed version of this vault was ever accepted here.
     #[serde(default)]
     pub was_signed: bool,
+    /// The fields kept in the sidecar file (see [`Sidecar`]), never in the
+    /// pin file.
+    #[serde(skip)]
+    pub sidecar: Sidecar,
+}
+
+/// Format version of a sidecar file.
+pub const SIDECAR_VERSION: u32 = 1;
+
+/// The pin fields new in this release. They live in a sidecar file next to
+/// the pin, `<hash>.lineage.json`, which murk 0.15 never opens: a murk 0.15
+/// component that shares `HOME` and rewrites the pin (a binding, or an older
+/// `murk` on `PATH`) drops the fields it does not know, so they cannot live
+/// in the pin file. murk reads and writes the sidecar with the pin, under the
+/// pin's lock, the sidecar first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sidecar {
+    #[serde(default)]
+    pub v: u32,
+    /// The pin's vault id when this release last wrote the sidecar. When it
+    /// differs from the pin's, an older murk accepted another vault at this
+    /// path, and murk drops the sidecar.
+    #[serde(default)]
+    pub vault_id: String,
+    /// The repository's common git directory. Empty outside git.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_dir: String,
+    /// This pin's vault path in the checkout, `/`-separated. Empty outside
+    /// git.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// Paths the user named with `murk trust --shares-identity-with` as
+    /// holding this vault's id too. murk refuses each of them on this
+    /// machine.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub identity_siblings: BTreeSet<String>,
+    /// Groups an accepted vault deleted: group name → canonical members when
+    /// it was deleted. A vault that creates the group again is judged as a
+    /// change from these members.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deleted_groups: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TrustPin {
@@ -171,7 +215,7 @@ pub fn existing_pin_path(vault_path: &str) -> Option<PathBuf> {
 /// so a vault that was created before `git init`, or pinned by an older
 /// release, keeps its pin; writes always go to the first.
 fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
-    let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) else {
+    let Some(dir) = pin_dir() else {
         return Vec::new();
     };
     let p = std::path::Path::new(vault_path);
@@ -211,11 +255,6 @@ fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
     identities.push(abs);
     identities.extend(siblings);
     identities.dedup();
-
-    let dir = std::path::Path::new(&home)
-        .join(".config")
-        .join("murk")
-        .join("signer-pins");
     identities
         .iter()
         .map(|identity| dir.join(format!("{}.json", short_hash(identity))))
@@ -260,10 +299,11 @@ fn writable_pin_path(vault_path: &str) -> Result<PathBuf, String> {
     })
 }
 
-/// Read the pin for `vault_path`. `Ok(None)` when there is no home directory
-/// or no pin exists yet. `MURK_NO_SIGNER_PIN` does not stop the read. A pin
-/// that exists but cannot be read or parsed is an error: silently treating
-/// it as empty would forget a rollback high-water mark.
+/// Read the pin for `vault_path`, with its sidecar (see [`Sidecar`]).
+/// `Ok(None)` when there is no home directory or no pin exists yet.
+/// `MURK_NO_SIGNER_PIN` does not stop the read. A pin or sidecar that exists
+/// but cannot be read or parsed is an error: silently treating it as empty
+/// would forget a rollback high-water mark or a recorded deletion.
 pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
     let mut found = None;
     for path in pin_paths(vault_path) {
@@ -293,9 +333,138 @@ pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
             was_signed: pin.was_signed,
             ..TrustPin::default()
         };
+    } else {
+        pin.sidecar = read_sidecar(&path, &pin.vault_id)?;
     }
     drop_unusable_signer_keys(&mut pin, &path);
     Ok(Some(pin))
+}
+
+/// The sidecar file of the pin file `pin_file`: `<hash>.lineage.json`.
+pub fn sidecar_path(pin_file: &Path) -> PathBuf {
+    pin_file.with_extension("lineage.json")
+}
+
+/// The sidecar of the pin file `pin_file`, whose vault id is `pin_id`. A
+/// missing sidecar reads as empty, and so does one that records another
+/// vault id: an older murk accepted another vault at this path, so the
+/// sidecar's records are not this vault's. murk says so once, and the next
+/// pin write replaces the sidecar.
+fn read_sidecar(pin_file: &Path, pin_id: &str) -> Result<Sidecar, String> {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+    let path = sidecar_path(pin_file);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Sidecar::default()),
+        Err(e) => return Err(format!("cannot read trust pin {}: {e}", path.display())),
+    };
+    let sidecar: Sidecar = serde_json::from_str(&contents).map_err(|e| {
+        format!(
+            "trust pin {} is corrupt ({e}) — delete it and run `murk trust`",
+            path.display()
+        )
+    })?;
+    if !sidecar.vault_id.is_empty() && !pin_id.is_empty() && sidecar.vault_id != pin_id {
+        let first = WARNED.lock().map_or(true, |mut w| w.insert(path.clone()));
+        if first {
+            eprintln!(
+                "warn trust pin {} records vault id {}, but the pin records {pin_id}. An older murk accepted another vault at this path. murk ignores this file and writes a new one",
+                path.display(),
+                sidecar.vault_id
+            );
+        }
+        return Ok(Sidecar::default());
+    }
+    Ok(sidecar)
+}
+
+/// Where `vault_path` sits in its git repository: the repository's common
+/// git directory and the vault's `/`-separated path in the checkout. `None`
+/// outside git.
+pub fn vault_location(vault_path: &str) -> Option<(String, String)> {
+    let p = Path::new(vault_path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(p)
+    };
+    let resolved = crate::git::real_parent(&abs);
+    let root = crate::git::worktree_root(resolved.parent()?)?;
+    let relative = resolved.strip_prefix(&root).ok()?;
+    // The repository identity is `<common dir>/murk-vault/<relative>`.
+    let mut common = crate::git::repository_vault_identity(&resolved)?;
+    for _ in relative.components() {
+        common.pop();
+    }
+    common.pop();
+    let path: Vec<String> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Some((common.to_string_lossy().into_owned(), path.join("/")))
+}
+
+/// Every sidecar on this machine whose pin file exists and records the same
+/// vault id, with that pin file. Read without the pin lock: both files are
+/// replaced by an atomic rename, so a read sees one whole version. A file
+/// that cannot be read or parsed is left out.
+pub fn peek_sidecars() -> Vec<(PathBuf, Sidecar)> {
+    let Some(dir) = pin_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            let hash = name.strip_suffix(".lineage.json")?;
+            let pin_file = dir.join(format!("{hash}.json"));
+            let pin: TrustPin = serde_json::from_slice(&std::fs::read(&pin_file).ok()?).ok()?;
+            let sidecar: Sidecar = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            (pin.v >= PIN_VERSION && !pin.vault_id.is_empty() && pin.vault_id == sidecar.vault_id)
+                .then_some((pin_file, sidecar))
+        })
+        .collect()
+}
+
+/// Remove the pin file `pin_file` and its sidecar, under the pin's lock:
+/// `murk trust --shares-identity-with` retires another path of the vault on
+/// this machine.
+pub fn remove(pin_file: &Path) -> Result<(), String> {
+    use fs2::FileExt;
+
+    if pin_writes_off() {
+        return Err(
+            "MURK_NO_SIGNER_PIN is set, so murk does not write the trust pin. Unset it to record trust here".to_string(),
+        );
+    }
+    let lock = open_lock(pin_file)?;
+    let removed = [pin_file.to_path_buf(), sidecar_path(pin_file)]
+        .iter()
+        .try_for_each(|path| match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("cannot remove {}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        });
+    let _ = FileExt::unlock(&lock);
+    removed
+}
+
+/// The directory that holds the pins: `~/.config/murk/signer-pins`.
+fn pin_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    Some(
+        Path::new(&home)
+            .join(".config")
+            .join("murk")
+            .join("signer-pins"),
+    )
 }
 
 /// Drop from `pin` every 32-byte signing key [`crate::signing::checked_verifying_key`]
@@ -342,8 +511,11 @@ fn drop_unusable_signer_keys(pin: &mut TrustPin, path: &std::path::Path) {
     }
 }
 
-/// Write the pin for `vault_path`. Errors when pinning is unavailable or the
-/// write fails, so a caller recording an explicit trust decision can say so.
+/// Write the pin for `vault_path` and its sidecar, the sidecar first: a
+/// crash between the two leaves the newer records in the sidecar, which only
+/// narrows. The sidecar takes the pin's vault id and this vault's place in
+/// its repository. Errors when pinning is unavailable or the write fails, so
+/// a caller recording an explicit trust decision can say so.
 pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
     let path = writable_pin_path(vault_path)?;
     let parent = path
@@ -362,17 +534,29 @@ pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
     }
     let mut pin = pin.clone();
     pin.v = PIN_VERSION;
+    let (repo_dir, rel) = vault_location(vault_path).unwrap_or_default();
+    let sidecar = Sidecar {
+        v: SIDECAR_VERSION,
+        vault_id: pin.vault_id.clone(),
+        repo_dir,
+        path: rel,
+        ..std::mem::take(&mut pin.sidecar)
+    };
+    let sidecar_file = sidecar_path(&path);
+    let json = serde_json::to_string_pretty(&sidecar).map_err(|e| format!("trust pin: {e}"))?;
+    write_pin_file(&sidecar_file, json.as_bytes())
+        .map_err(|e| format!("cannot write trust pin {}: {e}", sidecar_file.display()))?;
     let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
     write_pin_file(&path, json.as_bytes())
         .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))
 }
 
-/// Read, change and write the pin for `vault_path` under an exclusive lock
-/// (`<pin>.lock`), so concurrent murk processes — worktrees of one repository
-/// share a pin — never write from a stale read: a lowered rollback mark, or
-/// keys and grants another process just learned, lost. `f` gets the pin as
-/// it is now and returns the pin to write, or `None` to leave it, or an error
-/// to report.
+/// Read, change and write the pin for `vault_path` and its sidecar under an
+/// exclusive lock (`<pin>.lock`), so concurrent murk processes — worktrees of
+/// one repository share a pin — never write from a stale read: a lowered
+/// rollback mark, or keys and grants another process just learned, lost. `f`
+/// gets the pin as it is now and returns the pin to write, or `None` to leave
+/// it, or an error to report.
 pub fn update<F>(vault_path: &str, f: F) -> Result<(), String>
 where
     F: FnOnce(Option<&TrustPin>) -> Result<Option<TrustPin>, String>,
@@ -380,6 +564,20 @@ where
     use fs2::FileExt;
 
     let path = writable_pin_path(vault_path)?;
+    let lock = open_lock(&path)?;
+    let current = read(vault_path)?;
+    let result = match f(current.as_ref())? {
+        Some(pin) => write(vault_path, &pin),
+        None => Ok(()),
+    };
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+/// Open and take the exclusive lock of the pin file `path`: `<pin>.lock`.
+fn open_lock(path: &Path) -> Result<std::fs::File, String> {
+    use fs2::FileExt;
+
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid trust pin path {}", path.display()))?;
@@ -398,13 +596,7 @@ where
         .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
     lock.lock_exclusive()
         .map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
-    let current = read(vault_path)?;
-    let result = match f(current.as_ref())? {
-        Some(pin) => write(vault_path, &pin),
-        None => Ok(()),
-    };
-    let _ = FileExt::unlock(&lock);
-    result
+    Ok(lock)
 }
 
 /// Write the pin file atomically: a `0600` temp file in the same directory,
@@ -560,6 +752,148 @@ mod tests {
             assert!(created.is_err());
             assert_eq!(std::fs::read(&file).unwrap(), before);
             assert!(!pin_path("/other/.murk").unwrap().exists());
+        });
+    }
+
+    /// The pin file as murk 0.15 parses it: the fields it knows, each kept
+    /// as written. serde drops every other field, as 0.15 does.
+    #[derive(Serialize, Deserialize)]
+    struct Pin015 {
+        #[serde(default)]
+        v: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        vault_id: serde_json::Value,
+        #[serde(default)]
+        generation: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        branches: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        ever_trusted: serde_json::Value,
+        #[serde(default)]
+        trusted: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        grants: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        groups: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        signers: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        added_by: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        removed: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        removed_on: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        removed_at_commit: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        head: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        branch_heads: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        accepted_pre_upgrade: serde_json::Value,
+        #[serde(default)]
+        was_signed: serde_json::Value,
+    }
+
+    /// A murk 0.15 component that shares `HOME` rewrites the pin: it parses
+    /// the pin into its own struct, moves the counter, and writes it back.
+    /// The fields new in this release live in the sidecar, which it never
+    /// opens, so they survive: the sidecar's bytes are unchanged, and this
+    /// release reads the recorded deletion and the identity fields back.
+    #[test]
+    fn row_r_l_oldpin_sidecar() {
+        with_home(|home| {
+            let repo = Path::new(home).join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let init = crate::git::git_command()
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(init.success());
+            let vault = repo.join(".murk");
+            let vault = vault.to_str().unwrap();
+
+            let mut pin = TrustPin {
+                vault_id: "id-1".into(),
+                generation: 3,
+                trusted: BTreeSet::from(["age1alice".to_string()]),
+                ..TrustPin::default()
+            };
+            pin.sidecar.deleted_groups.insert(
+                "ops".into(),
+                BTreeSet::from(["age1alice".to_string(), "age1bob".to_string()]),
+            );
+            pin.sidecar.identity_siblings.insert("copy.murk".into());
+            write(vault, &pin).unwrap();
+            let written = read(vault).unwrap().unwrap();
+            assert_eq!(
+                written.sidecar.path, ".murk",
+                "the sidecar records the path"
+            );
+            assert!(
+                !written.sidecar.repo_dir.is_empty(),
+                "the sidecar records the repository"
+            );
+
+            let pin_file = existing_pin_path(vault).unwrap();
+            let sidecar_file = sidecar_path(&pin_file);
+            let sidecar_before = std::fs::read(&sidecar_file).unwrap_or_default();
+            let mut old: Pin015 =
+                serde_json::from_slice(&std::fs::read(&pin_file).unwrap()).unwrap();
+            old.generation = serde_json::json!(4);
+            std::fs::write(&pin_file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+
+            let after = read(vault).unwrap().unwrap();
+            assert_eq!(after.generation, 4, "the older component's write took");
+            assert_eq!(
+                std::fs::read(&sidecar_file).unwrap_or_default(),
+                sidecar_before,
+                "the sidecar's bytes are unchanged"
+            );
+            assert_eq!(
+                after.sidecar.deleted_groups, written.sidecar.deleted_groups,
+                "the recorded deletion survives"
+            );
+            assert_eq!(
+                after.sidecar.identity_siblings, written.sidecar.identity_siblings,
+                "the identity siblings survive"
+            );
+            assert_eq!(
+                (&after.sidecar.repo_dir, &after.sidecar.path),
+                (&written.sidecar.repo_dir, &written.sidecar.path),
+                "the repository and path survive"
+            );
+        });
+    }
+
+    /// A sidecar that records another vault id than the pin's is dropped:
+    /// an older murk accepted another vault at this path, so the records
+    /// belong to the old vault. The next write records the pin's id.
+    #[test]
+    fn a_sidecar_of_another_vault_id_is_dropped() {
+        with_home(|_| {
+            let mut pin = TrustPin {
+                vault_id: "id-1".into(),
+                ..TrustPin::default()
+            };
+            pin.sidecar
+                .deleted_groups
+                .insert("ops".into(), BTreeSet::from(["age1bob".to_string()]));
+            write("/proj/.murk", &pin).unwrap();
+            let pin_file = pin_path("/proj/.murk").unwrap();
+            let mut other: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&pin_file).unwrap()).unwrap();
+            other["vault_id"] = serde_json::json!("id-2");
+            std::fs::write(&pin_file, other.to_string()).unwrap();
+
+            let read_back = read("/proj/.murk").unwrap().unwrap();
+            assert_eq!(read_back.sidecar, Sidecar::default());
+            write("/proj/.murk", &read_back).unwrap();
+            let sidecar: Sidecar =
+                serde_json::from_slice(&std::fs::read(sidecar_path(&pin_file)).unwrap()).unwrap();
+            assert_eq!(sidecar.vault_id, "id-2");
+            assert!(sidecar.deleted_groups.is_empty());
         });
     }
 }

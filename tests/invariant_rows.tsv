@@ -22,16 +22,16 @@ R-I7-a:merge	enforced	-	authenticity	a_merge_past_the_generation_limit_leaves_ou
 R-I8-a	enforced	-	lib	another_vaults_file_is_refused	tests/mutants/R-I8-a.patch	-	A pinned vault id refuses another vault's signed file.
 R-I8-b:a	pending	lineage-load	authenticity	row_r_i8_b_a	skip rule 10	-	A byte copy of prod that saved apart, swapped in after prod saved, is refused as not descending.
 R-I8-b:b	pending	lineage-load	authenticity	row_r_i8_b_b	skip rule 10	-	As R-I8-b:a with the copy also tracked: a K1 warning names it and rule 10 still refuses.
-R-I8-b:c	known-violation	shared-vault-id	authenticity	row_r_i8_b_c	drop K2	H3	A machine that recorded both paths of one vault id refuses both while both are tracked; today both load.
+R-I8-b:c	enforced	-	authenticity	row_r_i8_b_c	tests/mutants/R-I8-b-c.patch	H3	A machine that recorded both paths of one vault id refuses both while both are tracked.
 R-I8-b:residual	control	lineage-load	authenticity	row_r_i8_b_residual	-	-	Stated residual: without a prod save after the copy, swapping in the copy is accepted.
 R-I8-c:other	enforced	-	auth_matrix	row_r_i8_c_other	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses another vault's file.
 R-I8-c:older	enforced	-	auth_matrix	row_r_i8_c_older	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses a prod revision below the minimum generation.
 R-I8-c:fork	pending	lineage-load	auth_matrix	row_r_i8_c_fork	ignore the fp part of MURK_EXPECTED_VAULT	-	A pinless runner whose MURK_EXPECTED_VAULT names a revision refuses a stale fork above the minimum.
 R-I8-d	enforced	-	trust_invariants	row_r_i8_d	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned file with another vault id.
-R-I8-e:a	known-violation	shared-vault-id	authenticity	row_r_i8_e_a	drop K1	H3	murk trust of a byte copy of a pinned vault is refused and names both paths; today it is accepted silently.
-R-I8-e:b	known-violation	shared-vault-id	authenticity	row_r_i8_e_b	apply the K1 refusal on the pinned path too	-	A planted copy: the pinned path loads with a warning naming it, a fresh clone refuses until --shares-identity-with, the copy is always refused.
-R-I8-e:c	control	shared-vault-id	authenticity	row_r_i8_e_c	apply K2 without the tracked-file check	-	A renamed vault path: every load before and after the rename is accepted.
-R-I8-e:d	known-violation	shared-vault-id	authenticity	row_r_i8_e_d	keep the other path's pin	-	murk trust --shares-identity-with retires the other path on a machine that recorded both.
+R-I8-e:a	enforced	-	authenticity	row_r_i8_e_a	tests/mutants/R-I8-e-a.patch	H3	murk trust of a byte copy of a pinned vault is refused and names both paths.
+R-I8-e:b	enforced	-	authenticity	row_r_i8_e_b	tests/mutants/R-I8-e-b.patch	-	A planted copy: the pinned path loads with a warning naming it, a fresh clone refuses until --shares-identity-with, the copy is always refused.
+R-I8-e:c	enforced	-	authenticity	row_r_i8_e_c	tests/mutants/R-I8-e-c.patch	-	A renamed vault path: every load before and after the rename is accepted.
+R-I8-e:d	enforced	-	authenticity	row_r_i8_e_d	tests/mutants/R-I8-e-d.patch	-	murk trust --shares-identity-with retires the other path on a machine that recorded both.
 R-I9-a	enforced	-	authenticity	a_merge_never_upgrades_an_unaccepted_0_13_side	tests/mutants/R-I9-a-merge.patch	-	A merge never upgrades a 0.13 side this machine has not accepted.
 R-I9-a	enforced	-	authenticity	murk_trust_never_accepts_a_0_13_copy_on_a_detached_head	tests/mutants/R-I9-a-trust.patch	-	murk trust never accepts a 0.13 copy on a detached head of an upgraded branch.
 R-I9-a	enforced	-	authenticity	merging_the_upgrade_marks_a_branch_only_once_this_machine_saves_there	tests/mutants/R-I9-a.patch	-	A 0.13 revision loads on a merged branch until this machine saves there, and is refused after.
@@ -72,7 +72,7 @@ R-I16-b:p4	pending	grant-tombstone	auth_matrix	row_r_i16_b_p4	seed a save from t
 R-I17-a	enforced	-	authenticity	a_grant_key_that_signs_is_refused_as_a_grant_signer	tests/mutants/R-I17-a.patch	-	A vault signed by a grant key is refused as one a grant key signed, not only as an untrusted signer or a listed former grant.
 R-I17-a	enforced	-	lib	a_grant_key_never_signs_even_after_dropping_its_record	tests/mutants/R-I17-a.patch	-	A grant key never signs, even after dropping its record; a trusted signature that re-lists the grant key as a plain recipient is refused too.
 R-I19-a	enforced	-	trust_invariants	row_r_i19_a	tests/mutants/R-I19-a.patch	-	A non-member adding themselves to a group is refused on every other machine.
-R-I19-b	known-violation	group-deletions	trust_invariants	row_r_i19_b	accepted_pin does not record deleted_groups	-	A non-member who re-creates a group a member deleted, with themselves in it, is refused by machines that saw the deletion; today they accept it.
+R-I19-b	enforced	-	trust_invariants	row_r_i19_b	tests/mutants/R-I19-b.patch	-	A non-member who re-creates a group a member deleted, with themselves in it, is refused by machines that saw the deletion.
 R-I20-a	enforced	-	access_invariants	row_r_i20_a	tests/mutants/R-I20-a.patch	-	Revoking a group's sole member is refused without --allow-orphan; with it the revoke reports the orphaned group and any recipient clears it.
 R-I20-b	enforced	-	authenticity	row_r_i20_b	tests/mutants/R-I20-b.patch	-	A merge that leaves a group's values with no member who is still a recipient conflicts and names the value; today the group-no-longer-exists conflict holds it, and the merge post-check must keep it.
 R-I21-a	enforced	-	trust_invariants	row_r_i21_a	tests/mutants/R-I21-a.patch	-	An ssh-rsa person refuses a forged unsigned vault until murk trust, and their next write does not happen.
@@ -95,6 +95,7 @@ R-L-compat	enforced	-	format4	row_r_l_compat	tests/mutants/R-L-compat.patch	-	A 
 R-L-verify	pending	lineage-load	cli	row_r_l_verify	drop the lineage line	-	murk verify prints a distinct lineage line for a descendant, a non-descendant and a branch with no reference.
 R-L-gitrevert	pending	lineage-merge	authenticity	row_r_l_gitrevert	M1 exits 0 when the ancestor is not in L(theirs)	-	git revert of a vault commit stops with a conflict and leaves .murk as it was, nothing signed.
 R-L-oldpin	pending	lineage-load	format4	row_r_l_oldpin	keep the new fields in the pin file instead of the sidecar	-	A pin rewritten as murk 0.15 writes it keeps the lineage sidecar and its fields.
+R-L-oldpin:sidecar	enforced	-	lib	row_r_l_oldpin_sidecar	tests/mutants/R-L-oldpin-sidecar.patch	-	A pin rewritten as murk 0.15 writes it leaves the sidecar's bytes, deleted_groups and identity fields unchanged.
 R-L-prevgen	pending	lineage-load	format4	row_r_l_prevgen	write superseded entries without the generation filter	-	A save after murk trust of an older revision (which lowers the counter outside git) never writes a prev entry at or above its own generation.
 M5:groups	enforced	-	lib	grouped_values_need_blake3v4_or_newer	tests/mutants/M5-groups.patch	M5	A legacy vault carrying a grouped value or group membership verifies only under blake3v4 and newer; every older prefix is refused.
 M5:grants	enforced	-	lib	grants_need_blake3v5_or_newer	tests/mutants/M5-grants.patch	M5	A legacy vault carrying a grant verifies only under blake3v5 and newer; every older prefix is refused.

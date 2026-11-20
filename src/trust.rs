@@ -264,6 +264,16 @@ pub enum Refusal {
     /// The vault is not the one `MURK_EXPECTED_VAULT` names, or is older
     /// than its minimum.
     NotExpected(ExpectedMismatch),
+    /// Another vault file tracked in this checkout, or another path's pin on
+    /// this machine, carries the same vault id, and this path is not the one
+    /// this machine trusts for it (see [`shared_identity`]). `others` are
+    /// those paths. `retired_by` is the path whose pin names this one in its
+    /// `identity_siblings`. Plain `murk trust` never accepts it: only `murk
+    /// trust --shares-identity-with` after review.
+    SharedVaultId {
+        others: Vec<String>,
+        retired_by: Option<String>,
+    },
 }
 
 impl Refusal {
@@ -273,8 +283,10 @@ impl Refusal {
     /// different one for the same recipient is a forgery. Nor a grant bound
     /// to an operator key, which is tampering, nor a generation past
     /// [`MAX_GENERATION`], nor a vault `MURK_EXPECTED_VAULT` refuses (the
-    /// variable, not this machine, decides it). A removed key is accepted
-    /// only when named (see [`Refusal::RemovedKey`]).
+    /// variable, not this machine, decides it), nor a vault that shares its
+    /// id with another path (only `murk trust --shares-identity-with`
+    /// accepts it). A removed key is accepted only when named (see
+    /// [`Refusal::RemovedKey`]).
     pub fn acceptable(&self) -> bool {
         !matches!(
             self,
@@ -284,6 +296,7 @@ impl Refusal {
                 | Refusal::GrantBindsOperator { .. }
                 | Refusal::GenerationOutOfRange { .. }
                 | Refusal::NotExpected(_)
+                | Refusal::SharedVaultId { .. }
         )
     }
 }
@@ -312,6 +325,10 @@ pub struct Assessment {
     /// `MURK_EXPECTED_VAULT`, when set: the verdict refuses another vault
     /// and a revision below its minimum.
     pub expected: Option<ExpectedVault>,
+    /// Other tracked vault files with the same vault id as this one, which
+    /// this machine trusts at this path: a load warns about each (see
+    /// [`shared_identity_warning`]).
+    pub shared_with: Vec<String>,
 }
 
 impl Assessment {
@@ -841,11 +858,17 @@ pub fn canonical_groups(groups: &Groups) -> BTreeMap<String, BTreeSet<String>> {
 ///
 /// `readmit` names removed keys (canonical) the user is re-adding with
 /// `murk trust --re-add`: they are judged as if never removed.
+///
+/// The vault is then checked against the other vault files in its checkout
+/// and the other paths' pins on this machine (see [`shared_identity`]).
+/// `shares_with` is the path the user named with `murk trust
+/// --shares-identity-with`, which does not refuse the vault.
 pub fn assess(
     vault_path: &str,
     loaded: &Loaded<'_>,
     anchor: Option<&TrustedSigners>,
     readmit: &BTreeSet<String>,
+    shares_with: Option<&str>,
 ) -> Result<Assessment, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
@@ -865,20 +888,178 @@ pub fn assess(
         p.removed.retain(|k, _| !readmit.contains(k));
         p
     });
-    let verdict = load_verdict(
+    let mut verdict = load_verdict(
         loaded,
         judged.as_ref(),
         external.as_ref(),
         expected.as_ref(),
         &checkout,
     );
+    let shared = shared_identity(
+        vault_path,
+        &judged_vault_id(loaded),
+        pin.as_ref(),
+        shares_with,
+    );
+    let mut shared_with = Vec::new();
+    let final_refusal = matches!(&verdict, Verdict::Refused(r) if !r.acceptable());
+    if shared.refuses() {
+        if !final_refusal {
+            verdict = Verdict::Refused(Refusal::SharedVaultId {
+                others: shared.refused,
+                retired_by: shared.retired_by,
+            });
+        }
+    } else {
+        shared_with = shared.warned;
+    }
     Ok(Assessment {
         verdict,
         pin,
         env_signers,
         external,
         expected,
+        shared_with,
     })
+}
+
+/// What other vault files and pins say about the vault id of `vault_path`
+/// (see [`shared_identity`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharedIdentity {
+    /// Other paths that make murk refuse this one: a tracked vault file with
+    /// the same id while this machine does not trust the vault at this path,
+    /// or another path's pin for the same id while its file is tracked.
+    pub refused: Vec<String>,
+    /// Other tracked vault files with the same id, while this machine trusts
+    /// the vault at this path: a warning only.
+    pub warned: Vec<String>,
+    /// The path whose pin names this one as sharing its vault id (`murk
+    /// trust --shares-identity-with`): this path is refused.
+    pub retired_by: Option<String>,
+}
+
+impl SharedIdentity {
+    /// Whether murk refuses the vault at this path.
+    pub fn refuses(&self) -> bool {
+        !self.refused.is_empty() || self.retired_by.is_some()
+    }
+}
+
+/// Two files of one vault id in one checkout. murk cannot tell such files
+/// apart (a copy of a vault keeps its id), so it loads at most one path per
+/// id here. Paths are `/`-separated paths in the checkout. For the vault id
+/// `id` at `vault_path`, with its pin `pin`:
+///
+/// - Another git-tracked vault file (`.murk`, `.murk.*`, `*.murk`) with the
+///   same id warns when the pin records `id` at this path, and refuses
+///   otherwise.
+/// - Another path's sidecar on this machine that records `id` in the same
+///   repository refuses, while that path is a tracked vault file with `id`.
+///   An untracked one (after `git mv`, or on a branch without it) does not.
+/// - A path that another path's sidecar names in `identity_siblings` is
+///   refused.
+///
+/// `shares_with` (`murk trust --shares-identity-with`) refuses nothing.
+/// Outside git, and for a vault with no id, nothing applies.
+pub fn shared_identity(
+    vault_path: &str,
+    id: &str,
+    pin: Option<&TrustPin>,
+    shares_with: Option<&str>,
+) -> SharedIdentity {
+    let mut out = SharedIdentity::default();
+    if id.is_empty() {
+        return out;
+    }
+    let Some((repo_dir, path)) = pins::vault_location(vault_path) else {
+        return out;
+    };
+    let tracked: Vec<String> = tracked_vault_files(vault_path)
+        .into_iter()
+        .filter(|(other, other_id)| *other != path && other_id == id)
+        .map(|(other, _)| other)
+        .collect();
+    let pinned_here = pin.is_some_and(|p| p.v >= pins::PIN_VERSION && p.vault_id == id);
+    for other in &tracked {
+        if pinned_here || shares_with == Some(other.as_str()) {
+            out.warned.push(other.clone());
+        } else {
+            out.refused.push(other.clone());
+        }
+    }
+    for (_, sidecar) in pins::peek_sidecars() {
+        if sidecar.repo_dir != repo_dir
+            || sidecar.vault_id != id
+            || sidecar.path == path
+            || shares_with == Some(sidecar.path.as_str())
+        {
+            continue;
+        }
+        if sidecar.identity_siblings.contains(&path) {
+            out.retired_by = Some(sidecar.path.clone());
+        }
+        if tracked.contains(&sidecar.path) && !out.refused.contains(&sidecar.path) {
+            out.warned.retain(|w| *w != sidecar.path);
+            out.refused.push(sidecar.path);
+        }
+    }
+    out
+}
+
+/// The vault id a vault file's header stands for: its `vault_id`, or for a
+/// murk 0.13 file the id its first 0.14 save takes.
+pub fn header_vault_id(vault: &types::Vault) -> String {
+    if vault.vault_id.is_empty() && written_by_0_13(vault) {
+        crate::save::derived_vault_id(vault)
+    } else {
+        vault.vault_id.clone()
+    }
+}
+
+/// The git-tracked vault files (`.murk`, `.murk.*`, `*.murk`) in the
+/// checkout that holds `vault_path`, as `/`-separated paths in the checkout,
+/// each with the vault id its file in the working tree carries. A file that
+/// does not parse is left out.
+fn tracked_vault_files(vault_path: &str) -> Vec<(String, String)> {
+    let abs = absolute(vault_path);
+    let resolved = crate::git::real_parent(&abs);
+    let Some(root) = resolved.parent().and_then(crate::git::worktree_root) else {
+        return Vec::new();
+    };
+    let Ok(out) = crate::git::git_command()
+        .args([
+            "ls-files",
+            "-z",
+            "--",
+            ":(glob)**/.murk",
+            ":(glob)**/.murk.*",
+            ":(glob)**/*.murk",
+        ])
+        .current_dir(&root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let vault = crate::vault::read(&root.join(p)).ok()?;
+            Some((p.to_string(), header_vault_id(&vault)))
+        })
+        .collect()
+}
+
+/// The warning for a load of `vault_path`, which this machine trusts, while
+/// the tracked file `other` carries the same vault id.
+pub fn shared_identity_warning(vault_path: &str, other: &str) -> String {
+    format!(
+        "{other} has the same vault id as {vault_path}. This machine trusts this vault at {vault_path} only. Remove {other} if it is a copy"
+    )
 }
 
 /// The verdict for `loaded` against `pin` as it is now (re-read under the
@@ -1410,6 +1591,16 @@ pub fn check_merge_side(
             crate::validate::show(&side.vault.vault_id)
         ));
     }
+    // Two files of one vault id in this checkout: judged as for a load.
+    let shared = shared_identity(vault_path, &judged_vault_id(side), pin.as_ref(), None);
+    if shared.refuses() {
+        let refusal = Refusal::SharedVaultId {
+            others: shared.refused,
+            retired_by: shared.retired_by,
+        };
+        let msg = refusal_message(vault_path, &refusal, side, pin.as_ref());
+        return Err(msg.lines().next().unwrap_or_default().to_string());
+    }
     if let Some(refusal) = merge_side_counter_or_removal(side, base.map(|(b, _)| b), pin.as_ref()) {
         return Err(refusal);
     }
@@ -1542,7 +1733,13 @@ pub fn removed_key_kept_by_merge(
 /// The first group whose membership changed relative to the pin without the
 /// signer being entitled to change it, if any.
 fn unauthorised_group_change(loaded: &Loaded<'_>, pin: &TrustPin, signer: &str) -> Option<String> {
-    group_change_violation(&loaded.vault.recipients, loaded.groups, &pin.groups, signer)
+    group_change_violation(
+        &loaded.vault.recipients,
+        loaded.groups,
+        &pin.groups,
+        &pin.sidecar.deleted_groups,
+        signer,
+    )
 }
 
 /// The first group in `after` (membership with `recipients` as the vault's
@@ -1551,10 +1748,16 @@ fn unauthorised_group_change(loaded: &Loaded<'_>, pin: &TrustPin, signer: &str) 
 /// they are not in, or deleting a group with members left that they are not
 /// in. Removing a member who left the vault entirely is allowed, because
 /// `circle revoke` does that and any recipient may revoke.
+///
+/// `deleted` holds groups this machine saw deleted, with their members at
+/// deletion. A group absent from `before` and present in `deleted` is
+/// judged as a change from those members: only one of them may create it
+/// again, unless none of them is still a recipient.
 pub fn group_change_violation(
     recipients: &[String],
     after: &Groups,
     before: &BTreeMap<String, BTreeSet<String>>,
+    deleted: &BTreeMap<String, BTreeSet<String>>,
     signer: &str,
 ) -> Option<String> {
     let signer = canonical_recipient(signer).into_owned();
@@ -1564,12 +1767,16 @@ pub fn group_change_violation(
         .collect();
     let current = canonical_groups(after);
     for (group, members) in &current {
-        let Some(was) = before.get(group) else {
-            // A new group: its creator must be in it (the CLI requires that).
-            if !members.contains(&signer) {
-                return Some(group.clone());
+        let was = match (before.get(group), deleted.get(group)) {
+            (Some(was), _) => was,
+            (None, Some(was)) if was.intersection(&recipients).next().is_some() => was,
+            _ => {
+                // A new group: its creator must be in it (the CLI requires that).
+                if !members.contains(&signer) {
+                    return Some(group.clone());
+                }
+                continue;
             }
-            continue;
         };
         let added = members.difference(was).next().is_some();
         let removed = was.difference(members).any(|m| recipients.contains(m));
@@ -1704,11 +1911,13 @@ pub fn accepted_pin(
     let prior_id = std::mem::take(&mut pin.vault_id);
     pin.vault_id = accepted_vault_id(loaded, &prior_id);
     // Removals belong to one vault: another vault's counters do not compare.
+    // So do the sidecar's records.
     let other_vault = !prior_id.is_empty() && prior_id != pin.vault_id;
     if other_vault {
         pin.removed.clear();
         pin.removed_on.clear();
         pin.removed_at_commit.clear();
+        pin.sidecar = pins::Sidecar::default();
     }
 
     let mut dropped = replace_trusted(&mut pin, loaded.vault, how, had_trust, current);
@@ -1756,13 +1965,35 @@ pub fn accepted_pin(
 
     pin_signing_keys(&mut pin, loaded, current);
     if current && !older_copy {
-        pin.groups = canonical_groups(loaded.groups);
+        replace_groups(&mut pin, canonical_groups(loaded.groups), other_vault);
     }
     let trusted = pin.trusted.clone();
     pin.ever_trusted.extend(trusted);
     pin.was_signed = matches!(loaded.signature, types::SignatureState::Signed { .. })
         || prior.is_some_and(|p| p.was_signed);
     pin
+}
+
+/// Set the pinned groups to `groups`, those of a vault accepted as current.
+/// Each pinned group that `groups` no longer holds is recorded in the
+/// sidecar with its members as pinned, unless `groups` belongs to another
+/// vault (`other_vault`). A group that `groups` holds again leaves the
+/// record.
+fn replace_groups(
+    pin: &mut TrustPin,
+    groups: BTreeMap<String, BTreeSet<String>>,
+    other_vault: bool,
+) {
+    let deleted = &mut pin.sidecar.deleted_groups;
+    if !other_vault {
+        for (name, members) in &pin.groups {
+            if !groups.contains_key(name) {
+                deleted.insert(name.clone(), members.clone());
+            }
+        }
+    }
+    deleted.retain(|name, _| !groups.contains_key(name));
+    pin.groups = groups;
 }
 
 /// Whether `how` is `murk trust` of an older murk 0.13 copy of this vault
@@ -2096,6 +2327,27 @@ pub fn label(names: &std::collections::HashMap<String, String>, key: &str) -> St
     }
 }
 
+/// The lines `refusal_message` adds for the recipients `loaded` adds or
+/// removes against `pin`.
+fn recipient_change_lines(loaded: &Loaded<'_>, pin: Option<&TrustPin>) -> String {
+    use std::fmt::Write;
+    let has_pin = pin.is_some_and(TrustPin::has_trust);
+    let (added, removed) = recipient_changes(loaded, pin);
+    let mut lines = String::new();
+    for k in added {
+        let what = if has_pin {
+            "recipient added"
+        } else {
+            "recipient"
+        };
+        let _ = write!(lines, "\n{what}: {}", label(loaded.names, &k));
+    }
+    for k in removed {
+        let _ = write!(lines, "\nrecipient removed: {}", label(loaded.names, &k));
+    }
+    lines
+}
+
 /// The error a secret-handling load reports for `refusal`: what happened, what
 /// to review, and how to accept it if it is legitimate.
 pub fn refusal_message(
@@ -2107,24 +2359,7 @@ pub fn refusal_message(
     let review = format!(
         "review `git log -p -- {vault_path}` and `murk diff`, then run `murk trust --vault {vault_path}` if you accept it"
     );
-    let changes = || {
-        use std::fmt::Write;
-        let has_pin = pin.is_some_and(TrustPin::has_trust);
-        let (added, removed) = recipient_changes(loaded, pin);
-        let mut lines = String::new();
-        for k in added {
-            let what = if has_pin {
-                "recipient added"
-            } else {
-                "recipient"
-            };
-            let _ = write!(lines, "\n{what}: {}", label(loaded.names, &k));
-        }
-        for k in removed {
-            let _ = write!(lines, "\nrecipient removed: {}", label(loaded.names, &k));
-        }
-        lines
-    };
+    let changes = || recipient_change_lines(loaded, pin);
     match refusal {
         Refusal::NotYetTrusted { signer } => format!(
             "vault {vault_path} is not trusted on this machine yet — signed by {}{}\n{review}\nfor CI, set {TRUSTED_SIGNERS_VAR} to the expected signer keys",
@@ -2203,7 +2438,32 @@ pub fn refusal_message(
             "vault {vault_path} has generation {found}, above the largest murk accepts ({MAX_GENERATION}) — it may have been tampered with to exhaust the counter\nrestore {vault_path} from git"
         ),
         Refusal::NotExpected(mismatch) => mismatch.message(vault_path),
+        Refusal::SharedVaultId { others, retired_by } => {
+            shared_vault_id_message(vault_path, others, retired_by.as_ref())
+        }
     }
+}
+
+/// The message for [`Refusal::SharedVaultId`].
+fn shared_vault_id_message(
+    vault_path: &str,
+    others: &[String],
+    retired_by: Option<&String>,
+) -> String {
+    if let Some(by) = retired_by
+        && others.iter().all(|o| o == by)
+    {
+        return format!(
+            "vault {vault_path} has the same vault id as {by}, and this machine trusts that vault at {by} only (`murk trust --shares-identity-with`). murk cannot tell two files with one vault id apart\nuse {by}, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {by}` to trust the vault at {vault_path} instead"
+        );
+    }
+    let mut paths = others.to_vec();
+    paths.extend(retired_by.filter(|b| !others.contains(b)).cloned());
+    let first = paths.first().map_or("", String::as_str);
+    format!(
+        "vault {vault_path} has the same vault id as {}. murk cannot tell two files with one vault id apart, so this machine loads only one of them\nremove the other file, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {first}`",
+        paths.join(", ")
+    )
 }
 
 /// The message for an unsigned vault refused by rule R1 (no trust decision
@@ -3055,11 +3315,40 @@ mod tests {
         let after = BTreeMap::from([("ops".to_string(), vec![A.to_string(), M.to_string()])]);
         let recipients = [A.to_string(), B.to_string(), M.to_string()];
         assert_eq!(
-            group_change_violation(&recipients, &after, &before, B),
+            group_change_violation(&recipients, &after, &before, &BTreeMap::new(), B),
             Some("ops".into())
         );
         assert_eq!(
-            group_change_violation(&recipients, &after, &before, A),
+            group_change_violation(&recipients, &after, &before, &BTreeMap::new(), A),
+            None
+        );
+    }
+
+    /// A group this machine saw deleted is judged, when it comes back, as a
+    /// change from its members at deletion: a non-member who re-creates it
+    /// (on load, or as the merging key) is refused, a recorded member is not,
+    /// and once every recorded member has left the vault it is a new group.
+    #[test]
+    fn a_deleted_group_comes_back_only_through_one_of_its_members() {
+        let deleted = canonical_groups(&BTreeMap::from([(
+            "ops".to_string(),
+            vec![A.to_string(), B.to_string()],
+        )]));
+        let none = BTreeMap::new();
+        let by_m = BTreeMap::from([("ops".to_string(), vec![M.to_string()])]);
+        let by_a = BTreeMap::from([("ops".to_string(), vec![A.to_string()])]);
+        let all = [A.to_string(), B.to_string(), M.to_string()];
+        assert_eq!(
+            group_change_violation(&all, &by_m, &none, &deleted, M),
+            Some("ops".into())
+        );
+        assert_eq!(group_change_violation(&all, &by_m, &none, &none, M), None);
+        assert_eq!(
+            group_change_violation(&all, &by_a, &none, &deleted, A),
+            None
+        );
+        assert_eq!(
+            group_change_violation(&[M.to_string()], &by_m, &none, &deleted, M),
             None
         );
     }
@@ -3491,6 +3780,7 @@ mod tests {
             env_signers: None,
             external,
             expected: None,
+            shared_with: Vec::new(),
         }
     }
 
