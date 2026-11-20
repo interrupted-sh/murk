@@ -1,6 +1,16 @@
 --- a/src/merge.rs
 +++ b/src/merge.rs
-@@ -1591,7 +1591,7 @@
+@@ -1403,7 +1403,8 @@
+             ),
+         });
+     }
+-    orphan_conflict(merged, meta)
++    let _ = orphan_conflict;
++    None
+ }
+ 
+ /// The conflict for a merge result that leaves a group holding values with
+@@ -1928,7 +1929,7 @@
      for (key, entry) in &merged.secrets {
          for (group, ciphertext) in &entry.grouped {
              let members = groups.get(group);

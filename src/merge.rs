@@ -1362,10 +1362,11 @@ fn merged_generation(
 /// Why the merged result must not be signed by the merging key, if it must
 /// not: the group rule a load applies (a membership change needs a member's
 /// signature) must hold for that key against ours, or every machine would
-/// refuse the result; and a key removed on this machine may come back only
+/// refuse the result; a key removed on this machine may come back only
 /// through a side numbered past its removal — older sides that merely still
 /// list it must not carry it into a result numbered and signed past
-/// everything.
+/// everything; and the result must leave no group orphaned (see
+/// [`orphan_conflict`]).
 fn result_conflict(
     identity: &crate::crypto::MurkIdentity,
     merged: &Vault,
@@ -1392,12 +1393,35 @@ fn result_conflict(
             ),
         });
     }
-    let (key, at) = crate::trust::removed_key_kept_by_merge(pin, merged, &[ours, theirs])?;
+    if let Some((key, at)) = crate::trust::removed_key_kept_by_merge(pin, merged, &[ours, theirs]) {
+        return Some(MergeConflict {
+            field: format!("recipients.{}", recipient_label(&key)),
+            reason: format!(
+                "rolled back: {} was removed from this vault at generation {at} on this machine, and neither side re-adds them in a newer revision — merge the branch that removed them first",
+                crate::truncate_pubkey(&key)
+            ),
+        });
+    }
+    orphan_conflict(merged, meta)
+}
+
+/// The conflict for a merge result that leaves a group holding values with
+/// no member who is a recipient (see [`crate::orphaned_groups`]). No
+/// recipient could read or rotate those values, and a merge has no
+/// `--allow-orphan`, so the merge stops. For example: one side revokes the
+/// group's last member, and the other side adds a value to the group.
+fn orphan_conflict(merged: &Vault, meta: &Meta) -> Option<MergeConflict> {
+    let state = crate::types::Murk {
+        groups: meta.groups.clone(),
+        ..Default::default()
+    };
+    let group = crate::orphaned_groups(merged, &state).into_iter().next()?;
+    let name = &group.name;
     Some(MergeConflict {
-        field: format!("recipients.{}", recipient_label(&key)),
+        field: format!("groups.{name}"),
         reason: format!(
-            "rolled back: {} was removed from this vault at generation {at} on this machine, and neither side re-adds them in a newer revision — merge the branch that removed them first",
-            crate::truncate_pubkey(&key)
+            "after the merge, group {name} has no member who is a recipient. No recipient can read or rotate {keys}. Abort the merge. Then add a recipient to group {name}, or remove each value with `murk rm KEY --group {name}` and the group with `murk group rm {name}`. Then merge again",
+            keys = group.keys.join(", ")
         ),
     })
 }
@@ -3400,6 +3424,71 @@ mod tests {
         );
         assert!(!regenerated, "a conflicted merge must not get a fresh MAC");
         assert_eq!(result.vault.meta, ours.meta);
+    }
+
+    /// R-I20-b, seeded arm: the merge result still has group `ops`, but its
+    /// only member, bob, is no longer a recipient, so nobody in the vault can
+    /// read `GROUP_K`. The ancestor is not an authority, so the merge is two-way and
+    /// keeps the group as both sides have it: only the post-check on the
+    /// merge result can stop it. The control, with alice in the group, is clean.
+    #[test]
+    fn row_r_i20_b_seeded() {
+        use crate::testutil::{ENV_LOCK, generate_keypair, make_identity};
+
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (alice_secret, alice) = generate_keypair();
+        let identity = make_identity(&alice_secret);
+        let (_, bob) = generate_keypair();
+        let merge = |member: &str| {
+            let meta = crate::types::Meta {
+                groups: BTreeMap::from([("ops".to_string(), vec![member.to_string()])]),
+                ..Default::default()
+            };
+            let mut ours = base_vault();
+            ours.recipients = vec![alice.clone()];
+            ours.generation = 2;
+            ours.vault_id = "00112233445566778899aabbccddeeff".into();
+            ours.secrets.insert(
+                "GROUP_K".to_string(),
+                SecretEntry {
+                    grouped: BTreeMap::from([("ops".to_string(), "Y2lwaGVy".to_string())]),
+                    ..Default::default()
+                },
+            );
+            // An unsigned ancestor is no authority: the merge is two-way.
+            let mut base = ours.clone();
+            base.generation = 1;
+            seal(&mut base, &meta, &identity);
+            base.sig = None;
+            seal(&mut ours, &meta, &identity);
+            let theirs = ours.clone();
+            let (result, regenerated) = trusting(&alice_secret, &alice, || {
+                keyed(&base, &ours, &theirs, ".murk")
+            });
+            (ours, result, regenerated)
+        };
+
+        let (_, control, regenerated) = merge(&alice);
+        assert!(
+            regenerated && control.conflicts.is_empty(),
+            "the merge with a recipient in the group is clean: {:?}",
+            control.conflicts
+        );
+
+        let (ours, result, regenerated) = merge(&bob);
+        assert!(
+            result
+                .conflicts
+                .iter()
+                .any(|c| c.field == "groups.ops" && c.reason.contains("GROUP_K")),
+            "{:?}",
+            result.conflicts
+        );
+        assert!(!regenerated, "a conflicted merge must not get a fresh MAC");
+        assert_eq!(result.vault.meta, ours.meta);
+        assert!(result.vault.sig.is_none(), "nothing is signed");
     }
 
     #[test]
