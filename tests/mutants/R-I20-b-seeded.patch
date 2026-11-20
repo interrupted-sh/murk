@@ -1,6 +1,6 @@
 --- a/src/merge.rs
 +++ b/src/merge.rs
-@@ -1473,7 +1473,8 @@
+@@ -1480,7 +1480,8 @@
              reason,
          });
      }
@@ -9,4 +9,4 @@
 +    None
  }
  
- /// The conflict for a merge result that leaves a group holding values with
+ /// The conflict for a merge result that holds a grant key this machine

@@ -1,10 +1,10 @@
 --- a/src/load.rs
 +++ b/src/load.rs
-@@ -761,7 +761,6 @@
-                         pin.removed_at_commit = prior.removed_at_commit;
-                         pin.groups = prior.groups;
+@@ -778,7 +778,6 @@
                          pin.sidecar.deleted_groups = prior.sidecar.deleted_groups;
+                         pin.sidecar.revoked_grants_seen = prior.sidecar.revoked_grants_seen;
+                         pin.sidecar.grants_live_on = prior.sidecar.grants_live_on;
 -                        pin.accepted_pre_upgrade = prior.accepted_pre_upgrade;
                      }
+                     pin_after = Some(pin.clone());
                      Ok((fresh != Some(&pin)).then_some(pin))
-                 });

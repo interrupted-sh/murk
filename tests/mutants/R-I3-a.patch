@@ -1,11 +1,18 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -1422,7 +1422,7 @@
-             newer
-                 && match head {
-                     HeadState::NotARepo => true,
--                    HeadState::Branch(_) => branch_seen,
-+                    HeadState::Branch(_) => branch_seen || true,
-                     HeadState::Detached => false,
-                 }
-         }),
+@@ -2059,7 +2059,14 @@
+     // the vault outside git) is current (see `is_current`): history only
+     // narrows the pin.
+     let current = match how {
+-        Acceptance::Load => is_current(loaded.vault, prior_v2, head),
++        Acceptance::Load => is_current(
++            loaded.vault,
++            prior_v2,
++            match head {
++                HeadState::Branch(_) => &HeadState::NotARepo,
++                h => h,
++            },
++        ),
+         Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
+     };
+     let mut pin = prior_v2.cloned().unwrap_or_default();

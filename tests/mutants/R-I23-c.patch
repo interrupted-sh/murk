@@ -1,15 +1,10 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1369,12 +1369,15 @@
+@@ -1369,7 +1369,15 @@
      if !is_commit_id(commit) || worktree_root(dir).is_none() {
          return false;
      }
--    git_succeeds(
--        dir,
--        git_command()
--            .args(["merge-base", "--is-ancestor", "HEAD"])
--            .arg(commit),
--    ) && vault_committed_at_head(dir, name)
+-    is_ancestor(dir, "HEAD", commit) && vault_committed_at_head(dir, name)
 +    git_command()
 +        .args(["merge-base", "--is-ancestor", "HEAD"])
 +        .arg(commit)
@@ -21,4 +16,4 @@
 +        && vault_committed_at_head(dir, name)
  }
  
- /// A path naming a vault the same way from every worktree of its repository:
+ /// Whether `a` is `b` or an ancestor of it, in the repository holding the
