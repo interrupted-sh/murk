@@ -436,7 +436,7 @@ fn row_r_i11_c_2() {
         let control = TempDir::new().unwrap();
         Retired::control(control.path())?;
         let base = TempDir::new().unwrap();
-        let (scene, merged) = empty_ancestor_replay(base.path(), true);
+        let (_, merged) = empty_ancestor_replay(base.path(), true);
         require_ran(p, &merged, "cherry-pick")?;
         p.reached();
         p.target(!merged.ok, "the cherry-pick stops with a conflict");
@@ -446,13 +446,35 @@ fn row_r_i11_c_2() {
         );
         p.target(!merged.has("OLD_TOKEN"), "OLD_TOKEN stays removed");
         p.target(!merged.signed(), "nothing is signed");
-        p.today(merged.ok, "the cherry-pick completes");
-        p.today(merged.has("OLD_TOKEN"), "OLD_TOKEN is back in the vault");
-        p.today(merged.signed(), "the merge result is signed");
-        p.today(
-            scene.team.get("OLD_TOKEN").as_deref() == Some("old-token\n"),
-            "alice reads the resurrected value",
+        Ok(())
+    });
+}
+
+/// Arm 1 on format 3, with no lineage to show that ours contains theirs: the
+/// empty forged ancestor is no authority, so the merge is two-way. It stops
+/// with a conflict, keeps ours' values and policy, and signs nothing.
+#[test]
+fn row_r_i11_c_1_v3() {
+    check("R-I11-c:1-v3", |p| {
+        let control = TempDir::new().unwrap();
+        Retired::control(control.path())?;
+        let base = TempDir::new().unwrap();
+        let (scene, merged) = empty_ancestor_replay(base.path(), false);
+        require_ran(p, &merged, "cherry-pick")?;
+        p.reached();
+        p.target(!merged.ok, "the cherry-pick stops with a conflict");
+        p.target(!merged.has("OLD_TOKEN"), "OLD_TOKEN stays removed");
+        p.target(
+            merged.secret("DB_URL") == secret_in(&scene.ours, "DB_URL"),
+            "DB_URL keeps ours' value",
         );
+        p.target(
+            merged
+                .vault()
+                .is_some_and(|v| Some(v.policy) == parse(&scene.ours).map(|o| o.policy)),
+            "the policy is ours'",
+        );
+        p.target(!merged.signed(), "nothing is signed");
         Ok(())
     });
 }
@@ -461,6 +483,8 @@ fn row_r_i11_c_2() {
 enum Ancestor {
     /// A forged unsigned 0.13-shaped file the key reads.
     Forged,
+    /// As `Forged`, numbered at theirs' counter, with a fresh MAC.
+    Counted,
     /// A file the key cannot open (its meta belongs to another vault).
     Unreadable,
 }
@@ -477,11 +501,20 @@ fn replay_into_rotated(base: &Path, fork: bool, ancestor: &Ancestor) -> Replay {
     } else {
         team.r0_file.clone()
     };
+    let forged = || {
+        let keys: Vec<String> = parse(&theirs).unwrap().secrets.keys().cloned().collect();
+        let keep: Vec<&str> = keys.iter().map(String::as_str).collect();
+        forged_ancestor(&team.alice, &ours, &keep, true)
+    };
     let ancestor = match ancestor {
-        Ancestor::Forged => {
-            let keys: Vec<String> = parse(&theirs).unwrap().secrets.keys().cloned().collect();
-            let keep: Vec<&str> = keys.iter().map(String::as_str).collect();
-            forged_ancestor(&team.alice, &ours, &keep, true)
+        Ancestor::Forged => forged(),
+        Ancestor::Counted => {
+            let identity = murk_cli::crypto::parse_identity(&team.alice.secret_key()).unwrap();
+            let mut vault = parse(&forged()).unwrap();
+            vault.generation = parse(&theirs).unwrap().generation;
+            forgery::reseal(&mut vault, &identity);
+            vault.sig = None;
+            to_file(&vault)
         }
         Ancestor::Unreadable => {
             let other = fs::read(mallory_vault(base, &[], &[])).unwrap();
@@ -583,7 +616,7 @@ fn row_r_i11_a_2() {
         genuine_fork_merges(control.path())?;
         let base = TempDir::new().unwrap();
         let replay = replay_into_rotated(base.path(), true, &Ancestor::Forged);
-        let (merged, ours, theirs) = (&replay.merged, &replay.ours, &replay.theirs);
+        let (merged, ours) = (&replay.merged, &replay.ours);
         require_ran(p, merged, "cherry-pick")?;
         p.reached();
         let ours_policy = parse(ours).unwrap().policy;
@@ -601,19 +634,62 @@ fn row_r_i11_a_2() {
             "the policy is kept",
         );
         p.target(!merged.signed(), "nothing is signed");
-        p.today(merged.ok, "the cherry-pick completes");
-        p.today(
-            merged.secret("DB_URL") == secret_in(theirs, "DB_URL"),
-            "DB_URL is back to the leaked value",
+        Ok(())
+    });
+}
+
+/// Arm 1 on format 3, with no lineage to show that ours contains theirs: the
+/// forged ancestor is no authority, so the merge is two-way. The cherry-pick
+/// stops with a conflict, keeps the rotated `DB_URL` and the policy, and
+/// signs nothing.
+#[test]
+fn row_r_i11_a_1_v3() {
+    check("R-I11-a:1-v3", |p| {
+        let control = TempDir::new().unwrap();
+        genuine_fork_merges(control.path())?;
+        let base = TempDir::new().unwrap();
+        let replay = replay_into_rotated(base.path(), false, &Ancestor::Forged);
+        let (merged, ours, theirs) = (&replay.merged, &replay.ours, &replay.theirs);
+        require_ran(p, merged, "cherry-pick")?;
+        old_revision_is_refused(&replay.team, theirs)?;
+        p.reached();
+        let ours_policy = parse(ours).unwrap().policy;
+        p.target(!merged.ok, "the cherry-pick stops with a conflict");
+        p.target(
+            merged.secret("DB_URL") == secret_in(ours, "DB_URL"),
+            "DB_URL keeps the rotated value",
         );
-        p.today(
-            merged.vault().is_some_and(|v| v.policy.is_none()),
-            "the policy is gone",
+        p.target(
+            merged.vault().is_some_and(|v| v.policy == ours_policy),
+            "the policy is kept",
         );
-        p.today(merged.signed(), "the merge result is signed");
-        p.today(
-            replay.team.get("DB_URL").as_deref() == Some("prod-db\n"),
-            "alice reads the leaked value",
+        p.target(!merged.signed(), "nothing is signed");
+        Ok(())
+    });
+}
+
+/// As the format-3 arm 1, with the forged ancestor numbered at theirs'
+/// counter: theirs changed the vault but is not numbered above the ancestor,
+/// so the driver refuses theirs as rolled back and leaves ours, byte for byte.
+#[test]
+fn row_r_i11_a_1_v3_counter() {
+    check("R-I11-a:1-v3-counter", |p| {
+        let base = TempDir::new().unwrap();
+        let replay = replay_into_rotated(base.path(), false, &Ancestor::Counted);
+        let (merged, ours) = (&replay.merged, &replay.ours);
+        require_ran(p, merged, "cherry-pick")?;
+        p.reached();
+        p.target(!merged.ok, "the cherry-pick stops with a conflict");
+        p.target(
+            merged
+                .stderr
+                .contains("theirs failed its authenticity check")
+                && merged.stderr.contains("rolled back"),
+            "stderr names theirs as rolled back",
+        );
+        p.target(
+            &merged.file == ours,
+            "the working file is ours, byte for byte",
         );
         Ok(())
     });
@@ -942,13 +1018,43 @@ fn row_r_i10_g_2() {
             "the driver names the ancestor",
         );
         p.target(!merged.signed(), "nothing is signed");
-        p.today(merged.ok, "the merge completes");
-        p.today(
-            scene.get("T1").as_deref() == Some("t1\n")
-                && scene.get("O1").as_deref() == Some("o1\n"),
-            "the result keeps both additions, resolved from bob's base",
+        Ok(())
+    });
+}
+
+/// Arm 1 on format 3, with no lineage to show that ours contains theirs:
+/// bob's revision is no authority, so the merge of alice's C2a into main is
+/// two-way. It conflicts on recipient bob and on `O1`, keeps ours' values and
+/// policy, and signs nothing.
+#[test]
+fn row_r_i10_g_1_v3() {
+    check("R-I10-g:1-v3", |p| {
+        let base = TempDir::new().unwrap();
+        let scene = Offboarded::new(base.path());
+        let repo = &scene.repo;
+        git_ok(repo, &["checkout", "-q", "-b", "pr", &scene.c2]);
+        put(repo, &scene.c2a_file, "pr: alice's revision under bob's");
+        git_ok(repo, &["checkout", "-q", "main"]);
+        let merged = Merged::merge(&scene.alice, repo, "pr");
+        require_ran(p, &merged, "merge")?;
+        p.reached();
+        p.target(!merged.ok, "the merge stops with a conflict");
+        p.target(
+            merged.stderr.contains("recipients.") && merged.stderr.contains("secrets.O1"),
+            "the conflicts name the recipient bob and O1",
         );
-        p.today(merged.signed(), "the merge result is signed");
+        for key in ["DB_URL", "K", "PRE", "O1"] {
+            p.target(
+                merged.secret(key) == secret_in(&scene.ours, key),
+                format!("{key} keeps ours' value"),
+            );
+        }
+        let ours_policy = parse(&scene.ours).unwrap().policy;
+        p.target(
+            merged.vault().is_some_and(|v| v.policy == ours_policy),
+            "the policy is ours'",
+        );
+        p.target(!merged.signed(), "nothing is signed");
         Ok(())
     });
 }
@@ -1055,10 +1161,9 @@ fn nothing_new_signed(result: &[u8], ours: &[u8]) -> bool {
 /// no entries), every one-sided change to a vault part conflicts and keeps
 /// ours: a secret in each tier, a description, the policy, a recipient, an
 /// agent grant, a group. One cell per change, driven through the real merge
-/// driver. The cells murk 0.15 merges cleanly are recorded as `today`. Every
-/// cell is also run over the vault itself with its signature stripped (id and
-/// MAC intact): that ancestor is no authority either, so each cell conflicts
-/// and nothing new is signed.
+/// driver. Every cell is also run over the vault itself with its signature
+/// stripped (id and MAC intact): that ancestor is no authority either, so
+/// each cell conflicts and nothing new is signed.
 #[test]
 fn row_r_i11_d_two_way() {
     check("R-I11-d:two-way", |p| {
@@ -1148,7 +1253,6 @@ fn row_r_i11_d_two_way() {
         )?;
 
         p.reached();
-        let mut cleanly = Vec::new();
         for (n, (name, field, ours_ops, theirs_ops)) in cells.iter().enumerate() {
             let tag = format!("cell{n}");
             let ours = derive(
@@ -1177,9 +1281,6 @@ fn row_r_i11_d_two_way() {
                 conflicts,
                 format!("{name}: a conflict naming {field}, ours kept"),
             );
-            if run.ok && parse(&run.result).is_some_and(|v| v.sig.is_some()) {
-                cleanly.push(*name);
-            }
             let dir = base.path().join(format!("{tag}-stripped"));
             fs::create_dir_all(&dir).unwrap();
             let run = drive(alice.murk(repo), &dir, [&stripped, &ours, &theirs], None);
@@ -1192,21 +1293,6 @@ fn row_r_i11_d_two_way() {
                 format!(
                     "{name}: over the unsigned vault as ancestor, a conflict and nothing new signed"
                 ),
-            );
-        }
-        p.note(format!(
-            "merged cleanly and signed today: {}",
-            cleanly.join(", ")
-        ));
-        for name in [
-            "secret added",
-            "group value added",
-            "policy removed",
-            "policy added",
-        ] {
-            p.today(
-                cleanly.contains(&name),
-                format!("{name}: merges cleanly and the result is signed"),
             );
         }
         Ok(())
@@ -1570,8 +1656,7 @@ impl Before {
 
     /// After a merge that refused an input: the working file is ours, it
     /// loads and verifies as before, the pin is untouched and `injected`, the
-    /// recipient the refused input added, is not in the file. What murk does
-    /// today (merged content written, unsigned) is recorded too.
+    /// recipient the refused input added, is not in the file.
     fn refused_input_leaves_ours(
         &self,
         p: &mut Probe,
@@ -1606,12 +1691,6 @@ impl Before {
             !recipients.iter().any(|r| r == injected),
             "the recipient the refused input adds is not in the file",
         );
-        p.today(merged.file != self.ours, "the working file is not ours");
-        p.today(
-            recipients.iter().any(|r| r == injected),
-            "the refused input's recipient is in the working file",
-        );
-        p.today(!merged.signed(), "the working file carries no signature");
     }
 }
 
@@ -1989,6 +2068,103 @@ fn row_r_l_gitrevert() {
     });
 }
 
+/// What a refused revert or cherry-pick of a vault commit must leave: git
+/// stops with a conflict on `.murk`, the file is ours (H's) byte for byte,
+/// and the driver names theirs as rolled back.
+fn revert_refused(p: &mut Probe, repo: &Path, reverted: &Merged, h_file: &[u8]) {
+    let unresolved =
+        String::from_utf8_lossy(&git(repo, &["diff", "--name-only", "--diff-filter=U"]).stdout)
+            .trim()
+            .to_string();
+    p.target(!reverted.ok, "git stops with a conflict");
+    p.target(unresolved == ".murk", "the conflict is on .murk");
+    p.target(
+        reverted.file == h_file,
+        ".murk is byte for byte what it was (H's)",
+    );
+    p.target(
+        reverted
+            .stderr
+            .contains("theirs failed its authenticity check")
+            && reverted.stderr.contains("rolled back"),
+        "stderr names theirs as rolled back",
+    );
+}
+
+/// `git revert` of vault commit C with a later vault commit H, on format 3:
+/// theirs (C's parent) is older than the ancestor (C), so the driver refuses
+/// it as rolled back and leaves H's file as it was.
+#[test]
+fn row_r_l_gitrevert_v3() {
+    check("R-L-gitrevert:v3", |p| {
+        let base = TempDir::new().unwrap();
+        let (alice, repo, _, c, _, h_file) = revert_scene(base.path());
+        let reverted = Merged::of(git_as(&alice, &repo, &["revert", "--no-edit", &c]), &repo);
+        require_ran(p, &reverted, "revert")?;
+        p.reached();
+        revert_refused(p, &repo, &reverted, &h_file);
+        Ok(())
+    });
+}
+
+/// The revert of C, made on a branch at C (where git needs no driver), is
+/// cherry-picked over the later vault work on main: the same refusal as a
+/// `git revert` there.
+#[test]
+fn row_r_l_gitrevert_v3_pick() {
+    check("R-L-gitrevert:v3-pick", |p| {
+        let base = TempDir::new().unwrap();
+        let (alice, repo, _, c, _, h_file) = revert_scene(base.path());
+        git_ok(&repo, &["checkout", "-q", "-b", "undo", &c]);
+        let (made, stderr) = git_as(&alice, &repo, &["revert", "--no-edit", &c]);
+        p.require(
+            made,
+            format!("the revert commit on a branch at C: {stderr}"),
+        )?;
+        let undo = head_commit(&repo);
+        git_ok(&repo, &["checkout", "-q", "main"]);
+        let picked = Merged::cherry_pick(&alice, &repo, &undo);
+        require_ran(p, &picked, "cherry-pick")?;
+        p.reached();
+        revert_refused(p, &repo, &picked, &h_file);
+        Ok(())
+    });
+}
+
+/// A stated limit: a cherry-pick of commit S (made on R0, adds `Z`) onto a
+/// main that rotated `DB_URL` after R0 runs three-way over R0, which is an
+/// authority, and applies as git does. The pick completes, `Z` is present,
+/// `DB_URL` keeps the rotated value, and the merging key signs the result.
+#[test]
+fn row_r_l_cherrypick_stale_base() {
+    check("R-L-cherrypick:stale-base", |p| {
+        let base = TempDir::new().unwrap();
+        let team = Team::new(base.path());
+        team.fork(base.path(), "s", &team.r0, "Z");
+        team.rotate_only();
+        let picked = Merged::cherry_pick(&team.alice, &team.repo, "s");
+        require_ran(p, &picked, "cherry-pick")?;
+        p.reached();
+        p.target(picked.ok, "the cherry-pick completes");
+        p.target(
+            team.get("Z").as_deref() == Some("Z-value\n"),
+            "Z is in the vault",
+        );
+        p.target(
+            team.get("DB_URL").as_deref() == Some("rotated-db\n"),
+            "DB_URL keeps the rotated value",
+        );
+        p.target(
+            picked
+                .vault()
+                .and_then(|v| v.sig)
+                .is_some_and(|s| s.signer == team.alice.pubkey()),
+            "the merging key signs the result",
+        );
+        Ok(())
+    });
+}
+
 // ── R-I11-d:stripped: the genuine first vault, signature removed ──
 
 /// A repo writer commits the genuine first vault with its signature removed
@@ -2010,11 +2186,11 @@ fn stripped_ancestor_replay(base: &Path, strip: bool) -> (Retired, Merged) {
     (scene, merged)
 }
 
-/// An unsigned ancestor that carries a vault id is refused: the driver stops
-/// with a conflict naming the ancestor and signs nothing, and the deleted
-/// secret is never served. Only a murk 0.13 file, which has no id, is taken
-/// as unsigned history. The control, the same cherry-pick over the signed
-/// genuine ancestor, merges.
+/// An unsigned ancestor that carries a vault id is no authority: the driver
+/// stops with a conflict naming the ancestor and signs nothing, and the
+/// deleted secret is never served. Only the raw ancestor of two murk 0.13
+/// sides, which have no id, decides a merge unsigned. The control, the same
+/// cherry-pick over the signed genuine ancestor, merges.
 #[test]
 fn row_r_i11_d_stripped() {
     check("R-I11-d:stripped", |p| {
@@ -2043,6 +2219,90 @@ fn row_r_i11_d_stripped() {
         p.target(
             scene.team.get("OLD_TOKEN").is_none(),
             "the deleted OLD_TOKEN is not served",
+        );
+        Ok(())
+    });
+}
+
+// ── R-I12-a:first-write: the driver signs only what this machine accepts ──
+
+/// `git merge <branch>` on `laptop`, with its key file as the merging key.
+fn merge_on(laptop: &Laptop, repo: &Path, branch: &str) -> Merged {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-c", "commit.gpgsign=false", "merge", "--no-edit", branch])
+        .current_dir(repo)
+        .env("HOME", &laptop.machine.home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    for var in common::MURK_CONTEXT_VARS {
+        cmd.env_remove(var);
+    }
+    let out = cmd.env("MURK_KEY_FILE", &laptop.key).output().unwrap();
+    Merged::of(
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ),
+        repo,
+    )
+}
+
+/// Bob's machine trusts the vault, but no vault it accepted carries bob's own
+/// verifying key yet. A merge that bob's key would sign is then a vault this
+/// machine refuses on its next load (its signing key is not confirmed), so
+/// the driver refuses to sign it and leaves ours as it was. The control: once
+/// bob has saved on that machine, the same merge is clean and bob reads it.
+#[test]
+fn row_r_i12_a_first_write() {
+    check("R-I12-a:first-write", |p| {
+        let scene = |base: &Path, save_first: bool| {
+            let team = Team::new(base);
+            team.fork(base, "x", &team.r0, "XK");
+            team.alice.add(&team.repo, "MK", "mk");
+            commit(&team.repo, "main moves");
+            let bob = Laptop {
+                key: team.bob.key_file(),
+                machine: Machine::new(base, "bob-laptop"),
+            };
+            bob.ok(&team.repo, &["trust", "--yes"]);
+            if save_first {
+                bob.add(&team.repo, "BOB_K", "bob");
+                commit(&team.repo, "bob saves");
+            }
+            let ours = working(&team.repo);
+            let merged = merge_on(&bob, &team.repo, "x");
+            (team, bob, ours, merged)
+        };
+        let control = TempDir::new().unwrap();
+        let (team, bob, _, merged) = scene(control.path(), true);
+        let reads = bob
+            .command(&team.repo)
+            .args(["get", "XK"])
+            .output()
+            .unwrap();
+        p.require(
+            merged.ok && reads.stdout == b"XK-value\n",
+            format!(
+                "after an own save, the merge is clean and bob reads it: {}",
+                merged.stderr
+            ),
+        )?;
+
+        let base = TempDir::new().unwrap();
+        let (_, _, ours, merged) = scene(base.path(), false);
+        require_ran(p, &merged, "merge")?;
+        p.reached();
+        p.target(!merged.ok, "the merge stops");
+        p.target(
+            merged.stderr.contains("would refuse the merged vault"),
+            "the driver says this machine would refuse the result",
+        );
+        p.target(
+            merged.file == ours,
+            "the working file is ours, byte for byte",
         );
         Ok(())
     });

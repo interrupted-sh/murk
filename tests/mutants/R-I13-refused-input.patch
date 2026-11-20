@@ -1,0 +1,16 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1069,11 +1069,8 @@
+     let ancestor = match authenticate_inputs(vault_path, base, ours, theirs, identity) {
+         Ok(ancestor) => ancestor,
+         Err(conflict) => {
+-            let refused = MergeResult {
+-                vault: ours.clone(),
+-                conflicts: vec![conflict],
+-                rekeyed: BTreeSet::new(),
+-            };
++            let mut refused = merge_vaults(Base::Authority(base), ours, theirs);
++            refused.conflicts.push(MergeConflict { field: format!("refused {}", conflict.field), reason: conflict.reason });
+             return Ok((refused, false));
+         }
+     };

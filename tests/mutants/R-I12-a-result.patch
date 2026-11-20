@@ -1,0 +1,10 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1269,6 +1269,7 @@
+     // and `murk trust`. The signature covers the finished file, so it comes last.
+     merged.sig = crate::sign_vault(merged, identity);
+     if merged.sig.is_some()
++        && false
+         && let Some(reason) = result_refusal(vault_path, merged, identity)?
+     {
+         conflicts.push(MergeConflict {

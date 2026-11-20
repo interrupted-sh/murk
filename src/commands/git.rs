@@ -108,9 +108,12 @@ pub(crate) fn cmd_merge_driver(
         process::exit(1);
     }
 
-    // A merge numbered past the save counter's limit, or one with a murk 0.13
-    // side this machine hasn't accepted, is refused outright: write nothing,
-    // so git keeps ours as the working file.
+    // A merge that refuses an input (the common ancestor, ours or theirs
+    // failed its authenticity check, or the sides are different vaults), one
+    // numbered past the save counter's limit, one with a murk 0.13 side this
+    // machine hasn't accepted, or one whose signed result this machine would
+    // refuse, writes nothing: git keeps ours as the working file, byte for
+    // byte, and nothing of a refused input reaches it.
     if let Some(refused) = output.result.conflicts.iter().find(|c| c.writes_nothing()) {
         eprintln!(
             "{} {} — {}",
@@ -121,9 +124,15 @@ pub(crate) fn cmd_merge_driver(
         for line in &ours_unchanged {
             eprintln!("  {line}");
         }
-        eprintln!(
-            "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
-        );
+        if matches!(refused.field.as_str(), "base" | "theirs" | "vault_id") {
+            eprintln!(
+                "  to finish: keep ours (git checkout --ours -- {arg}), then make the intended change with murk. Do not take the refused input"
+            );
+        } else {
+            eprintln!(
+                "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
+            );
+        }
         process::exit(1);
     }
 
