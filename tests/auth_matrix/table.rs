@@ -321,7 +321,7 @@ const LOADS: &str = "`rotate --list` loads and verifies the vault before trustin
 const GRANT_DIFF: &str = "a grant can't read the meta, so it can't verify the git revision `diff` compares against, and nothing unverified is shown";
 const OTHERS_ONLY: &str = "the key holds only another recipient's personal value: there is no tier the caller could keep, and murk never picks a wider one";
 const SELF_REVOKE: &str = "revoking your own key would lock the writer out mid-command, so murk asks another recipient to do it";
-const MERGE_KEYLESS: &str = "a key that can't read both sides' meta can't rebuild the integrity metadata, so the driver reports a conflict and git keeps the merge out of history";
+const MERGE_UNREADABLE: &str = "a key that can't read ours and theirs can't check them, so the driver refuses the merge and writes nothing: the working file stays ours, and git records a conflict";
 
 /// Readers of everything current: recipients only.
 const RECIPIENTS: [Cell; 10] = [A, A, A, A, A, R, R, R, R, R];
@@ -888,8 +888,8 @@ pub const ROWS: &[Row] = &[
             R,
             R,
             R,
-            dc(MERGE_KEYLESS),
-            dc(MERGE_KEYLESS),
+            dr(MERGE_UNREADABLE),
+            dr(MERGE_UNREADABLE),
         ],
     )
     // Git hands the driver a scratch copy (%A) to write, never the vault.

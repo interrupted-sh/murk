@@ -7305,13 +7305,21 @@ fn merge_driver_conflicts_on_one_sided_recipient_addition() {
 
     let base = fs::read_to_string(dir.path().join("test.murk")).unwrap();
 
-    // "Ours" adds a recipient.
-    let mut ours_vault: serde_json::Value = serde_json::from_str(&base).unwrap();
-    ours_vault["recipients"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::Value::String(FOREIGN_PK.into()));
-    let ours = serde_json::to_string_pretty(&ours_vault).unwrap();
+    // "Ours" adds a recipient, as `circle authorize` writes it. A hand edit
+    // would break ours' MAC, and the driver refuses such a side outright.
+    murk(&dir, &key)
+        .args([
+            "circle",
+            "authorize",
+            FOREIGN_PK,
+            "--name",
+            "foreign",
+            "--vault",
+            "test.murk",
+        ])
+        .assert()
+        .success();
+    let ours = fs::read_to_string(dir.path().join("test.murk")).unwrap();
 
     // "Theirs" is unchanged from base.
     let theirs = base.clone();
@@ -7324,14 +7332,17 @@ fn merge_driver_conflicts_on_one_sided_recipient_addition() {
     fs::write(&ours_path, &ours).unwrap();
     fs::write(&theirs_path, &theirs).unwrap();
 
-    // Run the merge driver with MURK_KEY so meta can be regenerated.
-    // Should still fail with conflict due to one-sided recipient addition.
+    // Run the merge driver with MURK_KEY so meta can be regenerated, and the
+    // vault's path as git passes it (%P), whose trust pin the sides are
+    // checked against. Should still fail with conflict due to one-sided
+    // recipient addition.
     murk(&dir, &key)
         .args([
             "merge-driver",
             base_path.to_str().unwrap(),
             ours_path.to_str().unwrap(),
             theirs_path.to_str().unwrap(),
+            "test.murk",
         ])
         .assert()
         .failure()
