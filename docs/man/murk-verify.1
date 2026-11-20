@@ -4,13 +4,18 @@
 .SH NAME
 murk\-verify \- Verify vault integrity without exporting secrets
 .SH SYNOPSIS
-\fBmurk verify\fR [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBmurk verify\fR [\fB\-\-signature\-only\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Verify vault integrity without exporting secrets
 .SH OPTIONS
+.TP
+\fB\-\-signature\-only\fR
+Check only the vault signature, with no key
+
+Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault\*(Aqs content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull\-request check in CI with no secret. It covers the parsed content, not the file\*(Aqs bytes: a reformatted file still passes. murk reads no key and decrypts nothing. So it does not check the MAC over the values, grant expiry, rollback against earlier saves, removed keys, group membership changes or the last commit\*(Aqs signature. `murk verify` with a key checks those
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)

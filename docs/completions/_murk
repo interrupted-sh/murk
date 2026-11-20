@@ -91,7 +91,7 @@ _arguments "${_arguments_options[@]}" : \
 '--generate[Generate random values instead of prompting (refused with \`--all\`)]' \
 '--hex[Encode generated values as hex instead of URL-safe base64]' \
 '(--all --generate --hex)--list[List the secrets that need rotation instead of rotating (exits 1 if any do)]' \
-'(--all --generate --hex)--json[Print the listing as a JSON object with \`verified\` and \`issues\`. The exit code is then 0 even when secrets need rotation]' \
+'(--all --generate --hex)--json[Print the listing as a JSON object with \`verified\` and \`issues\`. Rotation findings alone do not make this form fail]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '::key -- Secret to rotate. Omit it when you use `--all`:_default' \
@@ -620,8 +620,9 @@ esac
 (verify)
 _arguments "${_arguments_options[@]}" : \
 '--vault=[Vault filename]:VAULT:_default' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--signature-only[Check only the vault signature, with no key]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (trust)

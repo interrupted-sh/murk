@@ -46,4 +46,4 @@ murk has no admin role. Every recipient except agent grants can add and remove r
 | [`murk diff`](/guides/git-merge-ssh/) | New in its present form: it reports recipient, signer, policy, grant and group changes as well as secrets, and its output may change in a minor release. |
 | [GitHub recipients](/guides/teams/#authorizing-via-github) (`github:`) | Keys are fetched over the network and trusted on first use. |
 | [Hardware and plugin identities](/guides/hardware-keys/) | No test runs a real plugin yet, and once a plugin recipient exists every writer needs the plugin installed. |
-| [Node.js writes](/reference/bindings/#nodejs) (`add`, `describe`) | The write API is new. Reading from Node.js is stable. |
+| [Binding writes](/reference/bindings/#writing-secrets) (`add`, `describe` in Python and Node.js) | The write API is new. Reading from the bindings is stable. |

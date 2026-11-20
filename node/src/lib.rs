@@ -287,14 +287,23 @@ impl Vault {
 /// `MURK_KEY_FILE`, or the key file `murk init` stored.
 #[napi]
 pub fn load(vault_path: Option<String>) -> Result<Vault> {
-    let path = vault_path.as_deref().unwrap_or(".murk");
-    let (vault, murk, identity) = murk_cli::load_vault(path).map_err(murk_error)?;
+    let given = vault_path.as_deref().unwrap_or(".murk");
+    // Every later write uses this absolute path, so the handle keeps naming the
+    // vault it loaded after the process changes directory. Symlinks are not
+    // resolved, so the symlink refusal still sees a link.
+    let path = std::path::absolute(given)
+        .map_err(fail)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| fail("the vault path is not valid UTF-8"))?;
+    // The load itself uses the path as given, so its messages match the CLI's.
+    let (vault, murk, identity) = murk_cli::load_vault(given).map_err(murk_error)?;
     let pubkey = identity.pubkey_string().map_err(fail)?;
     Ok(Vault {
         vault,
         murk,
         pubkey,
-        path: path.to_string(),
+        path,
     })
 }
 

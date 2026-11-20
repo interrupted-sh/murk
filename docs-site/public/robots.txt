@@ -1,4 +1,13 @@
 User-agent: *
+Content-Signal: ai-input=yes
+Allow: /
+
+# Google-Extended controls both Gemini training and Gemini answers.
+# It is allowed so these pages can show up in Gemini answers.
+# Cloudflare adds a Disallow for Google-Extended above this file;
+# Google combines both groups and, when rules tie, applies the less
+# restrictive one, so this Allow wins.
+User-agent: Google-Extended
 Allow: /
 
 Sitemap: https://murk.interrupted.sh/sitemap-index.xml

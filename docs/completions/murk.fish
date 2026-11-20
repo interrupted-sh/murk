@@ -89,7 +89,7 @@ complete -c murk -n "__fish_murk_using_subcommand rotate" -l all -d 'Rotate all 
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l generate -d 'Generate random values instead of prompting (refused with `--all`)'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l hex -d 'Encode generated values as hex instead of URL-safe base64'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l list -d 'List the secrets that need rotation instead of rotating (exits 1 if any do)'
-complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation'
+complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c murk -n "__fish_murk_using_subcommand rm" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -s h -l help -d 'Print help'
@@ -268,7 +268,8 @@ complete -c murk -n "__fish_murk_using_subcommand group; and __fish_seen_subcomm
 complete -c murk -n "__fish_murk_using_subcommand group; and __fish_seen_subcommand_from help" -f -a "rm" -d 'Remove a member from a group, or delete the group entirely'
 complete -c murk -n "__fish_murk_using_subcommand group; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c murk -n "__fish_murk_using_subcommand verify" -l vault -d 'Vault filename' -r
-complete -c murk -n "__fish_murk_using_subcommand verify" -s h -l help -d 'Print help'
+complete -c murk -n "__fish_murk_using_subcommand verify" -l signature-only -d 'Check only the vault signature, with no key'
+complete -c murk -n "__fish_murk_using_subcommand verify" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c murk -n "__fish_murk_using_subcommand trust" -l re-add -d 'Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l yes -d 'Accept without asking, for scripts. Review the vault first'

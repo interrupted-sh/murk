@@ -30,7 +30,7 @@ Read new values from a dotenv file of KEY=value lines (`\-` for stdin), matched 
 List the secrets that need rotation instead of rotating (exits 1 if any do)
 .TP
 \fB\-\-json\fR
-Print the listing as a JSON object with `verified` and `issues`. The exit code is then 0 even when secrets need rotation
+Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename
