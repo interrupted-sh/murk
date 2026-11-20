@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -777,7 +777,8 @@
+     {
+         for (key, ids) in &mut set {
+             if let Some(consented) = readmitted.get(key) {
+-                ids.retain(|id| !consented.contains(id));
++                let _ = consented;
++                ids.clear();
+             }
+         }
+     }

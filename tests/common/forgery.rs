@@ -86,6 +86,18 @@ pub fn reseal_unchecked(vault: &mut Vault, identity: &MurkIdentity) {
     });
 }
 
+/// Change the meta of `vault` with `edit` and reseal it as `identity`
+/// (see [`reseal`]). A test uses it to write what an older murk, or a
+/// modified one, would sign.
+pub fn rewrite_meta(vault: &mut Vault, identity: &MurkIdentity, edit: impl FnOnce(&mut Meta)) {
+    let mut meta = murk_cli::decrypt_meta(vault, identity)
+        .unwrap()
+        .expect("the key reads the vault meta");
+    edit(&mut meta);
+    write_meta(vault, &meta);
+    reseal(vault, identity);
+}
+
 /// Rewrite `vault` as murk 0.13 wrote it: header version `2.0`, no vault id
 /// or counter, re-MACed, and a view-1 signature by `identity` inside the
 /// meta. murk 0.14 never writes one; this stands in for a revision an older

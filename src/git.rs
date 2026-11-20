@@ -1369,12 +1369,22 @@ pub fn committed_vault_at_or_before(abs_vault: &Path, commit: &str) -> bool {
     if !is_commit_id(commit) || worktree_root(dir).is_none() {
         return false;
     }
-    git_succeeds(
-        dir,
-        git_command()
-            .args(["merge-base", "--is-ancestor", "HEAD"])
-            .arg(commit),
-    ) && vault_committed_at_head(dir, name)
+    is_ancestor(dir, "HEAD", commit) && vault_committed_at_head(dir, name)
+}
+
+/// Whether `a` is `b` or an ancestor of it, in the repository holding the
+/// directory `dir` (`git merge-base --is-ancestor`). Each of `a` and `b` is
+/// `HEAD` or a full commit id. False otherwise, and when git fails, for
+/// example for a commit a rebase and `git gc` removed. Read-only: takes no
+/// `index.lock`.
+pub fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+    let valid = |c: &str| c == "HEAD" || is_commit_id(c);
+    valid(a)
+        && valid(b)
+        && git_succeeds(
+            dir,
+            git_command().args(["merge-base", "--is-ancestor", a, b]),
+        )
 }
 
 /// A path naming a vault the same way from every worktree of its repository:

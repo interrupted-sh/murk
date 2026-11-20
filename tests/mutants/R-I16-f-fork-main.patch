@@ -1,0 +1,13 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -616,8 +616,8 @@
+                 .iter()
+                 .filter(|(key, _)| !saved.contains(*key))
+                 .filter(|(_, on)| {
+-                    on.get(branch)
+-                        .is_some_and(|seen| sighting_related(vault_path, seen, commit.as_deref()))
++                    on.values()
++                        .any(|seen| sighting_related(vault_path, seen, commit.as_deref()))
+                 })
+                 .map(|(key, _)| key.clone())
+                 .collect()

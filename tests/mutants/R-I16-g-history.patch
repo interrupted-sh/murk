@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -932,7 +932,7 @@
+     {
+         return core;
+     }
+-    let current = grant_rule.unwrap_or_else(|| is_current(loaded.vault, pin, head));
++    let current = grant_rule.unwrap_or(true);
+     if let Some(refusal) = tombstone_refusal(loaded, pin, current) {
+         return Verdict::Refused(refusal);
+     }

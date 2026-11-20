@@ -1536,8 +1536,8 @@ impl SpentGrant {
         fs::read(&path).unwrap()
     }
 
-    /// Whether `vault`'s meta lists `key` among its `revoked_grants` (the
-    /// grant tombstone, which murk does not write yet).
+    /// Whether `vault`'s meta holds a revocation id for `key` in its
+    /// `revoked_grants` (the grant tombstone).
     fn tombstones(&self, vault: &[u8], key: &str) -> bool {
         let alice = murk_cli::crypto::parse_identity(&self.org.alice.secret).unwrap();
         let path = self.root.path().join("tombstone-check.murk");
@@ -1546,11 +1546,10 @@ impl SpentGrant {
         murk_cli::decrypt_meta(&vault, &alice)
             .ok()
             .flatten()
-            .and_then(|meta| serde_json::to_value(meta).ok())
             .is_some_and(|meta| {
-                meta["revoked_grants"]
-                    .as_array()
-                    .is_some_and(|keys| keys.iter().any(|k| k == key))
+                meta.revoked_grants
+                    .get(key)
+                    .is_some_and(|ids| !ids.is_empty())
             })
     }
 
@@ -1594,63 +1593,59 @@ impl SpentGrant {
 /// A key that was an agent grant, revoked after it expired and then listed as
 /// an ordinary recipient, is refused by `circle authorize` and by every load
 /// of a vault that lists it, however the holder presents the key: as minted,
-/// without its comment lines, or in `MURK_KEY`. Today it reads as an
-/// operator: it reads values outside its old scope and writes.
+/// without its comment lines, or in `MURK_KEY`.
 #[test]
 fn row_r_i16_a() {
-    common::rows::check("R-I16-a", |p| {
-        let w = SpentGrant::build()?;
-        w.controls(p, &w.revoked)?;
-        let listed = w.list_as_recipient(&w.revoked, &w.bot);
+    common::rows::check("R-I16-a", spent_grant_listed);
+}
 
-        // Decisive: the holder loads a vault that lists the key.
-        p.reached();
-        let reads = w.holder(&listed, &["get", "S"], "");
-        let others = w.holder(&listed, &["get", "OTHER"], "");
-        let writes = w.holder(&listed, &["add", "PLANTED", "--desc", "x"], "planted\n");
-        for (((how, read, _), (_, other, _)), (_, write, after)) in
-            reads.iter().zip(&others).zip(&writes)
-        {
-            p.note(format!("{how}: get S: {}", out_text(&read.stderr)));
-            p.target(
-                !read.status.success() && !out_text(&read.stdout).contains("real-secret-value"),
-                format!("the key listed as a recipient reads nothing ({how}): get S refused"),
-            );
-            p.target(
-                !other.status.success() && !out_text(&other.stdout).contains("other-secret"),
-                format!("the key listed as a recipient reads nothing ({how}): get OTHER refused"),
-            );
-            p.target(
-                !write.status.success() && *after == listed,
-                format!("the key listed as a recipient writes nothing ({how}): add refused"),
-            );
-            p.today(
-                read.status.success()
-                    && out_text(&read.stdout).contains("real-secret-value")
-                    && other.status.success()
-                    && out_text(&other.stdout).contains("other-secret")
-                    && write.status.success()
-                    && *after != listed,
-                format!("the key reads S and OTHER and writes PLANTED as an operator ({how})"),
-            );
-        }
+/// R-I16-a with the guard in `circle authorize` as the one under test.
+#[test]
+fn row_r_i16_a_authorize() {
+    common::rows::check("R-I16-a:authorize", spent_grant_listed);
+}
 
-        // Alice, whose pin is at the revoked vault, authorizes the key.
-        let authorize = w.org.run(
-            &["circle", "authorize", &w.bot.pubkey, "--name", "botop"],
-            "",
-        );
-        p.note(format!("circle authorize: {}", out_text(&authorize.stderr)));
+fn spent_grant_listed(p: &mut common::rows::Probe) -> Result<(), String> {
+    let w = SpentGrant::build()?;
+    w.controls(p, &w.revoked)?;
+    let listed = w.list_as_recipient(&w.revoked, &w.bot);
+
+    // Decisive: the holder loads a vault that lists the key.
+    p.reached();
+    let reads = w.holder(&listed, &["get", "S"], "");
+    let others = w.holder(&listed, &["get", "OTHER"], "");
+    let writes = w.holder(&listed, &["add", "PLANTED", "--desc", "x"], "planted\n");
+    for (((how, read, _), (_, other, _)), (_, write, after)) in
+        reads.iter().zip(&others).zip(&writes)
+    {
+        p.note(format!("{how}: get S: {}", out_text(&read.stderr)));
         p.target(
-            !authorize.status.success(),
-            "circle authorize refuses a key that was an agent grant",
+            !read.status.success() && !out_text(&read.stdout).contains("real-secret-value"),
+            format!("the key listed as a recipient reads nothing ({how}): get S refused"),
         );
-        p.today(
-            authorize.status.success(),
-            "circle authorize lists the old grant key as a recipient",
+        p.target(
+            !other.status.success() && !out_text(&other.stdout).contains("other-secret"),
+            format!("the key listed as a recipient reads nothing ({how}): get OTHER refused"),
         );
-        Ok(())
-    });
+        p.target(
+            !write.status.success() && *after == listed,
+            format!("the key listed as a recipient writes nothing ({how}): add refused"),
+        );
+    }
+
+    // Alice, whose pin is at the revoked vault, authorizes the key.
+    let authorize = w.org.run(
+        &["circle", "authorize", &w.bot.pubkey, "--name", "botop"],
+        "",
+    );
+    p.note(format!("circle authorize: {}", out_text(&authorize.stderr)));
+    p.target(
+        !authorize.status.success()
+            && out_text(&authorize.stderr).contains("refusing to authorize")
+            && out_text(&authorize.stderr).contains("--re-add"),
+        "circle authorize refuses a key that was an agent grant, and names --re-add",
+    );
+    Ok(())
 }
 
 /// A runner with no trust pin refuses a vault that lists a key the vault
@@ -1658,29 +1653,31 @@ fn row_r_i16_a() {
 /// holder's key file says. Needs the tombstone in the vault.
 #[test]
 fn row_r_i16_b_pinless() {
-    common::rows::check("R-I16-b:pinless", |p| {
-        let w = SpentGrant::build()?;
-        w.controls(p, &w.revoked)?;
-        p.require(
-            w.tombstones(&w.revoked, &w.bot.pubkey),
-            "the vault alice saved when she revoked the grant lists its key in revoked_grants",
-        )?;
-        let listed = w.list_as_recipient(&w.revoked, &w.bot);
-        p.require(
-            w.tombstones(&listed, &w.bot.pubkey),
-            "the hand-built vault keeps the revoked_grants set",
-        )?;
+    common::rows::check("R-I16-b:pinless", pinless_tombstone);
+}
 
-        p.reached();
-        for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
-            p.note(format!("{how}: {}", out_text(&out.stderr)));
-            p.target(
-                !out.status.success() && !out_text(&out.stdout).contains("real-secret-value"),
-                format!("a pinless runner refuses the vault by its own revoked_grants ({how})"),
-            );
-        }
-        Ok(())
-    });
+fn pinless_tombstone(p: &mut common::rows::Probe) -> Result<(), String> {
+    let w = SpentGrant::build()?;
+    w.controls(p, &w.revoked)?;
+    p.require(
+        w.tombstones(&w.revoked, &w.bot.pubkey),
+        "the vault alice saved when she revoked the grant lists its key in revoked_grants",
+    )?;
+    let listed = w.list_as_recipient(&w.revoked, &w.bot);
+    p.require(
+        w.tombstones(&listed, &w.bot.pubkey),
+        "the hand-built vault keeps the revoked_grants set",
+    )?;
+
+    p.reached();
+    for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
+        p.note(format!("{how}: {}", out_text(&out.stderr)));
+        p.target(
+            !out.status.success() && !out_text(&out.stdout).contains("real-secret-value"),
+            format!("a pinless runner refuses the vault by its own revoked_grants ({how})"),
+        );
+    }
+    Ok(())
 }
 
 /// A signer who accepts a revision from before the grant with `murk trust`

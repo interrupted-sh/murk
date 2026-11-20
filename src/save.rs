@@ -495,8 +495,11 @@ pub fn save_vault(
                 vault_path,
                 vault,
                 current,
-                &prepared.registry,
-                prepared.replaced.as_ref(),
+                (
+                    &prepared.registry,
+                    prepared.replaced.as_ref(),
+                    &prepared.revoked,
+                ),
                 prior,
                 (head, commit),
             )
@@ -544,6 +547,161 @@ struct Prepared {
     replaced: Option<types::Vault>,
     /// The state after expired and narrowed grants were dropped, if any were.
     pruned: Option<types::Murk>,
+    /// The revoked grant set the save wrote, and the grant keys whose
+    /// sighting on this branch it used.
+    revoked: RevokedForSave,
+}
+
+/// The revoked grant set a save writes (see
+/// [`types::Meta::revoked_grants`]), and the grant keys whose sighting on
+/// the branch checked out gave them an id (event 3, see
+/// [`revoked_grants_for_save`]): the save takes those sightings out.
+struct RevokedForSave {
+    set: types::RevokedGrants,
+    sighted: BTreeSet<String>,
+    /// The branch the sightings are on (`""` outside git), `None` on a
+    /// detached HEAD.
+    branch: Option<String>,
+}
+
+/// A fresh revocation id: 16 random bytes as 32 lowercase hex characters.
+fn new_revocation_id() -> String {
+    new_vault_id()
+}
+
+/// The revoked grant set a save writes over `original`, the state as
+/// loaded, for `current`, the state it saves (after expired grants were
+/// pruned), against `pin`. A grant key gets a new revocation id when:
+///
+/// 1. the save drops its grant record: `original` holds one and `current`
+///    does not (`agent revoke`, expiry, `agent grant --renew`);
+/// 2. this machine saw it live on the branch checked out (see
+///    [`crate::pins::Sidecar::grants_live_on`]), `current` holds no grant
+///    record for it, and the commit checked out and the sighting's commit
+///    are related by ancestry in either direction. This covers a revocation
+///    an older murk wrote with no set, and a save after `murk trust` of a
+///    revision from before the grant.
+///
+/// Either mints an id only when no input of the save already holds an id
+/// for the key that this machine has not re-admitted: the vault's own set
+/// and `revoked_grants_seen`. The set written is the union of those inputs
+/// and the new ids, less the ids this machine re-admitted (see
+/// [`crate::trust::tombstoned`]).
+fn revoked_grants_for_save(
+    vault_path: &str,
+    original: &types::Murk,
+    current: &types::Murk,
+    pin: Option<&crate::pins::TrustPin>,
+) -> RevokedForSave {
+    let keys = |m: &types::Murk| -> BTreeSet<String> {
+        m.grants
+            .values()
+            .map(|g| crate::recipients::canonical_recipient(&g.pubkey).into_owned())
+            .collect()
+    };
+    let parent = crate::trust::tombstoned(&original.revoked_grants, None);
+    let held = crate::trust::tombstoned(&parent, pin);
+    let saved = keys(current);
+    let head = crate::trust::head_of(vault_path);
+    let branch = match &head {
+        crate::trust::HeadState::Branch(b) => Some(b.clone()),
+        crate::trust::HeadState::NotARepo => Some(String::new()),
+        crate::trust::HeadState::Detached => None,
+    };
+    let sighted: BTreeSet<String> = match (&branch, pin) {
+        (Some(branch), Some(pin)) => {
+            let commit = crate::trust::commit_of(vault_path);
+            pin.sidecar
+                .grants_live_on
+                .iter()
+                .filter(|(key, _)| !saved.contains(*key))
+                .filter(|(_, on)| {
+                    on.get(branch)
+                        .is_some_and(|seen| sighting_related(vault_path, seen, commit.as_deref()))
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        }
+        _ => BTreeSet::new(),
+    };
+    let dropped = keys(original).into_iter().filter(|k| !saved.contains(k));
+    let mut minted = types::RevokedGrants::new();
+    for key in dropped.chain(sighted.iter().cloned()) {
+        if !held.contains_key(&key) && !minted.contains_key(&key) {
+            minted.insert(key, BTreeSet::from([new_revocation_id()]));
+        }
+    }
+    let mut set = parent;
+    for (key, ids) in minted {
+        set.entry(key).or_default().extend(ids);
+    }
+    RevokedForSave {
+        set: crate::trust::tombstoned(&set, pin),
+        sighted,
+        branch,
+    }
+}
+
+/// Whether the sighting commit `seen` and `commit`, the one checked out,
+/// are related by ancestry in either direction (or equal). An empty
+/// sighting, or no commit checked out, counts as related. A git failure
+/// (a sighting commit a rebase and `git gc` removed) counts as not related.
+fn sighting_related(vault_path: &str, seen: &str, commit: Option<&str>) -> bool {
+    let Some(commit) = commit else {
+        return true;
+    };
+    if seen.is_empty() || seen == commit {
+        return true;
+    }
+    let abs = std::env::current_dir().map_or_else(
+        |_| Path::new(vault_path).to_path_buf(),
+        |cwd| cwd.join(vault_path),
+    );
+    let dir = abs.parent().unwrap_or(Path::new("."));
+    crate::git::is_ancestor(dir, seen, commit) || crate::git::is_ancestor(dir, commit, seen)
+}
+
+/// Refuse a save that writes a grant key this machine holds as revoked (see
+/// [`crate::trust::tombstoned`]): as a recipient without a grant record, or
+/// with a grant record (whose `agents` entry the save writes too). A load
+/// read as history may hold such a grant; a save must not keep it.
+fn refuse_revoked_grants(
+    vault_path: &str,
+    vault: &types::Vault,
+    original: &types::Murk,
+    current: &types::Murk,
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    let held = crate::trust::tombstoned(&original.revoked_grants, pin);
+    if held.is_empty() {
+        return Ok(());
+    }
+    let granted: BTreeSet<String> = current
+        .grants
+        .values()
+        .map(|g| crate::recipients::canonical_recipient(&g.pubkey).into_owned())
+        .collect();
+    let plain = vault
+        .recipients
+        .iter()
+        .map(|r| crate::recipients::canonical_recipient(r).into_owned())
+        .filter(|k| !granted.contains(k));
+    let Some((key, ids)) = plain
+        .chain(granted.iter().cloned())
+        .find_map(|key| held.get(&key).map(|ids| (key, ids)))
+    else {
+        return Ok(());
+    };
+    let what = if granted.contains(&key) {
+        "holds a grant for"
+    } else {
+        "lists"
+    };
+    Err(MurkError::Secret(format!(
+        "refusing to save: this vault {what} {}, an agent grant that this machine holds as revoked (revocation ids {}). An agent grant that was revoked never reads this vault again\nnothing was written\nif it was revoked by mistake, review it and run `murk trust --vault {vault_path} --re-add {key}`",
+        crate::trust::label(&current.recipients, &key),
+        crate::trust::show_ids(ids.iter())
+    )))
 }
 
 /// Run every check of a save against `pin`, build and encrypt the meta, sign
@@ -578,8 +736,9 @@ fn prepare_save(
     let recipients = meta_recipients(vault, current)?;
     refuse_unsafe_recipients(vault)?;
 
+    refuse_revoked_grants(vault_path, vault, original, current, pin)?;
     check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver, pin)?;
-
+    let revoked = revoked_grants_for_save(vault_path, original, current, pin);
     announce_new_group_members(original, current);
 
     // Agent grant pubkeys are deliberately excluded from the shared "everyone"
@@ -673,7 +832,7 @@ fn prepare_save(
     vault.secrets = new_secrets;
     crate::agents::rebuild(vault, original, current)?;
 
-    let meta = build_meta(vault, current, &saver, pin);
+    let meta = build_meta(vault, current, &saver, pin, revoked.set.clone());
     crate::validate::meta(&meta)
         .map_err(|e| MurkError::Secret(format!("refusing to write invalid vault meta: {e}")))?;
     let meta_json =
@@ -686,6 +845,7 @@ fn prepare_save(
         registry: meta.signers,
         replaced: on_disk,
         pruned,
+        revoked,
     })
 }
 
@@ -889,8 +1049,11 @@ fn own_save_pin(
     vault_path: &str,
     vault: &types::Vault,
     current: &types::Murk,
-    registry: &BTreeMap<String, String>,
-    replaced: Option<&types::Vault>,
+    (registry, replaced, revoked): (
+        &BTreeMap<String, String>,
+        Option<&types::Vault>,
+        &RevokedForSave,
+    ),
     prior: Option<&crate::pins::TrustPin>,
     (head, commit): (&crate::trust::HeadState, Option<&str>),
 ) -> crate::pins::TrustPin {
@@ -919,6 +1082,7 @@ fn own_save_pin(
         names: &current.recipients,
         groups: &current.groups,
         grants: &current.grants,
+        revoked: &revoked.set,
         loader_can_sign: vault.sig.is_some(),
         operator_key: None,
     };
@@ -931,6 +1095,17 @@ fn own_save_pin(
         head,
         commit,
     );
+    // A sighting that gave a key an id (event 3) is used up on this branch.
+    if let Some(branch) = &revoked.branch {
+        for key in &revoked.sighted {
+            if let Some(on) = pin.sidecar.grants_live_on.get_mut(key) {
+                on.remove(branch);
+                if on.is_empty() {
+                    pin.sidecar.grants_live_on.remove(key);
+                }
+            }
+        }
+    }
     if vault.sig.is_none() {
         if prior.is_some_and(|p| p.was_signed) {
             eprintln!(
@@ -950,6 +1125,7 @@ fn build_meta(
     current: &types::Murk,
     saver: &crypto::MurkIdentity,
     pin: Option<&crate::pins::TrustPin>,
+    revoked_grants: types::RevokedGrants,
 ) -> types::Meta {
     // Always generate a fresh BLAKE3 key on save.
     let mac_key_hex = generate_mac_key();
@@ -967,6 +1143,7 @@ fn build_meta(
         grants: current.grants.clone(),
         signers: vouched_registry(vault, &current.signers, pin, saver),
         sig: None,
+        revoked_grants,
     }
 }
 
@@ -2452,6 +2629,71 @@ mod tests {
         assert!(
             refuse_carried_removed_keys(vp, &vault, Some(&on_disk), &state, Some(&pin)).is_ok(),
             "a save that adds bob itself is allowed"
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_save_tombstone() {
+        // Another worktree records grant key G as revoked after the save
+        // decided, before it publishes. The save must not publish a vault
+        // that keeps G's grant record: it decides again and refuses.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("MURK_NO_SIGNER_PIN");
+            std::env::remove_var("MURK_TRUSTED_SIGNERS");
+        }
+        let (_, grant) = generate_keypair();
+        let ps = dir.path().join(".murk").to_str().unwrap().to_string();
+        let mut vault = signed_test_vault(&alice, &make_recipient(&alice));
+        vault.recipients.push(grant.clone());
+        let state = types::Murk {
+            values: HashMap::from([("API_KEY".into(), secret("REAL"))]),
+            recipients: HashMap::from([(alice.clone(), "alice".to_string())]),
+            grants: BTreeMap::from([(
+                "bot".to_string(),
+                types::GrantEntry {
+                    pubkey: grant.clone(),
+                    scope: vec!["API_KEY".into()],
+                    issued_at: "2026-01-01T00:00:00Z".into(),
+                    expires_at: "2999-01-01T00:00:00Z".into(),
+                    issuer: alice.clone(),
+                    anchors: Vec::new(),
+                },
+            )]),
+            ..Default::default()
+        };
+        save_vault(&ps, &mut vault, &state, &state).unwrap();
+        let mut changed = state.clone();
+        changed.values.insert("NEW".into(), secret("value"));
+        let before = fs::read(&ps).unwrap();
+
+        let (hook_ps, hook_grant) = (ps.clone(), grant.clone());
+        let runs = before_publish(move |run| {
+            if run == 1 {
+                crate::pins::update(&hook_ps, |pin| {
+                    let mut pin = pin.cloned().unwrap();
+                    pin.sidecar
+                        .revoked_grants_seen
+                        .insert(hook_grant.clone(), BTreeSet::from([new_revocation_id()]));
+                    Ok(Some(pin))
+                })
+                .unwrap();
+            }
+        });
+        let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refusing to save") && err.contains("holds a grant for"),
+            "{err}"
+        );
+        assert_eq!(runs.get(), 1, "the restart was refused before its publish");
+        assert_eq!(
+            fs::read(&ps).unwrap(),
+            before,
+            "the vault file is unchanged"
         );
     }
 }

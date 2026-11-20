@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -686,7 +686,7 @@
+         .map(|r| crate::recipients::canonical_recipient(r).into_owned())
+         .filter(|k| !granted.contains(k));
+     let Some((key, ids)) = plain
+-        .chain(granted.iter().cloned())
++        .chain(std::iter::empty())
+         .find_map(|key| held.get(&key).map(|ids| (key, ids)))
+     else {
+         return Ok(());

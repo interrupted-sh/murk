@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -650,7 +650,7 @@
+     let Some(commit) = commit else {
+         return true;
+     };
+-    if seen.is_empty() || seen == commit {
++    if true || seen.is_empty() || seen == commit {
+         return true;
+     }
+     let abs = std::env::current_dir().map_or_else(

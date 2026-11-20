@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -2086,7 +2086,7 @@
+         pin.sidecar = pins::Sidecar::default();
+         // Grants belong to one vault too: the old vault's grant keys would
+         // refuse members of this one.
+-        pin.grants = new_grants.into_iter().collect();
++        let _ = new_grants;
+     }
+ 
+     let mut dropped = replace_trusted(&mut pin, loaded.vault, how, had_trust, current);

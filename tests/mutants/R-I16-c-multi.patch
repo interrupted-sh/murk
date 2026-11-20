@@ -1,0 +1,10 @@
+--- a/src/commands/trust.rs
++++ b/src/commands/trust.rs
+@@ -643,7 +643,6 @@
+                 .readmitted_grants
+                 .retain(|_, ids| !ids.is_empty());
+             pin.grants.remove(key);
+-            pin.sidecar.grants_live_on.remove(key);
+         }
+         Ok(Some(pin))
+     }));

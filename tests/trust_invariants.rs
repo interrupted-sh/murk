@@ -2767,10 +2767,18 @@ impl<'f> World<'f> {
                     )
                 };
                 // The grant covers K1 only: a read of another key, or any
-                // write, is a grant key acting as an operator.
+                // write, is a grant key acting as an operator. This runner
+                // has no pin, so only the vault's own revoked grant set can
+                // refuse the key: a vault a trusted signer wrote without the
+                // key in that set (a modified murk that drops the set, or a
+                // grant never revoked by this release) reads, a stated
+                // residual of the grant tombstone.
                 let read = run(&["get", "K2"], "");
                 let write = run(&["add", "PLANTED", "--desc", "x"], "planted\n");
                 if read.ok || write.ok {
+                    if !self.revokes_grant(&clone.vault(), &who.pubkey) {
+                        return Some(Ok(Ran::Accepted));
+                    }
                     return Some(Err(format!(
                         "a grant key presented as {how:?} acted as an operator (read outside its \
                          scope: {}, wrote: {})",
@@ -3011,6 +3019,27 @@ impl<'f> World<'f> {
         };
         let identity = murk_cli::crypto::parse_identity(&self.fx.people[who].secret).unwrap();
         murk_cli::decrypt_vault(&vault, &identity).is_ok()
+    }
+
+    /// Whether the vault `bytes` holds a revocation id for agent grant key
+    /// `key` in its own revoked grant set, read by any person who opens it.
+    fn revokes_grant(&self, bytes: &[u8], key: &str) -> bool {
+        let path = self.root.join("revokes.murk");
+        fs::write(&path, bytes).unwrap();
+        let Ok(vault) = murk_cli::read_vault(path.to_str().unwrap()) else {
+            return false;
+        };
+        self.fx.people.iter().any(|p| {
+            let identity = murk_cli::crypto::parse_identity(&p.secret).unwrap();
+            murk_cli::decrypt_meta(&vault, &identity)
+                .ok()
+                .flatten()
+                .is_some_and(|meta| {
+                    meta.revoked_grants
+                        .get(key)
+                        .is_some_and(|ids| !ids.is_empty())
+                })
+        })
     }
 
     /// The verifying key a `key` plant registers, for person `holder`.

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -820,7 +820,7 @@
+     let ids = |key: &str| tombstones.get(key).map(|ids| ids.iter().cloned().collect());
+     let plain = loaded.vault.recipients.iter().find_map(|r| {
+         let key = canonical_recipient(r).into_owned();
+-        let ids = (!granted.contains(&key)).then(|| ids(&key)).flatten()?;
++        let ids = ids(&key)?;
+         Some(Refusal::RevokedGrantRecipient { key, ids })
+     });
+     plain.or_else(|| {

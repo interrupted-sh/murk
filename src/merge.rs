@@ -1268,6 +1268,7 @@ fn regenerate_meta(
     }
 
     let pin = crate::pins::read(vault_path)?;
+    meta.revoked_grants = merged_revoked_grants(&meta, [&ours_meta, &theirs_meta], pin.as_ref());
     let checkout = crate::trust::Checkout::of(vault_path, pin.as_ref());
     if let Some(conflict) = result_conflict(
         identity,
@@ -1384,6 +1385,7 @@ fn result_refusal(
         names: &verified.names,
         groups: &verified.groups,
         grants: &verified.grants,
+        revoked: &verified.revoked,
         loader_can_sign: identity.is_signing_capable(),
         operator_key: crate::crypto::operator_key(identity),
     };
@@ -1416,11 +1418,13 @@ fn merged_generation(
 /// Why the merged result must not be signed by the merging key, if it must
 /// not: the group rule a load applies (a membership change needs a member's
 /// signature) must hold for that key against ours, or every machine would
-/// refuse the result; a key removed on this machine must stay out where its
-/// removal applies, and elsewhere may come back only through a side numbered
-/// past its removal (see [`crate::trust::removed_key_kept_by_merge`]); and
-/// the result must leave no group orphaned (see [`orphan_conflict`]).
-/// `trust` is the vault path, the pin and the checkout merged into.
+/// refuse the result; no grant key this machine holds as revoked may be in
+/// it (see [`revoked_grant_conflict`]); a key removed on this machine must
+/// stay out where its removal applies, and elsewhere may come back only
+/// through a side numbered past its removal (see
+/// [`crate::trust::removed_key_kept_by_merge`]); and the result must leave
+/// no group orphaned (see [`orphan_conflict`]). `trust` is the vault path,
+/// the pin and the checkout merged into.
 fn result_conflict(
     identity: &crate::crypto::MurkIdentity,
     merged: &Vault,
@@ -1452,6 +1456,9 @@ fn result_conflict(
             ),
         });
     }
+    if let Some(conflict) = revoked_grant_conflict(merged, meta, vault_path) {
+        return Some(conflict);
+    }
     if let Some((key, at)) =
         crate::trust::removed_key_kept_by_merge(pin, merged, &[ours, theirs], checkout)
     {
@@ -1474,6 +1481,43 @@ fn result_conflict(
         });
     }
     orphan_conflict(merged, meta)
+}
+
+/// The conflict for a merge result that holds a grant key this machine
+/// holds as revoked: `meta.revoked_grants` is the set the merge writes, with
+/// this machine's ids and without the ids it re-admitted (see
+/// [`merged_revoked_grants`]). A grant record for such a key (which comes
+/// with its recipient entry and `agents` entry) is refused, and so is the key
+/// listed as a plain recipient. For example: a merge brings back the grant
+/// record of a grant that ours revoked.
+fn revoked_grant_conflict(merged: &Vault, meta: &Meta, vault_path: &str) -> Option<MergeConflict> {
+    let held = &meta.revoked_grants;
+    let granted_keys: BTreeSet<String> = meta
+        .grants
+        .values()
+        .map(|g| crate::recipients::canonical_recipient(&g.pubkey).into_owned())
+        .collect();
+    let granted = meta.grants.iter().find_map(|(name, g)| {
+        let key = crate::recipients::canonical_recipient(&g.pubkey).into_owned();
+        held.get(&key)
+            .map(|ids| (format!("grants.{name}"), key, ids))
+    });
+    let listed = || {
+        merged.recipients.iter().find_map(|r| {
+            let key = crate::recipients::canonical_recipient(r).into_owned();
+            let ids = held.get(&key).filter(|_| !granted_keys.contains(&key))?;
+            Some((format!("recipients.{}", recipient_label(&key)), key, ids))
+        })
+    };
+    let (field, key, ids) = granted.or_else(listed)?;
+    Some(MergeConflict {
+        field,
+        reason: format!(
+            "the merged result holds agent grant key {}, which this machine holds as revoked (revocation ids {}). An agent grant that was revoked never reads this vault again. Keep the side that revoked it. If it was revoked by mistake, review it, run `murk trust --vault {vault_path} --re-add {key}`, and merge again",
+            crate::truncate_pubkey(&key),
+            crate::trust::show_ids(ids.iter())
+        ),
+    })
 }
 
 /// The conflict for a merge result that leaves a group holding values with
@@ -1590,6 +1634,7 @@ fn check_side(
         names: &verified.names,
         groups: &verified.groups,
         grants: &verified.grants,
+        revoked: &verified.revoked,
         loader_can_sign: identity.is_signing_capable(),
         operator_key: crate::crypto::operator_key(identity),
     };
@@ -1638,6 +1683,7 @@ fn check_base(
         names: &verified.names,
         groups: &verified.groups,
         grants: &verified.grants,
+        revoked: &verified.revoked,
         loader_can_sign: identity.is_signing_capable(),
         operator_key: crate::crypto::operator_key(identity),
     };
@@ -1764,14 +1810,58 @@ fn merge_meta(
         groups,
         grants,
         signers,
+        revoked_grants: union_revoked(ours_meta, theirs_meta),
         ..Meta::default()
     }
 }
 
+/// The union of both sides' revoked grant sets (see
+/// [`crate::types::Meta::revoked_grants`]), with canonical keys. A merge
+/// never drops a revocation id.
+fn union_revoked(ours: &Meta, theirs: &Meta) -> crate::types::RevokedGrants {
+    let mut set = crate::trust::tombstoned(&ours.revoked_grants, None);
+    for (key, ids) in crate::trust::tombstoned(&theirs.revoked_grants, None) {
+        set.entry(key).or_default().extend(ids);
+    }
+    set
+}
+
+/// The revoked grant set a clean keyed merge writes: `meta`'s (the union of
+/// both sides', see [`union_revoked`]) and the ids this machine saw
+/// (`revoked_grants_seen`), less the ids it re-admitted, with a new
+/// revocation id for each grant key that ours or theirs holds a grant record
+/// for and the merged meta does not, unless an input already holds an id
+/// for that key that this machine has not re-admitted.
+fn merged_revoked_grants(
+    meta: &Meta,
+    sides: [&Meta; 2],
+    pin: Option<&crate::pins::TrustPin>,
+) -> crate::types::RevokedGrants {
+    let keys = |m: &Meta| -> BTreeSet<String> {
+        m.grants
+            .values()
+            .map(|g| crate::recipients::canonical_recipient(&g.pubkey).into_owned())
+            .collect()
+    };
+    let held = crate::trust::tombstoned(&meta.revoked_grants, pin);
+    let merged = keys(meta);
+    let mut set = meta.revoked_grants.clone();
+    let mut minted = BTreeSet::new();
+    for key in sides.into_iter().flat_map(keys) {
+        if !merged.contains(&key) && !held.contains_key(&key) && minted.insert(key.clone()) {
+            set.entry(key)
+                .or_default()
+                .insert(crate::save::new_vault_id());
+        }
+    }
+    crate::trust::tombstoned(&set, pin)
+}
+
 /// The meta of a two-way merge: ours', with a conflict for every entry of
 /// each part (grants, names, groups, GitHub pins, signer registry) whose
-/// presence or value differs between ours and theirs. Nothing of theirs is
-/// taken, and the merged vault (ours) is left as it is.
+/// presence or value differs between ours and theirs. Nothing else of
+/// theirs is taken but its revocation ids (the revoked grant sets are
+/// joined), and the merged vault (ours) is left as it is.
 fn merge_meta_two_way(ours: &Meta, theirs: &Meta, conflicts: &mut Vec<MergeConflict>) -> Meta {
     fn differ<V: PartialEq>(
         part: &str,
@@ -1834,6 +1924,9 @@ fn merge_meta_two_way(ours: &Meta, theirs: &Meta, conflicts: &mut Vec<MergeConfl
         groups: ours.groups.clone(),
         grants: ours.grants.clone(),
         signers: ours.signers.clone(),
+        // Revocations only narrow, so a two-way merge takes the union too:
+        // a user who later takes this file keeps every id.
+        revoked_grants: union_revoked(ours, theirs),
         ..Meta::default()
     }
 }
@@ -4216,6 +4309,231 @@ mod tests {
             std::fs::read_to_string(&target).unwrap(),
             ours,
             "%A keeps ours"
+        );
+    }
+
+    // -- revoked agent grants (the grant tombstone) --
+
+    /// A grant record for `pubkey`, issued by `issuer`, for `DB_URL`.
+    fn grant_for(pubkey: &str, issuer: &str) -> crate::types::GrantEntry {
+        crate::types::GrantEntry {
+            pubkey: pubkey.to_string(),
+            scope: vec!["DB_URL".into()],
+            issued_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2999-01-01T00:00:00Z".into(),
+            issuer: issuer.to_string(),
+            anchors: Vec::new(),
+        }
+    }
+
+    /// Control for event 2 end to end: a keyed three-way merge in which
+    /// theirs dropped grant G (record, recipient and `agents` entry) and
+    /// carries no revoked grant set. Today's recipient rule stops it first:
+    /// a one-sided recipient removal is a conflict, so nothing is signed and
+    /// the meta stays ours'. If that rule ever lets such a merge through,
+    /// this control fails and [`row_r_i16_e`] is the guard that stands.
+    #[test]
+    fn row_r_i16_e_control() {
+        use crate::testutil::{ENV_LOCK, generate_keypair, make_identity};
+
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (alice_secret, alice) = generate_keypair();
+        let alice_identity = make_identity(&alice_secret);
+        let (_, g) = generate_keypair();
+        let granted = crate::types::Meta {
+            grants: BTreeMap::from([("bot".to_string(), grant_for(&g, &alice))]),
+            ..Default::default()
+        };
+
+        let mut base = base_vault();
+        base.recipients = vec![alice.clone(), g.clone()];
+        base.generation = 1;
+        base.vault_id = "00112233445566778899aabbccddeeff".into();
+        base.agents = crate::agents::blobs_for(&granted.grants, &[]).unwrap();
+        let mut ours = base.clone();
+        let mut theirs = base.clone();
+        seal(&mut base, &granted, &alice_identity);
+        ours.generation = 2;
+        ours.schema.get_mut("DB_URL").unwrap().description = "the database".into();
+        seal(&mut ours, &granted, &alice_identity);
+        theirs.generation = 2;
+        theirs.recipients = vec![alice.clone()];
+        theirs.agents.clear();
+        seal(&mut theirs, &crate::types::Meta::default(), &alice_identity);
+
+        let (result, regenerated) = trusting(&alice_secret, &alice, || {
+            keyed(&base, &ours, &theirs, ".murk")
+        });
+        assert!(
+            result
+                .conflicts
+                .iter()
+                .any(|c| c.field == format!("recipients.{}", recipient_label(&g))
+                    && c.reason == "removed on one side but not the other"),
+            "the one-sided grant drop conflicts on its recipient: {:?}",
+            result.conflicts
+        );
+        assert!(!regenerated, "nothing is signed");
+        assert_eq!(result.vault.meta, ours.meta, "the meta stays ours'");
+    }
+
+    /// Event 2: a clean merge result that no longer holds the grant record
+    /// that ours or theirs held gives the key a new revocation id, unless an
+    /// input already holds an id for it that this machine has not
+    /// re-admitted.
+    #[test]
+    fn row_r_i16_e() {
+        let g = "age1grantkey".to_string();
+        let held = "00112233445566778899aabbccddeeff".to_string();
+        let ours = crate::types::Meta {
+            grants: BTreeMap::from([("bot".to_string(), grant_for(&g, "age1alice"))]),
+            ..Default::default()
+        };
+        let theirs = crate::types::Meta::default();
+        let merged = crate::types::Meta::default();
+
+        let revoked = merged_revoked_grants(&merged, [&ours, &theirs], None);
+        assert!(
+            revoked.get(&g).is_some_and(|ids| ids.len() == 1),
+            "the dropped grant gets a new revocation id: {revoked:?}"
+        );
+
+        let merged = crate::types::Meta {
+            revoked_grants: BTreeMap::from([(g.clone(), BTreeSet::from([held.clone()]))]),
+            ..Default::default()
+        };
+        let revoked = merged_revoked_grants(&merged, [&ours, &theirs], None);
+        assert_eq!(
+            revoked.get(&g),
+            Some(&BTreeSet::from([held])),
+            "an id an input holds is kept, and no second id is minted"
+        );
+    }
+
+    /// A two-way merge in which only theirs holds a revocation id for a key:
+    /// the merged meta holds the union of both sides' sets.
+    #[test]
+    fn row_r_i11_d_tombstone() {
+        let id = "00112233445566778899aabbccddeeff".to_string();
+        let ours = crate::types::Meta::default();
+        let theirs = crate::types::Meta {
+            revoked_grants: BTreeMap::from([("age1grant".to_string(), BTreeSet::from([id]))]),
+            ..Default::default()
+        };
+        let mut conflicts = Vec::new();
+        let merged = merge_meta_two_way(&ours, &theirs, &mut conflicts);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert_eq!(
+            merged.revoked_grants, theirs.revoked_grants,
+            "the two-way merge keeps theirs' revocation id"
+        );
+    }
+
+    /// Control for G7 end to end: ours revoked grant G (its set holds G's
+    /// id). Theirs is the revision that added G's grant record, over an
+    /// authority ancestor from before the grant. Today's recipient rule stops
+    /// it first: G is a recipient added on one side only, so the merge
+    /// conflicts, nothing is signed and the meta stays ours'. If that rule
+    /// ever lets G's record back through, this control fails and
+    /// [`row_r_i11_f_c_v3`] is the guard that stands.
+    #[test]
+    fn row_r_i11_f_c_v3_control() {
+        use crate::testutil::{ENV_LOCK, generate_keypair, make_identity};
+
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (alice_secret, alice) = generate_keypair();
+        let alice_identity = make_identity(&alice_secret);
+        let (_, g) = generate_keypair();
+        let granted = crate::types::Meta {
+            grants: BTreeMap::from([("bot".to_string(), grant_for(&g, &alice))]),
+            ..Default::default()
+        };
+        let revoked = crate::types::Meta {
+            revoked_grants: BTreeMap::from([(
+                g.clone(),
+                BTreeSet::from(["00112233445566778899aabbccddeeff".to_string()]),
+            )]),
+            ..Default::default()
+        };
+
+        let mut base = base_vault();
+        base.recipients = vec![alice.clone()];
+        base.generation = 1;
+        base.vault_id = "00112233445566778899aabbccddeeff".into();
+        let mut theirs = base.clone();
+        let mut ours = base.clone();
+        seal(&mut base, &crate::types::Meta::default(), &alice_identity);
+        theirs.generation = 2;
+        theirs.recipients.push(g.clone());
+        theirs.agents = crate::agents::blobs_for(&granted.grants, &[]).unwrap();
+        seal(&mut theirs, &granted, &alice_identity);
+        ours.generation = 3;
+        ours.schema.get_mut("DB_URL").unwrap().description = "the database".into();
+        seal(&mut ours, &revoked, &alice_identity);
+
+        let (result, regenerated) = trusting(&alice_secret, &alice, || {
+            keyed(&base, &ours, &theirs, ".murk")
+        });
+        assert!(
+            result
+                .conflicts
+                .iter()
+                .any(|c| c.field == format!("recipients.{}", recipient_label(&g))
+                    && c.reason == "added on one side but not the other"),
+            "the returning grant conflicts on its recipient: {:?}",
+            result.conflicts
+        );
+        assert!(!regenerated, "nothing is signed");
+        assert_eq!(result.vault.meta, ours.meta, "the meta stays ours'");
+    }
+
+    /// G7 at the result check: a merged result that holds the grant record
+    /// of a key the merged set holds as revoked is a conflict, and so is the
+    /// key listed as a plain recipient. A result whose grant this machine
+    /// re-admitted (no id left) passes.
+    #[test]
+    fn row_r_i11_f_c_v3() {
+        let g = "age1grantkey".to_string();
+        let mut merged = base_vault();
+        merged.recipients = vec!["age1alice".into(), g.clone()];
+        let tombstone = BTreeMap::from([(
+            g.clone(),
+            BTreeSet::from(["00112233445566778899aabbccddeeff".to_string()]),
+        )]);
+        let with_record = crate::types::Meta {
+            grants: BTreeMap::from([("bot".to_string(), grant_for(&g, "age1alice"))]),
+            revoked_grants: tombstone.clone(),
+            ..Default::default()
+        };
+        let conflict = revoked_grant_conflict(&merged, &with_record, ".murk");
+        assert!(
+            conflict
+                .as_ref()
+                .is_some_and(|c| c.field == "grants.bot" && c.reason.contains("--re-add")),
+            "the returning grant record is refused: {conflict:?}"
+        );
+
+        let plain = crate::types::Meta {
+            revoked_grants: tombstone,
+            ..Default::default()
+        };
+        assert!(
+            revoked_grant_conflict(&merged, &plain, ".murk")
+                .is_some_and(|c| c.field.starts_with("recipients.")),
+            "the key listed without its grant record is refused"
+        );
+
+        let readmitted = crate::types::Meta {
+            revoked_grants: BTreeMap::new(),
+            ..with_record
+        };
+        assert!(
+            revoked_grant_conflict(&merged, &readmitted, ".murk").is_none(),
+            "a grant with no id left passes"
         );
     }
 }
