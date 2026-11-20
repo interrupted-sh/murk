@@ -24,8 +24,8 @@ R-I8-b:a	pending	lineage-load	authenticity	row_r_i8_b_a	skip rule 10	-	A byte co
 R-I8-b:b	pending	lineage-load	authenticity	row_r_i8_b_b	skip rule 10	-	As R-I8-b:a with the copy also tracked: a K1 warning names it and rule 10 still refuses.
 R-I8-b:c	known-violation	shared-vault-id	authenticity	row_r_i8_b_c	drop K2	H3	A machine that recorded both paths of one vault id refuses both while both are tracked; today both load.
 R-I8-b:residual	control	lineage-load	authenticity	row_r_i8_b_residual	-	-	Stated residual: without a prod save after the copy, swapping in the copy is accepted.
-R-I8-c:other	known-violation	expected-vault	auth_matrix	row_r_i8_c_other	drop the MURK_EXPECTED_VAULT check	-	A pinless runner with MURK_EXPECTED_VAULT refuses another vault's file; today it loads it.
-R-I8-c:older	known-violation	expected-vault	auth_matrix	row_r_i8_c_older	drop the MURK_EXPECTED_VAULT check	-	A pinless runner with MURK_EXPECTED_VAULT refuses a prod revision below the minimum generation; today it loads it.
+R-I8-c:other	enforced	-	auth_matrix	row_r_i8_c_other	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses another vault's file.
+R-I8-c:older	enforced	-	auth_matrix	row_r_i8_c_older	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses a prod revision below the minimum generation.
 R-I8-c:fork	pending	lineage-load	auth_matrix	row_r_i8_c_fork	ignore the fp part of MURK_EXPECTED_VAULT	-	A pinless runner whose MURK_EXPECTED_VAULT names a revision refuses a stale fork above the minimum.
 R-I8-d	enforced	-	trust_invariants	row_r_i8_d	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned file with another vault id.
 R-I8-e:a	known-violation	shared-vault-id	authenticity	row_r_i8_e_a	drop K1	H3	murk trust of a byte copy of a pinned vault is refused and names both paths; today it is accepted silently.

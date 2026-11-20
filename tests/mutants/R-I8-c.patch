@@ -1,0 +1,18 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -84,13 +84,13 @@
+     /// and whose counter is `found_generation` is not the one expected: the
+     /// id first, then the minimum.
+     pub fn mismatch(&self, found_id: &str, found_generation: u64) -> Option<ExpectedMismatch> {
+-        if found_id != self.vault_id {
++        if false && found_id != self.vault_id {
+             return Some(ExpectedMismatch::OtherVault {
+                 expected: self.vault_id.clone(),
+                 found: found_id.to_string(),
+             });
+         }
+-        (found_generation < self.min_generation).then_some(ExpectedMismatch::BelowMinimum {
++        (false && found_generation < self.min_generation).then_some(ExpectedMismatch::BelowMinimum {
+             minimum: self.min_generation,
+             found: found_generation,
+         })

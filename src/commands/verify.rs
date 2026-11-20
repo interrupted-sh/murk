@@ -135,6 +135,20 @@ pub(crate) fn cmd_verify(vault_path: &str) {
             });
         }
     }
+    // The value for MURK_EXPECTED_VAULT, for a vault this key loads. It goes
+    // to standard output alone, so a CI step can capture it.
+    if !matches!(
+        inspected.assessment.verdict,
+        murk_cli::trust::Verdict::Refused(_)
+    ) && !vault.vault_id.is_empty()
+    {
+        eprintln!(
+            "{} expected vault  the value for {} is:",
+            "ok".green().bold(),
+            murk_cli::trust::EXPECTED_VAULT_VAR
+        );
+        println!("{}:{}", vault.vault_id, vault.generation);
+    }
 
     // Git anchor — is the vault's latest commit signed, and by someone this
     // vault trusts? The vault signature covers content; a signed commit covers
