@@ -1,0 +1,12 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -492,7 +492,8 @@
+ /// `vault_path` still applies (see [`sidecar_without_pin`]).
+ fn parse_raw(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin>, String> {
+     let Some((path, contents)) = &raw.file else {
+-        return sidecar_without_pin(vault_path, raw);
++        let _ = sidecar_without_pin;
++        return Ok(None);
+     };
+     let mut pin: TrustPin = serde_json::from_slice(contents).map_err(|e| {
+         format!(

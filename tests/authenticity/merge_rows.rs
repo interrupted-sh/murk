@@ -1023,9 +1023,10 @@ fn row_r_i10_g_2() {
 }
 
 /// Arm 1 on format 3, with no lineage to show that ours contains theirs:
-/// bob's revision is no authority, so the merge of alice's C2a into main is
-/// two-way. It conflicts on recipient bob and on `O1`, keeps ours' values and
-/// policy, and signs nothing.
+/// bob's revision is no authority, so no ancestor exempts a side that lists
+/// bob, whom alice's machine recorded as removed. The removal rule refuses
+/// theirs before any merge: `.murk` stays ours byte for byte, the pin is
+/// unchanged, and nothing is signed.
 #[test]
 fn row_r_i10_g_1_v3() {
     check("R-I10-g:1-v3", |p| {
@@ -1035,14 +1036,26 @@ fn row_r_i10_g_1_v3() {
         git_ok(repo, &["checkout", "-q", "-b", "pr", &scene.c2]);
         put(repo, &scene.c2a_file, "pr: alice's revision under bob's");
         git_ok(repo, &["checkout", "-q", "main"]);
+        let pins = || -> Vec<Vec<u8>> {
+            pin_files(&scene.alice)
+                .iter()
+                .map(|f| fs::read(f).unwrap())
+                .collect()
+        };
+        let pin_before = pins();
         let merged = Merged::merge(&scene.alice, repo, "pr");
         require_ran(p, &merged, "merge")?;
         p.reached();
         p.target(!merged.ok, "the merge stops with a conflict");
         p.target(
-            merged.stderr.contains("recipients.") && merged.stderr.contains("secrets.O1"),
-            "the conflicts name the recipient bob and O1",
+            merged
+                .stderr
+                .contains("theirs failed its authenticity check")
+                && merged.stderr.contains("bob"),
+            "theirs is refused, naming bob",
         );
+        p.target(merged.file == scene.ours, ".murk is ours, byte for byte");
+        p.target(pins() == pin_before, "the pin is unchanged");
         for key in ["DB_URL", "K", "PRE", "O1"] {
             p.target(
                 merged.secret(key) == secret_in(&scene.ours, key),
@@ -1054,7 +1067,10 @@ fn row_r_i10_g_1_v3() {
             merged.vault().is_some_and(|v| v.policy == ours_policy),
             "the policy is ours'",
         );
-        p.target(!merged.signed(), "nothing is signed");
+        p.target(
+            nothing_new_signed(&merged.file, &scene.ours),
+            "nothing new is signed",
+        );
         Ok(())
     });
 }

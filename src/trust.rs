@@ -34,10 +34,11 @@
 //! 7. A group membership change must be signed by a member of that group as
 //!    pinned (removing a member who left the vault entirely is exempt).
 //! 8. A key an accepted vault removed stays removed: a vault signed by it is
-//!    refused everywhere, and a vault listing it at the generation it was
-//!    removed at or below is refused where the removal applies (see
-//!    [`removal_applies`]). A newer vault from a trusted signer that lists it
-//!    again there, or `murk trust --re-add`, brings it back.
+//!    refused everywhere, and a vault listing it, at any generation, is
+//!    refused where the removal applies (see [`removal_applies`]). Only this
+//!    machine's own save that adds it (`circle authorize`) or `murk trust
+//!    --re-add` brings it back. The pin's sidecar keeps a copy of each
+//!    record, so a murk 0.15 component that clears it does not undo it.
 //! 9. The generation may rise at most [`MAX_GENERATION_STEP`] above the mark
 //!    and never past [`MAX_GENERATION`]; a different vault with the counter
 //!    this machine accepted on the branch is a fork.
@@ -243,10 +244,10 @@ pub enum Refusal {
     /// entry. Grants get freshly minted keys, so this is tampering — and
     /// recording it would mark the operator as a grant here.
     GrantBindsOperator { grant: String, key: String },
-    /// The vault is signed by, or lists, a key an accepted vault removed
-    /// (`removed_at`), and is not a newer revision re-adding it: `found` is at
-    /// or below `removed_at`, or the removed key signed it. `murk trust`
-    /// accepts it only with `--re-add` naming the key.
+    /// The vault is signed by, or lists, a key this machine recorded as
+    /// removed (`removed_at`), whatever its generation `found`. Only this
+    /// machine's own save that adds the key or `murk trust --re-add` naming
+    /// the key brings it back.
     RemovedKey {
         key: String,
         removed_at: u64,
@@ -587,8 +588,8 @@ impl Checkout {
 }
 
 /// Whether the listing part of the removal rule applies to `key` (canonical)
-/// at `checkout`: whether a vault listing the key at or below the generation
-/// it was removed at is refused there. It applies on a branch whose accepted
+/// at `checkout`: whether a vault listing the key, at any generation, is
+/// refused there. It applies on a branch whose accepted
 /// history contains the removal (see [`TrustPin::removed_on`]), on a detached
 /// HEAD, outside git, and on a branch this machine has no mark for (its
 /// history is unknown, so it may be a replay) unless its vault is from before
@@ -665,10 +666,10 @@ pub fn removed_keys_in(
 
 /// Rule 8 for a load: the vault is signed by a removed key (refused on every
 /// branch, unless it is that key's own history from before the removal, see
-/// [`signed_before_removal`]), or lists one at or below the generation it was
-/// removed at where the removal applies (see [`removal_applies`]). A newer
-/// vault listing it again is how a trusted signer re-adds someone, so it
-/// passes (its signer is checked like any other).
+/// [`signed_before_removal`]), or lists one where the removal applies (see
+/// [`removal_applies`]), at any generation. A newer revision that lists the
+/// key may re-add them on purpose, or be a stale fork that still lists them:
+/// this machine cannot tell, so only `murk trust --re-add` here accepts it.
 fn removal_refusal(
     loaded: &Loaded<'_>,
     pin: Option<&TrustPin>,
@@ -691,7 +692,7 @@ fn removal_refusal(
     loaded.vault.recipients.iter().find_map(|r| {
         let key = canonical_recipient(r);
         let removed_at = *pin.removed.get(key.as_ref())?;
-        (found <= removed_at && removal_applies(pin, &key, checkout)).then(|| Refusal::RemovedKey {
+        removal_applies(pin, &key, checkout).then(|| Refusal::RemovedKey {
             key: r.clone(),
             removed_at,
             found,
@@ -1601,7 +1602,16 @@ pub fn check_merge_side(
         let msg = refusal_message(vault_path, &refusal, side, pin.as_ref());
         return Err(msg.lines().next().unwrap_or_default().to_string());
     }
-    if let Some(refusal) = merge_side_counter_or_removal(side, base.map(|(b, _)| b), pin.as_ref()) {
+    // Only an authority ancestor says that a side kept a key rather than
+    // added it (see `merge_side_counter_or_removal`).
+    let authority = base.filter(|(_, groups)| groups.is_some()).map(|(b, _)| b);
+    if let Some(refusal) = merge_side_counter_or_removal(
+        vault_path,
+        side,
+        base.map(|(b, _)| b),
+        authority,
+        pin.as_ref(),
+    ) {
         return Err(refusal);
     }
     let env_signers = env_trusted_signers()?;
@@ -1654,22 +1664,28 @@ pub fn check_merge_side(
 }
 
 /// Rules 8 and 9 for a merge side. A side signed by a removed key is refused.
-/// A side that lists a removed key the ancestor did not, numbered at or below
-/// the removal, is an older revision re-adding them: refused as a rollback. A
-/// side that merely still lists such a key (a branch forked before the
-/// removal) passes here: the merge takes the removal from the other side, and
-/// [`removed_key_kept_by_merge`] refuses a result that keeps the key. The
-/// counter may be at most [`MAX_GENERATION_STEP`] above both the mark and the
-/// ancestor; unlike a load it may be below the mark, since a merged branch is
+/// A side that lists a removed key that `authority`, the ancestor when it is
+/// an authority for this merge, does not list is refused at any generation:
+/// it may re-add them on purpose, or be a stale fork, and only `murk trust
+/// --re-add` on this machine accepts that. Without an authority ancestor no
+/// side may list such a key, so a forged ancestor that lists it exempts
+/// nothing. A side that lists the key because the authority ancestor did (a
+/// branch forked before the removal) passes here: the recipient merge stops
+/// on the one-sided removal, and [`removed_key_kept_by_merge`] refuses a
+/// result that keeps the key. The counter may be at most
+/// [`MAX_GENERATION_STEP`] above both the mark and `base`, the ancestor;
+/// unlike a load it may be below the mark, since a merged branch is
 /// legitimately older.
 fn merge_side_counter_or_removal(
+    vault_path: &str,
     side: &Loaded<'_>,
     base: Option<&types::Vault>,
+    authority: Option<&types::Vault>,
     pin: Option<&TrustPin>,
 ) -> Option<String> {
     let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
     let found = side.vault.generation;
-    let in_base: BTreeSet<String> = base
+    let in_base: BTreeSet<String> = authority
         .map(|b| {
             b.recipients
                 .iter()
@@ -1688,11 +1704,16 @@ fn merge_side_counter_or_removal(
     for r in &side.vault.recipients {
         let canonical = canonical_recipient(r).into_owned();
         if let Some(&at) = pin.removed.get(&canonical)
-            && found <= at
             && !in_base.contains(&canonical)
         {
+            if found <= at {
+                return Some(format!(
+                    "rolled back: it adds {} again, who was removed from this vault at generation {at} on this machine, in a revision numbered {found}, not newer",
+                    label(side.names, r)
+                ));
+            }
             return Some(format!(
-                "rolled back: it adds {} again, who was removed from this vault at generation {at} on this machine, in a revision numbered {found}, not newer",
+                "it lists {}, who was removed from this vault at generation {at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them. To accept a deliberate re-add, abort the merge (`git merge --abort`) and review the change with `murk diff`. Then do one of these: merge again, keep this side (`git checkout --theirs -- {vault_path}`), run `murk trust --vault {vault_path} --re-add {canonical}`, and make the other side's vault changes again with murk. Or run `murk circle authorize` for them on this branch, commit, and merge again",
                 label(side.names, r)
             ));
         }
@@ -1705,27 +1726,30 @@ fn merge_side_counter_or_removal(
     })
 }
 
-/// Rule 8 for a merge result: a removed key the merged recipients still list
-/// must be re-added by a side numbered above the removal (one that passed
-/// [`check_merge_side`], so its signer is trusted). Otherwise the result would
-/// bring them back from older revisions alone. Returns the key and the
-/// generation it was removed at.
+/// Rule 8 for a merge result at `checkout`: where the removal of a key the
+/// merged recipients list applies (see [`removal_applies`]), the result is
+/// refused, whatever the sides' generations. Elsewhere (a branch this
+/// machine accepted before the removal reached it) a side numbered above the
+/// removal must list the key, so the result never brings it back from older
+/// revisions alone. Returns the key and the generation it was removed at.
 pub fn removed_key_kept_by_merge(
     pin: Option<&TrustPin>,
     merged: &types::Vault,
     sides: &[&types::Vault],
+    checkout: &Checkout,
 ) -> Option<(String, u64)> {
     let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
     merged.recipients.iter().find_map(|r| {
         let canonical = canonical_recipient(r).into_owned();
         let at = *pin.removed.get(&canonical)?;
-        let readded = sides.iter().any(|side| {
-            side.generation > at
-                && side
-                    .recipients
-                    .iter()
-                    .any(|s| canonical_recipient(s) == canonical)
-        });
+        let readded = !removal_applies(pin, &canonical, checkout)
+            && sides.iter().any(|side| {
+                side.generation > at
+                    && side
+                        .recipients
+                        .iter()
+                        .any(|s| canonical_recipient(s) == canonical)
+            });
         (!readded).then(|| (r.clone(), at))
     })
 }
@@ -1834,8 +1858,9 @@ pub enum Acceptance<'a> {
 /// A key the trusted set loses is recorded in `removed` with the vault's
 /// generation — when the vault is this branch's next accepted state (a
 /// branch seen here before, or outside git), the user's decision, or this
-/// machine's own save — and `commit` in `removed_at_commit`; it leaves them
-/// only when a newer accepted vault lists it again, or the user re-adds it.
+/// machine's own save — and `commit` in `removed_at_commit`. A load never
+/// takes it out, whatever the vault's generation: only the user re-adding it
+/// (`murk trust --re-add`) or this machine's own save adding it does.
 /// A registry entry for a recipient with no pinned key is pinned on the
 /// signer's word and recorded in `added_by`; when that signer leaves the
 /// trusted set the entry is dropped (see SPEC, Trust: "independently
@@ -1881,21 +1906,6 @@ pub fn accepted_pin(
         }),
         Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
     };
-    // Removals whose listing rule does not apply on this branch (see
-    // `removal_applies`): a vault here listing the key again is not a re-add,
-    // so it never drops the recorded removal. A branch with no mark is judged
-    // without its git history, so nothing is set aside there.
-    let checkout = Checkout::at(head.clone());
-    let set_aside: BTreeSet<String> = prior_v2
-        .map(|p| {
-            p.removed
-                .keys()
-                .filter(|k| !removal_applies(p, k, &checkout))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-
     let mut pin = prior_v2.cloned().unwrap_or_default();
     pin.v = pins::PIN_VERSION;
     // A key this machine trusts (or trusted) as a signer is never recorded as
@@ -1943,15 +1953,10 @@ pub fn accepted_pin(
             pin.removed_on.entry(k).or_default();
         }
     }
-    // Who comes back: a newer accepted vault listing the key where the
-    // removal applies (its signer was trusted, or this load is history and
-    // changes nothing), the user naming it, or this machine's own save adding
-    // it.
+    // Who comes back: the user naming the key, or this machine's own save
+    // adding it. A load never re-trusts a removed key.
     let trusted = std::mem::take(&mut pin.trusted);
     match how {
-        Acceptance::Load if current => pin
-            .removed
-            .retain(|k, at| !(trusted.contains(k) && found > *at && !set_aside.contains(k))),
         Acceptance::Load => {}
         Acceptance::Trust { readmit, .. } => pin.removed.retain(|k, _| !readmit.contains(k)),
         Acceptance::OwnSave { before } => pin
@@ -2604,13 +2609,18 @@ fn removed_key_message(
             "it is signed by {who}, who was removed from this vault at generation {removed_at} on this machine\nif the branch that removed them is not merged here yet, merge it with the murk merge driver; when the merge stops on this vault, keep the side that removed them (`git checkout --theirs -- {vault_path}` when you merged that branch in) and `git add {vault_path}`. That drops every vault change made on this branch since the two branches split, by anyone, not only by them: run `murk trust --vault {vault_path}` (the vault you keep may read as a rollback or fork of this branch; accepting it never re-trusts them), find this branch's last vault commit not signed by them (`git log -- {vault_path}`), list what differs with `murk diff <that commit> --show-values`, and review it change by change — a later vault signed by someone else can still carry their changes — then make only the changes trusted members made again with murk, and commit. If the branch that removed them will not be merged (the removal was abandoned), `murk trust --vault {vault_path} --re-add {}` restores them on this machine. Otherwise restore {vault_path} from git",
             canonical_recipient(key)
         )
+    } else if found > removed_at {
+        return format!(
+            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). To trust them again on this machine, run `murk trust --vault {vault_path} --re-add {}`",
+            canonical_recipient(key)
+        );
     } else {
         format!(
             "it lists {who}, who was removed from this vault at generation {removed_at} on this machine, and its generation {found} is not newer — an older revision may have been replayed\nupdate to the vault that removed them (pull, or merge the removal into this branch)"
         )
     };
     format!(
-        "vault {vault_path} rolled back: {what}; to re-add them on purpose, have a trusted teammate authorize them again, or review it and run `murk trust --vault {vault_path} --re-add {}`",
+        "vault {vault_path} rolled back: {what}; to re-add them on purpose, review it and run `murk trust --vault {vault_path} --re-add {}`",
         canonical_recipient(key)
     )
 }
@@ -3942,6 +3952,39 @@ mod tests {
         assert_eq!(
             assessment(Some(legacy), None).trusted_ssh_signers(&BTreeMap::new()),
             Vec::<String>::new()
+        );
+    }
+
+    /// A merge result that lists a key removed where the removal applies is
+    /// refused, even when both sides list it above the removal. Where the
+    /// removal does not apply (a branch accepted before it), a side above the
+    /// removal that lists the key still re-adds it.
+    #[test]
+    fn row_r_i10_h_merge_result() {
+        let mut pin = TrustPin {
+            v: pins::PIN_VERSION,
+            removed: BTreeMap::from([("age1bob".to_string(), 4)]),
+            removed_on: BTreeMap::from([("age1bob".to_string(), BTreeSet::from(["main".into()]))]),
+            branches: BTreeMap::from([("main".to_string(), 4), ("old".to_string(), 3)]),
+            ..TrustPin::default()
+        };
+        let mut side = crate::testutil::empty_vault();
+        side.recipients = vec!["age1alice".into(), "age1bob".into()];
+        side.generation = 9;
+        let merged = side.clone();
+        let on = |b: &str| Checkout::at(HeadState::Branch(b.into()));
+        assert_eq!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("main")),
+            Some(("age1bob".to_string(), 4))
+        );
+        assert_eq!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("old")),
+            None
+        );
+        pin.removed_on.clear();
+        assert!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("old")).is_some(),
+            "with no branch entry the removal applies everywhere"
         );
     }
 }

@@ -490,6 +490,21 @@ enum Op {
         at: Ref,
         how: Presented,
     },
+    /// `murk trust --re-add <who's key> --yes` on machine `m` at its
+    /// checked-out HEAD: this machine's consent to trust `who` again. It
+    /// re-adds someone `m` holds a record for, favouring one the vault
+    /// checked out lists again (see the step for the order).
+    ReAdd {
+        m: M,
+        who: P,
+    },
+    /// Machine `m` holds a removal record for a person: another machine
+    /// (`by`, or the next one that fits) syncs, authorizes them again and
+    /// pushes; `m` then loads the tip (refused) and runs `ReAdd` for them.
+    AuthorizeAgain {
+        m: M,
+        by: M,
+    },
 }
 
 /// The forged commit an [`Op::AncestorBranch`] puts under a genuine revision.
@@ -713,6 +728,18 @@ fn op() -> BoxedStrategy<Op> {
                 .boxed(),
         ),
         (1, m().prop_map(|m| Op::Push { m }).boxed()),
+        (
+            2,
+            (m(), p())
+                .prop_map(|(m, who)| Op::ReAdd { m, who })
+                .boxed(),
+        ),
+        (
+            2,
+            (m(), m())
+                .prop_map(|(m, by)| Op::AuthorizeAgain { m, by })
+                .boxed(),
+        ),
     ];
     let [copy, unsigned, stripped, forged, grants] = &CONSTRUCTORS;
     if copy.open() {
@@ -1089,6 +1116,8 @@ fn kind(op: &Op) -> &'static str {
         Op::ForgeUnsigned { .. } => "forge-unsigned",
         Op::ListGrantKey { .. } => "list-grant-key",
         Op::AgentProbe { .. } => "agent-probe",
+        Op::ReAdd { .. } => "re-add",
+        Op::AuthorizeAgain { .. } => "authorize-again",
     }
 }
 
@@ -1401,7 +1430,8 @@ impl<'f> World<'f> {
     }
 
     /// The removals `obs` has accepted (the agent follows the machine that
-    /// minted it, and its own loads).
+    /// minted it, and its own loads). A runner that keeps its pin but loads
+    /// only with `MURK_TRUSTED_SIGNERS` records none (see `note_accept`).
     fn removals(&self, obs: &Obs) -> BTreeMap<usize, (usize, String)> {
         let mut all = self.removed.get(obs).cloned().unwrap_or_default();
         if let (Obs::Agent, Some(agent)) = (obs, &self.agent) {
@@ -1493,8 +1523,11 @@ impl<'f> World<'f> {
             });
         }
         // A member this observer still trusts may list anyone with their own
-        // code: they could have run `circle authorize` instead.
+        // code: they could have run `circle authorize` instead. A machine
+        // with a pin keeps its own record of a removal, though: it refuses a
+        // vault that lists the person until it re-adds them itself.
         let insider = origin.custom && origin.producer.is_some_and(|p| !removals.contains_key(&p));
+        let pinned = matches!(obs, Obs::Machine(_) | Obs::Erin);
         for (who, v) in removals {
             if origin.step <= v {
                 continue;
@@ -1513,10 +1546,12 @@ impl<'f> World<'f> {
                     PEOPLE[who], origin.step, origin.forged
                 ));
             }
-            if listed.contains(&who) && !insider && !self.authorized_between(who, v, origin.step) {
+            if listed.contains(&who)
+                && (pinned || (!insider && !self.authorized_between(who, v, origin.step)))
+            {
                 return Err(format!(
                     "{obs:?} {how} a vault produced at step {} that lists {} again, revoked at \
-                     step {v} and never authorized since",
+                     step {v}, while its record of the removal stands",
                     origin.step, PEOPLE[who]
                 ));
             }
@@ -1525,20 +1560,20 @@ impl<'f> World<'f> {
     }
 
     /// Record that `obs` accepted `bytes`, the vault at commit `at`: removals
-    /// it now knows, and re-authorizations that undo them.
+    /// it now knows. A load never clears a record: only the machine's own
+    /// `circle authorize` of the person or its `murk trust --re-add` does. A
+    /// runner that keeps its pin but loads only with `MURK_TRUSTED_SIGNERS`
+    /// records no removal: a stated limit.
     fn note_accept(&mut self, obs: Obs, bytes: &[u8], at: &str) {
+        if obs == Obs::CiKept {
+            return;
+        }
         let Some(origin) = self.origins.get(&blob_id(bytes)).copied() else {
             return;
         };
         let listed = self.listed(bytes);
         for who in 0..PEOPLE.len() {
-            let removed = self.removed.entry(obs.clone()).or_default();
             if listed.contains(&who) {
-                if let Some(&(v, _)) = removed.get(&who)
-                    && self.authorized_between(who, v, origin.step)
-                {
-                    self.removed.entry(obs.clone()).or_default().remove(&who);
-                }
                 continue;
             }
             let revoke = self
@@ -2126,6 +2161,13 @@ impl<'f> World<'f> {
                     |world, _| {
                         world.authorizes.push((who, step));
                         world.ci_signers.insert(who);
+                        // This machine's own save that adds them clears its
+                        // record of their removal.
+                        if !world.listed(&before).contains(&who)
+                            && let Some(records) = world.removed.get_mut(&Obs::Machine(m.0))
+                        {
+                            records.remove(&who);
+                        }
                         Ok(())
                     },
                 ))
@@ -2172,6 +2214,11 @@ impl<'f> World<'f> {
                 let mach = self.machine(m.0);
                 let person = MACHINES[m.0].1;
                 let w = &self.fx.people[who.0];
+                // murk on this machine refuses a vault that lists someone it
+                // recorded as removed, so the vouch could not be loaded here.
+                if self.removals(&Obs::Machine(m.0)).contains_key(&who.0) {
+                    return None;
+                }
                 let forged = self.forge(
                     &mach.vault(),
                     &[
@@ -2580,6 +2627,110 @@ impl<'f> World<'f> {
                 self.push_as_attacker(&forged, *to, step);
                 Some(Ok(Ran::Accepted))
             }
+            Op::ReAdd { m, who } => {
+                let obs = Obs::Machine(m.0);
+                let records = self.removals(&obs);
+                // A machine re-adds someone it holds a record for. It favours
+                // a person the checked-out vault lists again (a load it just
+                // refused), then a person another machine authorized since,
+                // whose vaults it would otherwise refuse.
+                let mach = self.machine(m.0);
+                let bytes = mach.vault();
+                let in_vault = self.listed(&bytes);
+                let recorded: Vec<usize> = records.keys().copied().collect();
+                let who = [who.0]
+                    .into_iter()
+                    .chain(recorded.iter().copied())
+                    .filter(|p| records.contains_key(p))
+                    .find(|p| in_vault.contains(p))
+                    .or_else(|| records.contains_key(&who.0).then_some(who.0))
+                    .or_else(|| {
+                        recorded
+                            .iter()
+                            .copied()
+                            .find(|&p| self.authorized_between(p, records[&p].0, usize::MAX))
+                    })
+                    .or_else(|| recorded.first().copied())?;
+                let listed = in_vault.contains(&who);
+                let saved = self.removed.get_mut(&obs).and_then(|r| r.remove(&who));
+                // A reviewer re-adds them only when nothing else here forbids
+                // the vault that lists them.
+                if listed
+                    && let Some(origin) = self.origins.get(&blob_id(&bytes)).copied()
+                    && (origin.forged || self.check_accept(&obs, &bytes, "", &head(&mach)).is_err())
+                {
+                    self.removed
+                        .entry(obs)
+                        .or_default()
+                        .extend(saved.map(|s| (who, s)));
+                    return None;
+                }
+                let out = mach
+                    .murk()
+                    .args([
+                        "trust",
+                        "--vault",
+                        ".murk",
+                        "--re-add",
+                        &self.fx.people[who].pubkey,
+                        "--yes",
+                    ])
+                    .output()
+                    .unwrap();
+                if !out.status.success() {
+                    self.removed
+                        .entry(obs)
+                        .or_default()
+                        .extend(saved.map(|s| (who, s)));
+                    return Some(refused(&bytes, &mach.vault(), "murk trust --re-add", &out));
+                }
+                let now = mach.vault();
+                if !listed {
+                    return Some(
+                        unchanged(&bytes, &now, "murk trust --re-add of an unlisted key")
+                            .map(|()| Ran::Accepted),
+                    );
+                }
+                self.record(&now, MACHINES[m.0].1.into(), step, false);
+                let accepted = self.accepted(obs, &now, "trusted");
+                if matches!(accepted, Ok(Ran::Accepted)) {
+                    self.stats.count(DECISIVE_READD, true);
+                }
+                Some(accepted)
+            }
+            Op::AuthorizeAgain { m, by } => {
+                // m holds a record for `who`; another machine authorizes
+                // them again and pushes; m checks out the tip (its load is
+                // refused) and consents with `murk trust --re-add`.
+                let records = self.removals(&Obs::Machine(m.0));
+                let who = *records.keys().next()?;
+                let by = [by.0].into_iter().chain(0..MACHINES.len()).find(|&i| {
+                    i != m.0 && MACHINES[i].1 != who && MACHINES[i].1 != MACHINES[m.0].1
+                })?;
+                for op in [
+                    Op::Sync { m: M(by) },
+                    Op::Authorize {
+                        m: M(by),
+                        who: P(who),
+                    },
+                    Op::Sync { m: M(by) },
+                ] {
+                    match self.step(step, &op)? {
+                        Ok(Ran::Accepted) => {}
+                        other => return Some(other),
+                    }
+                }
+                if let Err(e) = self.step(
+                    step,
+                    &Op::Load {
+                        m: *m,
+                        at: At::OriginMain,
+                    },
+                )? {
+                    return Some(Err(e));
+                }
+                self.step(step, &Op::ReAdd { m: *m, who: P(who) })
+            }
             Op::AgentProbe { at, how } => {
                 let agent = self.agent.as_ref()?;
                 let secret = fs::read_to_string(&agent.key_file).ok()?;
@@ -2635,6 +2786,7 @@ impl<'f> World<'f> {
                 sign,
                 to,
             } => {
+                let revoked = matches!(by, Attacker::Revoked);
                 let by = match by {
                     Attacker::Person(p) => p.0,
                     Attacker::Revoked => self.revokes.last()?.0,
@@ -2697,6 +2849,12 @@ impl<'f> World<'f> {
                             Planted::Weak => "weak".into(),
                         },
                     ));
+                    // A removed member signing as someone else leaves
+                    // themselves out: a vault that lists them is refused for
+                    // that alone.
+                    if revoked && !plants {
+                        vars.push(("FORGE_DROP_SELF", "1".into()));
+                    }
                 }
                 // A save murk refused is the attacker's to work around; this
                 // forgery does not apply.
@@ -4017,6 +4175,13 @@ const MAX_STEPS: usize = 24;
 /// the draw to demand a number.
 const FLOOR_FROM_CASES: u32 = 20;
 
+/// The stats kind of a re-add that the vault lists: the machine that
+/// recorded the removal consents and then accepts the vault.
+const DECISIVE_READD: &str = "re-add:decisive";
+/// From this many random cases, at least one must reach [`DECISIVE_READD`]
+/// (the `AuthorizeAgain` step builds it).
+const DECISIVE_READD_FROM_CASES: u32 = 64;
+
 /// The fewest cases per random case each oracle must have judged where it
 /// could fail (see [`Stats::judged`]), in a run of [`FLOOR_FROM_CASES`] cases
 /// or more. Each is about a quarter of the rate three forty-case runs reached
@@ -4123,6 +4288,16 @@ fn trust_invariants_hold_across_machines() {
         report.push(format!(
             "every one of the {forgeries} forgeries in the random sequences was skipped, so \
              none of them attacked anything: {}",
+            totals.report()
+        ));
+    }
+    // The random runs must reach a re-add that the vault lists: consent on
+    // a machine that recorded the removal, then the vault accepted there.
+    if cases() >= DECISIVE_READD_FROM_CASES && totals.ran_of(DECISIVE_READD) == 0 {
+        report.push(format!(
+            "no random case reached a re-add of a person the vault lists again in {} cases \
+             (seed {seed}): the re-add oracle path is no longer exercised\n{}",
+            cases(),
             totals.report()
         ));
     }
@@ -4267,6 +4442,61 @@ fn row_r_i1_a() {
         );
         p.target(out.invariants_hold(), "the harness's own checks hold");
         p.note(printed.stderr);
+        Ok(())
+    });
+}
+
+/// Stored sequence: a re-add needs this machine's own consent. carol's
+/// machine accepts bob's removal. alice authorizes bob again and pushes.
+/// carol's next load is refused and points at `--re-add`. After `murk trust
+/// --re-add` on carol's machine, the load is accepted and carol's own save
+/// lists bob.
+#[test]
+fn row_r_i10_h_soak() {
+    common::rows::check("R-I10-h:soak", |p| {
+        let (alice, carol) = (M(0), M(3));
+        let bob = P(1);
+        let mut run = Run::new();
+        run.setup(&[
+            accepts(load_main(carol)),
+            accepts(Op::Revoke {
+                m: alice,
+                who: Target::Person(bob),
+            }),
+            accepts(Op::Sync { m: alice }),
+            accepts(Op::Sync { m: carol }),
+            accepts(load_main(carol)),
+            accepts(Op::Authorize { m: alice, who: bob }),
+            accepts(Op::Sync { m: alice }),
+            accepts(Op::Sync { m: carol }),
+        ])?;
+        let refused = run.decisive(p, &load_main(carol))?;
+        p.target(
+            refused.refused(),
+            format!("carol's load is refused: {}", refused.why()),
+        );
+        p.target(
+            refused.why().contains("bob") && refused.why().contains("--re-add"),
+            "the refusal names bob and --re-add",
+        );
+        let steps = [
+            accepts(Op::ReAdd { m: carol, who: bob }),
+            accepts(load_main(carol)),
+            accepts(Op::Save {
+                m: carol,
+                key: K(0),
+            }),
+        ];
+        let after = run.setup(&steps);
+        p.target(
+            after.is_ok(),
+            format!("carol re-adds bob, loads and saves: {after:?}"),
+        );
+        let listed = run
+            .world
+            .listed(&run.world.machine(carol.0).vault())
+            .contains(&bob.0);
+        p.target(listed, "carol's save lists bob");
         Ok(())
     });
 }
@@ -5904,6 +6134,16 @@ fn forge_child() {
     if let Err(e) = murk_cli::save_vault(&output, &mut vault, &original, &current) {
         println!("FORGE-REFUSED {e}");
         std::process::exit(0);
+    }
+    // The writer leaves themselves out of the recipients, after murk's own
+    // save (which refuses to write a vault its key cannot read back).
+    if var("FORGE_DROP_SELF").is_ok() {
+        let me = identity.pubkey_string().unwrap();
+        let mut vault = murk_cli::read_vault(&output).unwrap();
+        vault.recipients.retain(|r| *r != me);
+        current.recipients.remove(&me);
+        common::forgery::reseal_unchecked(&mut vault, &identity);
+        murk_cli::vault::write(Path::new(&output), &vault).unwrap();
     }
     if let Some(generation) = generation.filter(|&g| g > GENERATION_CAP) {
         let mut vault = murk_cli::read_vault(&output).unwrap();

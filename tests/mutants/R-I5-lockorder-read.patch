@@ -1,0 +1,10 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -406,7 +406,6 @@
+ /// records. A caller that holds the pin lock must not call this (see
+ /// [`LOCK_ORDER`]).
+ pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
+-    check_lock_order()?;
+     let raw = read_raw(vault_path)?;
+     let pin = parse_raw(vault_path, &raw)?;
+     if let (Some(first), Some((pin_file, _))) = (&pin, &raw.file)

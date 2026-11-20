@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -508,7 +508,7 @@
+         };
+     } else {
+         pin.sidecar = parse_sidecar(path, raw.sidecar.as_deref(), &pin.vault_id)?;
+-        let records = pin.sidecar.removals.clone();
++        let records = BTreeMap::new();
+         for key in pin.overlay_removals(&records) {
+             warn_divergence(vault_path, path, &key);
+         }

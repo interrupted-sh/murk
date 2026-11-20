@@ -750,16 +750,16 @@ fn check_against_pin(
 }
 
 /// Refuse a save that would write back a key this machine recorded as
-/// removed only because the file it replaces — an older revision, numbered
-/// at or below the removal — still lists it: the save is numbered past the
-/// removal and signed by a trusted key, so every machine would take it as
-/// the key re-added. A save that adds the key itself
+/// removed only because the file it replaces still lists it, whatever that
+/// file's generation: the save is signed by a trusted key, so every machine
+/// would take it as the key re-added. A save that adds the key itself
 /// (`circle authorize`) re-adds it on purpose and is allowed, and so is a save
 /// on a branch this machine accepted before the removal reached it (see
 /// [`crate::trust::removal_applies`]), where the key is still a member. On a
 /// branch this machine never accepted the save is refused even when its
 /// commit predates the removal: reading such a branch is history, but a
 /// save there would write the key into a vault numbered past the removal.
+/// A load refuses such a file first, so this is a second line of defence.
 fn refuse_carried_removed_keys(
     vault_path: &str,
     vault: &types::Vault,
@@ -777,11 +777,11 @@ fn refuse_carried_removed_keys(
         let key = canonical(r);
         let at = *pin.removed.get(&key)?;
         let applies = crate::trust::removal_applies(pin, &key, &checkout);
-        (applies && before.contains(&key) && on_disk.generation <= at).then_some((r, at))
+        (applies && before.contains(&key)).then_some((r, at))
     });
     match carried {
         Some((key, at)) => Err(MurkError::Secret(format!(
-            "refusing to save: this vault still lists {}, who was removed from it at generation {at} on this machine, and it is an older revision (generation {}) — saving would add them back\nnothing was written\nupdate to the vault that removed them (pull, or merge the removal into this branch), then make the change again; to re-add them on purpose, run `murk circle authorize` for them",
+            "refusing to save: this vault still lists {}, who was removed from it at generation {at} on this machine (this file has generation {}) — saving would add them back\nnothing was written\nupdate to the vault that removed them (pull, or merge the removal into this branch), then make the change again; to re-add them on purpose, run `murk circle authorize` for them",
             crate::trust::label(&current.recipients, key),
             on_disk.generation
         ))),
@@ -2423,5 +2423,35 @@ mod tests {
         });
         save_vault(&ps, &mut vault.clone(), &state, &changed).unwrap();
         assert_eq!(runs.get(), 2, "the save decided again after HEAD moved");
+    }
+
+    /// A save over a file that still lists a key this machine recorded as
+    /// removed is refused where the removal applies, whatever that file's
+    /// generation. A save that adds the key itself is allowed.
+    #[test]
+    fn row_r_i10_h_save() {
+        let pin = crate::pins::TrustPin {
+            v: crate::pins::PIN_VERSION,
+            removed: BTreeMap::from([("age1bob".to_string(), 4)]),
+            ..Default::default()
+        };
+        let mut on_disk = empty_vault();
+        on_disk.recipients = vec!["age1alice".into(), "age1bob".into()];
+        on_disk.generation = 13;
+        let vault = on_disk.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let vp = dir.path().join(".murk");
+        let vp = vp.to_str().unwrap();
+        let state = types::Murk::default();
+        let refused = refuse_carried_removed_keys(vp, &vault, Some(&on_disk), &state, Some(&pin));
+        assert!(
+            refused.is_err_and(|e| e.to_string().contains("refusing to save")),
+            "a save over a file above the removal that lists bob is refused"
+        );
+        on_disk.recipients.pop();
+        assert!(
+            refuse_carried_removed_keys(vp, &vault, Some(&on_disk), &state, Some(&pin)).is_ok(),
+            "a save that adds bob itself is allowed"
+        );
     }
 }
