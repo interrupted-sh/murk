@@ -9,16 +9,16 @@
      pub sidecar: Sidecar,
  }
  
-@@ -334,7 +334,7 @@
+@@ -361,7 +361,7 @@
              ..TrustPin::default()
          };
      } else {
--        pin.sidecar = read_sidecar(&path, &pin.vault_id)?;
-+        let _ = read_sidecar;
+-        pin.sidecar = parse_sidecar(path, raw.sidecar.as_deref(), &pin.vault_id)?;
++        let _ = (parse_sidecar, &raw.sidecar);
      }
-     drop_unusable_signer_keys(&mut pin, &path);
+     drop_unusable_signer_keys(&mut pin, path);
      Ok(Some(pin))
-@@ -544,8 +544,8 @@
+@@ -569,8 +569,8 @@
      };
      let sidecar_file = sidecar_path(&path);
      let json = serde_json::to_string_pretty(&sidecar).map_err(|e| format!("trust pin: {e}"))?;
