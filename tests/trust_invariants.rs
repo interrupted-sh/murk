@@ -842,6 +842,14 @@ fn blob_id(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
+/// The generation a vault file carries (0 when it has none or does not parse).
+fn generation_of(bytes: &[u8]) -> u64 {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v["generation"].as_u64())
+        .unwrap_or(0)
+}
+
 fn key_path(root: &Path, label: &str) -> PathBuf {
     root.join("keys").join(format!("{label}.key"))
 }
@@ -1239,6 +1247,29 @@ enum Obs {
     Agent,
 }
 
+/// How an observer's trust pin took a vault it accepted, as `accepted_pin`
+/// sees it: a load, `murk trust`, the machine's own save over the file it
+/// replaced, or a file another program wrote that murk has not read yet.
+#[derive(Clone, Copy)]
+enum Took<'a> {
+    Load,
+    Trust,
+    OwnSave(&'a [u8]),
+    Custom,
+}
+
+/// What the oracle knows of a pinned observer's trust pin, so that it
+/// expects a removal record only where murk makes one: when the pin drops a
+/// person it trusted, on a current load (newer than the pin's counter, on a
+/// branch it has a mark for, never on a detached HEAD), on `murk trust`, or
+/// on the machine's own save that takes them out.
+#[derive(Clone, Debug)]
+struct PinModel {
+    generation: u64,
+    marks: BTreeSet<String>,
+    trusted: BTreeSet<usize>,
+}
+
 struct Agent {
     key_file: PathBuf,
     minted_on: usize,
@@ -1255,6 +1286,9 @@ struct World<'f> {
     /// Per observer: person → the revoke step whose removal it accepted, and
     /// the commit holding the vault it accepted it in.
     removed: BTreeMap<Obs, BTreeMap<usize, (usize, String)>>,
+    /// Per pinned observer (a machine, erin): what its trust pin holds (see
+    /// [`PinModel`]). dave's machine has no pin until it first accepts.
+    pins: BTreeMap<Obs, PinModel>,
     /// People whose entries the CI secret lists.
     ci_signers: BTreeSet<usize>,
     agent: Option<Agent>,
@@ -1307,7 +1341,7 @@ impl<'f> World<'f> {
         // Every revision the fixture was built from lists alice, bob, carol
         // and the CI key: its authorize steps are all in the first commit.
         let listed = BTreeSet::from([0, 1, 2, CI_READER]);
-        Self {
+        let mut world = Self {
             fx,
             root,
             origins: fx.origins.clone(),
@@ -1343,7 +1377,24 @@ impl<'f> World<'f> {
             judged: RefCell::new(BTreeMap::new()),
             stats: Stats::default(),
             _lock: lock,
+            pins: BTreeMap::new(),
+        };
+        // Every machine but dave's, and erin's, trusted the fixture's last
+        // revision on `main` when the fixture was built.
+        for obs in (0..MACHINES.len())
+            .filter(|&m| m != 4)
+            .map(Obs::Machine)
+            .chain([Obs::Erin])
+        {
+            let bytes = world.clone_of(&obs).vault();
+            let model = PinModel {
+                generation: generation_of(&bytes),
+                marks: BTreeSet::from(["main".to_string()]),
+                trusted: world.listed(&bytes),
+            };
+            world.pins.insert(obs, model);
         }
+        world
     }
 
     /// Count one case the oracle `name` judged where it could have failed.
@@ -1559,21 +1610,26 @@ impl<'f> World<'f> {
         Ok(())
     }
 
-    /// Record that `obs` accepted `bytes`, the vault at commit `at`: removals
-    /// it now knows. A load never clears a record: only the machine's own
-    /// `circle authorize` of the person or its `murk trust --re-add` does. A
-    /// runner that keeps its pin but loads only with `MURK_TRUSTED_SIGNERS`
-    /// records no removal: a stated limit.
-    fn note_accept(&mut self, obs: Obs, bytes: &[u8], at: &str) {
+    /// Record that `obs` accepted `bytes`, the vault at commit `at`, taken by
+    /// its pin as `took`: removals it now knows. A load never clears a record:
+    /// only the machine's own `circle authorize` of the person or its `murk
+    /// trust --re-add` does. A pinned observer records a removal only where
+    /// its pin drops someone it trusted (see [`PinModel`]): a read of history,
+    /// a detached HEAD included, records nothing, and neither does a vault
+    /// leaving out someone this machine never trusted. A runner that keeps its
+    /// pin but loads only with `MURK_TRUSTED_SIGNERS` records no removal: a
+    /// stated limit.
+    fn note_accept(&mut self, obs: Obs, bytes: &[u8], at: &str, took: Took<'_>) {
         if obs == Obs::CiKept {
             return;
         }
+        let dropped = self.pin_takes(&obs, bytes, took);
         let Some(origin) = self.origins.get(&blob_id(bytes)).copied() else {
             return;
         };
         let listed = self.listed(bytes);
         for who in 0..PEOPLE.len() {
-            if listed.contains(&who) {
+            if listed.contains(&who) || dropped.as_ref().is_some_and(|d| !d.contains(&who)) {
                 continue;
             }
             let revoke = self
@@ -1592,12 +1648,91 @@ impl<'f> World<'f> {
                 }
             }
         }
+        if let Some(pin) = self.pins.get_mut(&obs)
+            && let Some(removed) = self.removed.get(&obs)
+        {
+            pin.trusted.retain(|p| !removed.contains_key(p));
+        }
     }
 
-    fn accept(&mut self, obs: Obs, bytes: &[u8], how: &str, at: &str) -> Result<(), String> {
+    /// Apply an acceptance to `obs`'s [`PinModel`] as `accepted_pin` does,
+    /// and return the people its trusted set lost: the removals murk records.
+    /// `None` for an observer with no model (a CI runner, the agent), whose
+    /// removals follow every vault it accepts.
+    fn pin_takes(&mut self, obs: &Obs, bytes: &[u8], took: Took<'_>) -> Option<BTreeSet<usize>> {
+        if !matches!(obs, Obs::Machine(_) | Obs::Erin) {
+            return None;
+        }
+        let listed = self.listed(bytes);
+        let found = generation_of(bytes);
+        let branch = branch_of(&self.clone_of(obs));
+        let before = match took {
+            Took::OwnSave(before) => Some((self.listed(before), generation_of(before))),
+            _ => None,
+        };
+        let Some(pin) = self.pins.get_mut(obs) else {
+            // A first acceptance trusts the vault's recipients and drops nobody.
+            if !matches!(took, Took::Custom) {
+                self.pins.insert(
+                    obs.clone(),
+                    PinModel {
+                        generation: found,
+                        marks: branch.into_iter().collect(),
+                        trusted: listed,
+                    },
+                );
+            }
+            return Some(BTreeSet::new());
+        };
+        let dropped = match took {
+            // murk has not read it yet: the pin is unchanged.
+            Took::Custom => return Some(BTreeSet::new()),
+            Took::Load => {
+                let current = found > pin.generation
+                    && branch.as_ref().is_some_and(|b| pin.marks.contains(b));
+                if !current {
+                    return Some(BTreeSet::new());
+                }
+                let dropped = pin.trusted.difference(&listed).copied().collect();
+                pin.trusted = listed;
+                dropped
+            }
+            Took::Trust => {
+                let dropped = pin.trusted.difference(&listed).copied().collect();
+                pin.trusted = listed;
+                dropped
+            }
+            Took::OwnSave(_) => {
+                let (was, was_generation) = before.expect("an own save has the file it replaced");
+                // The save loaded the file it replaced first.
+                pin.generation = pin.generation.max(was_generation);
+                let dropped: BTreeSet<usize> = pin
+                    .trusted
+                    .iter()
+                    .filter(|p| was.contains(p) && !listed.contains(p))
+                    .copied()
+                    .collect();
+                pin.trusted.retain(|p| !dropped.contains(p));
+                pin.trusted.extend(listed.difference(&was));
+                dropped
+            }
+        };
+        pin.generation = pin.generation.max(found);
+        pin.marks.extend(branch);
+        Some(dropped)
+    }
+
+    fn accept(
+        &mut self,
+        obs: Obs,
+        bytes: &[u8],
+        how: &str,
+        at: &str,
+        took: Took<'_>,
+    ) -> Result<(), String> {
         self.check_accept(&obs, bytes, how, at)?;
         self.lineage_accept(&obs, bytes, how)?;
-        self.note_accept(obs, bytes, at);
+        self.note_accept(obs, bytes, at, took);
         Ok(())
     }
 
@@ -2018,6 +2153,7 @@ impl<'f> World<'f> {
                 &result,
                 "wrote (merge result)",
                 &head(&mach),
+                Took::OwnSave(&ours),
             )?;
         }
         Ok(Ran::Accepted)
@@ -2031,6 +2167,7 @@ impl<'f> World<'f> {
         values: BTreeMap<String, String>,
         how: &str,
         at: &str,
+        took: Took<'_>,
     ) -> Result<(), String> {
         let origin = self.origins.get(&blob_id(bytes)).copied();
         if let Some(origin) = origin
@@ -2048,7 +2185,7 @@ impl<'f> World<'f> {
             let produced = origin.map(|o| o.step);
             self.lineage_values(ERIN_M, &branch, blob_id(bytes), &values, produced, how)?;
         }
-        self.note_accept(Obs::Erin, bytes, at);
+        self.note_accept(Obs::Erin, bytes, at, took);
         Ok(())
     }
 
@@ -2250,8 +2387,14 @@ impl<'f> World<'f> {
                     self.ci_signers.insert(who.0);
                 }
                 Some(
-                    self.accept(Obs::Machine(m.0), &forged, "wrote", &head(&mach))
-                        .map(|()| Ran::Accepted),
+                    self.accept(
+                        Obs::Machine(m.0),
+                        &forged,
+                        "wrote",
+                        &head(&mach),
+                        Took::Custom,
+                    )
+                    .map(|()| Ran::Accepted),
                 )
             }
             Op::Sync { m } => Some(self.sync(step, m.0)),
@@ -2526,8 +2669,14 @@ impl<'f> World<'f> {
                 }
                 let at = head(&erin);
                 Some(
-                    self.accept_erin(&now, values_of(&reload), "wrote", &at)
-                        .map(|()| Ran::Accepted),
+                    self.accept_erin(
+                        &now,
+                        values_of(&reload),
+                        "wrote",
+                        &at,
+                        Took::OwnSave(&before),
+                    )
+                    .map(|()| Ran::Accepted),
                 )
             }
             Op::ErinSync => {
@@ -2565,7 +2714,7 @@ impl<'f> World<'f> {
                 }
                 let at = head(&erin);
                 Some(
-                    self.accept_erin(&bytes, values_of(&out), "loaded", &at)
+                    self.accept_erin(&bytes, values_of(&out), "loaded", &at, Took::Load)
                         .map(|()| Ran::Accepted),
                 )
             }
@@ -3060,10 +3209,16 @@ impl<'f> World<'f> {
     }
 
     /// Accept `bytes`, the vault checked out in `obs`'s clone, as a step's
-    /// outcome.
+    /// outcome: a load, or `murk trust` (`how` is `trusted`).
     fn accepted(&mut self, obs: Obs, bytes: &[u8], how: &str) -> Result<Ran, String> {
         let at = head(&self.clone_of(&obs));
-        self.accept(obs, bytes, how, &at).map(|()| Ran::Accepted)
+        let took = if how == "trusted" {
+            Took::Trust
+        } else {
+            Took::Load
+        };
+        self.accept(obs, bytes, how, &at, took)
+            .map(|()| Ran::Accepted)
     }
 
     /// After a member's write: a refusal changed nothing; an accepted write
@@ -3098,7 +3253,13 @@ impl<'f> World<'f> {
             self.expected.insert(blob_id(&now), listed);
         }
         extra(self, &now)?;
-        self.accept(Obs::Machine(m), &now, "wrote", &head(&mach))?;
+        self.accept(
+            Obs::Machine(m),
+            &now,
+            "wrote",
+            &head(&mach),
+            Took::OwnSave(before),
+        )?;
         let reload = mach.murk().args(["export", "--json"]).output().unwrap();
         if !reload.status.success() {
             return Err(format!(
@@ -3156,6 +3317,7 @@ impl<'f> World<'f> {
                 &result,
                 "wrote (merge result)",
                 &head(&mach),
+                Took::OwnSave(&ours),
             )?;
         }
         if push {
@@ -4184,6 +4346,54 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                 refuses(Op::Load {
                     m: alice,
                     at: At::PushedBranch(0),
+                })
+                .decisive(),
+            ],
+        ),
+        (
+            // bob's machine reads the pushed branch that removes dave on a
+            // detached HEAD: history, so its pin records no removal (and it
+            // never trusted dave). main then takes the removal and a replay of
+            // a revision that lists dave. bob's machine pulls that while it
+            // tries to authorize again the member carol's machine removed
+            // (refused: still listed there). Its save on main may list dave:
+            // no record of his removal stands on that machine.
+            "a removal read only as history leaves no record to save against",
+            vec![
+                accepts(Op::Authorize {
+                    m: alice,
+                    who: dave,
+                }),
+                accepts(Op::Revoke {
+                    m: alice,
+                    who: Target::Person(dave),
+                }),
+                accepts(Op::Push { m: alice }),
+                accepts(Op::Sync { m: alice }),
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Pushed(0),
+                }),
+                accepts(Op::Revoke {
+                    m: carol_m,
+                    who: Target::OtherMember(0),
+                }),
+                accepts(Op::MergeBranch {
+                    m: alice,
+                    branch: 0,
+                    take_theirs: false,
+                }),
+                accepts(Op::Replay {
+                    rev: Old::Nth(6),
+                    to: Dest::Main,
+                }),
+                runs(Op::AuthorizeAgain {
+                    m: carol_m,
+                    by: alice,
+                }),
+                accepts(Op::Save {
+                    m: bob_m,
+                    key: K(0),
                 })
                 .decisive(),
             ],
