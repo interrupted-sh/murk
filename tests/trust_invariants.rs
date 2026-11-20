@@ -5027,6 +5027,64 @@ fn an_unsigned_save_never_carries_a_recipient_this_machine_did_not_accept() {
     );
 }
 
+/// The minimal input of a soak failure, played step by step: alice saves K2
+/// and pushes, then code holding alice's key pushes an unsigned file that
+/// also lists dave. dave reads K2 in that file because the key holder's own
+/// code encrypted it to him, not through murk. alice's murk refuses to write
+/// on top of it, so no honest save ever carries dave. A forgery is never
+/// built on top of that file, so the next one, from a genuine revision, lists
+/// no dave.
+#[test]
+fn an_unsigned_forgery_listing_dave_is_never_built_on() {
+    let mut run = Run::new();
+    run.setup(&[
+        accepts(Op::Save { m: M(0), key: K(1) }),
+        accepts(Op::Push { m: M(0) }),
+        runs(Op::ForgeUnsigned {
+            by: P(0),
+            to: Dest::Main,
+        }),
+    ])
+    .unwrap();
+    let forged = run.world.origin_tip("main");
+    assert!(!has_sig(&forged), "the forgery is unsigned");
+    assert!(
+        dave_reads(&run, &forged, "K2"),
+        "the key holder's own code encrypted K2 to dave"
+    );
+    let alice = run.world.machine(0);
+    let write = with_file(&alice, &forged, |m| {
+        let out = Printed::of(
+            &m.murk()
+                .args(["add", "NEWSEC"])
+                .write_stdin("alice-secret\n")
+                .output()
+                .unwrap(),
+        );
+        (out, m.vault())
+    });
+    assert!(
+        !write.0.ok && write.1 == forged,
+        "alice's murk refuses to write on the unsigned forgery: {}",
+        write.0.stderr
+    );
+    let next = run
+        .attempt(&Op::Forge {
+            by: Attacker::Person(P(0)),
+            base: Base::NewestOpenable,
+            generation: Gen::Next,
+            sign: Sign::Own,
+            to: Dest::Main,
+        })
+        .unwrap();
+    assert!(next.accepted(), "the forgery runs: {}", next.why());
+    let tip = run.world.origin_tip("main");
+    assert!(
+        has_sig(&tip) && !dave_reads(&run, &tip, "K2"),
+        "the signed forgery starts from a genuine revision, which does not list dave"
+    );
+}
+
 // ── Rows that need lineage ──
 //
 // These assert the behaviour of a format 4 that does not exist yet (a vault
