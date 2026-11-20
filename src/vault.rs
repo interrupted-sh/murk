@@ -129,7 +129,12 @@ fn lock_path(vault_path: &Path) -> PathBuf {
 ///
 /// Returns a guard that releases the lock when dropped. Use this around
 /// read-modify-write cycles to prevent concurrent writes from losing changes.
+///
+/// Lock order: the vault lock comes before the trust pin lock, never after
+/// it (see [`crate::pins::LOCK_ORDER`]). On a thread that holds a pin lock
+/// this returns that error at once and does not block.
 pub fn lock(vault_path: &Path) -> Result<VaultLock, VaultError> {
+    crate::pins::check_lock_order().map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
     let lp = lock_path(vault_path);
 
     // Open lock file without following symlinks (race-safe on Unix).
@@ -189,6 +194,25 @@ pub fn create(path: &Path, vault: &Vault) -> Result<(), VaultError> {
 }
 
 fn write_impl(path: &Path, vault: &Vault, create_new: bool) -> Result<(), VaultError> {
+    let staged = stage(path, vault)?;
+    if create_new {
+        staged.persist_noclobber(path)
+    } else {
+        staged.persist(path)
+    }
+}
+
+/// A vault written to a temporary file next to its target, not yet in
+/// place. Dropping it deletes the file.
+pub struct Staged {
+    tmp: tempfile::NamedTempFile,
+    dir: PathBuf,
+}
+
+/// Write `vault` to a temporary file in `path`'s directory, fsynced, for a
+/// later rename over `path` ([`Staged::persist`]). Refuses a vault that
+/// [`parse`] would reject, as [`write`] does.
+pub fn stage(path: &Path, vault: &Vault) -> Result<Staged, VaultError> {
     crate::validate::vault(vault)
         .map_err(|e| VaultError::Parse(format!("refusing to write invalid vault: {e}")))?;
     let json = serde_json::to_string_pretty(vault)
@@ -197,10 +221,8 @@ fn write_impl(path: &Path, vault: &Vault, create_new: bool) -> Result<(), VaultE
         return Err(oversized());
     }
 
-    // Write to a sibling temp file, fsync, then atomically rename (or, for a
-    // new vault, link without replacing).
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
 
     // Restrict temp file permissions before writing plaintext JSON.
     #[cfg(unix)]
@@ -213,21 +235,37 @@ fn write_impl(path: &Path, vault: &Vault, create_new: bool) -> Result<(), VaultE
     tmp.write_all(json.as_bytes())?;
     tmp.write_all(b"\n")?;
     tmp.as_file().sync_all()?;
-    if create_new {
-        tmp.persist_noclobber(path).map_err(|e| e.error)?;
-    } else {
-        tmp.persist(path).map_err(|e| e.error)?;
+    Ok(Staged { tmp, dir })
+}
+
+impl Staged {
+    /// Rename the file over `path` atomically: a reader, or a crash, sees
+    /// the old file or the new one, never part of one.
+    pub fn persist(self, path: &Path) -> Result<(), VaultError> {
+        let dir = self.dir;
+        self.tmp.persist(path).map_err(|e| e.error)?;
+        sync_dir(&dir);
+        Ok(())
     }
 
-    // Fsync the parent directory so the rename is durable across power loss.
+    /// Link the file at `path`, refusing (with an `AlreadyExists` I/O
+    /// error) if a file is there already.
+    fn persist_noclobber(self, path: &Path) -> Result<(), VaultError> {
+        let dir = self.dir;
+        self.tmp.persist_noclobber(path).map_err(|e| e.error)?;
+        sync_dir(&dir);
+        Ok(())
+    }
+}
+
+/// Fsync the directory `dir` so a rename in it is durable across power loss.
+fn sync_dir(dir: &Path) {
     #[cfg(unix)]
-    {
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
     }
-
-    Ok(())
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 #[cfg(test)]

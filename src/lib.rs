@@ -91,7 +91,7 @@ pub use init::{
     discover_existing_key, discover_neighbour_keys, discover_stored_key, has_stored_key,
     neighbour_vaults_with_keys, pin_created_vault,
 };
-pub use merge::{MergeDriverOutput, run_merge_driver};
+pub use merge::{MergeDriverOutput, run_merge_driver, run_merge_driver_into};
 pub use policy::{
     agent_policy_applies, check_agent_keys, enforce_agent_policy, ensure_writable,
     is_agent_identity, is_agent_key_allowed,

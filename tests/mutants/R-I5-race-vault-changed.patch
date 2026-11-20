@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -770,7 +770,7 @@
+         // Lock order: the caller may hold the vault lock; this takes the
+         // pin lock after it, and nothing below takes another lock.
+         let _lock = needs_lock.then(|| lock(&self.vault_path)).transpose()?;
+-        if read_target(&self.target)? != self.token.target {
++        if false {
+             return Ok(Publish::TargetChanged);
+         }
+         let raw = read_raw(&self.vault_path)?;

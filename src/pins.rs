@@ -305,21 +305,48 @@ fn writable_pin_path(vault_path: &str) -> Result<PathBuf, String> {
 /// but cannot be read or parsed is an error: silently treating it as empty
 /// would forget a rollback high-water mark or a recorded deletion.
 pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
-    let mut found = None;
-    for path in pin_paths(vault_path) {
-        match std::fs::read_to_string(&path) {
-            Ok(c) => {
-                found = Some((path, c));
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("cannot read trust pin {}: {e}", path.display())),
+    parse_raw(&read_raw(vault_path)?)
+}
+
+/// The pin file and sidecar bytes for one vault, as read from disk: the
+/// part of a publish token (see [`Snapshot`]) that covers the trust state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RawPin {
+    /// The pin file that exists (see [`pin_paths`]) and its bytes.
+    file: Option<(PathBuf, Vec<u8>)>,
+    /// The bytes of that pin file's sidecar, or of the sidecar a write would
+    /// go to when no pin file exists.
+    sidecar: Option<Vec<u8>>,
+}
+
+/// Read the pin file and its sidecar for `vault_path` as bytes. Takes no lock.
+fn read_raw(vault_path: &str) -> Result<RawPin, String> {
+    let read_opt = |path: &Path| match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read trust pin {}: {e}", path.display())),
+    };
+    let paths = pin_paths(vault_path);
+    let mut file = None;
+    for path in &paths {
+        if let Some(bytes) = read_opt(path)? {
+            file = Some((path.clone(), bytes));
+            break;
         }
     }
-    let Some((path, contents)) = found else {
+    let sidecar = match file.as_ref().map(|(p, _)| p).or(paths.first()) {
+        Some(pin_file) => read_opt(&sidecar_path(pin_file))?,
+        None => None,
+    };
+    Ok(RawPin { file, sidecar })
+}
+
+/// The pin that `raw` holds, as [`read`] returns it.
+fn parse_raw(raw: &RawPin) -> Result<Option<TrustPin>, String> {
+    let Some((path, contents)) = &raw.file else {
         return Ok(None);
     };
-    let mut pin: TrustPin = serde_json::from_str(&contents).map_err(|e| {
+    let mut pin: TrustPin = serde_json::from_slice(contents).map_err(|e| {
         format!(
             "trust pin {} is corrupt ({e}) — delete it and run `murk trust`",
             path.display()
@@ -334,9 +361,9 @@ pub fn read(vault_path: &str) -> Result<Option<TrustPin>, String> {
             ..TrustPin::default()
         };
     } else {
-        pin.sidecar = read_sidecar(&path, &pin.vault_id)?;
+        pin.sidecar = parse_sidecar(path, raw.sidecar.as_deref(), &pin.vault_id)?;
     }
-    drop_unusable_signer_keys(&mut pin, &path);
+    drop_unusable_signer_keys(&mut pin, path);
     Ok(Some(pin))
 }
 
@@ -345,21 +372,23 @@ pub fn sidecar_path(pin_file: &Path) -> PathBuf {
     pin_file.with_extension("lineage.json")
 }
 
-/// The sidecar of the pin file `pin_file`, whose vault id is `pin_id`. A
-/// missing sidecar reads as empty, and so does one that records another
-/// vault id: an older murk accepted another vault at this path, so the
-/// sidecar's records are not this vault's. murk says so once, and the next
-/// pin write replaces the sidecar.
-fn read_sidecar(pin_file: &Path, pin_id: &str) -> Result<Sidecar, String> {
+/// The sidecar of the pin file `pin_file`, whose vault id is `pin_id`, from
+/// its bytes `contents`. A missing sidecar reads as empty, and so does one
+/// that records another vault id: an older murk accepted another vault at
+/// this path, so the sidecar's records are not this vault's. murk says so
+/// once, and the next pin write replaces the sidecar.
+fn parse_sidecar(
+    pin_file: &Path,
+    contents: Option<&[u8]>,
+    pin_id: &str,
+) -> Result<Sidecar, String> {
     static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
 
     let path = sidecar_path(pin_file);
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Sidecar::default()),
-        Err(e) => return Err(format!("cannot read trust pin {}: {e}", path.display())),
+    let Some(contents) = contents else {
+        return Ok(Sidecar::default());
     };
-    let sidecar: Sidecar = serde_json::from_str(&contents).map_err(|e| {
+    let sidecar: Sidecar = serde_json::from_slice(contents).map_err(|e| {
         format!(
             "trust pin {} is corrupt ({e}) — delete it and run `murk trust`",
             path.display()
@@ -434,24 +463,20 @@ pub fn peek_sidecars() -> Vec<(PathBuf, Sidecar)> {
 /// `murk trust --shares-identity-with` retires another path of the vault on
 /// this machine.
 pub fn remove(pin_file: &Path) -> Result<(), String> {
-    use fs2::FileExt;
-
     if pin_writes_off() {
         return Err(
             "MURK_NO_SIGNER_PIN is set, so murk does not write the trust pin. Unset it to record trust here".to_string(),
         );
     }
-    let lock = open_lock(pin_file)?;
-    let removed = [pin_file.to_path_buf(), sidecar_path(pin_file)]
+    let _lock = open_lock(pin_file)?;
+    [pin_file.to_path_buf(), sidecar_path(pin_file)]
         .iter()
         .try_for_each(|path| match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 Err(format!("cannot remove {}: {e}", path.display()))
             }
             _ => Ok(()),
-        });
-    let _ = FileExt::unlock(&lock);
-    removed
+        })
 }
 
 /// The directory that holds the pins: `~/.config/murk/signer-pins`.
@@ -556,28 +581,88 @@ pub fn write(vault_path: &str, pin: &TrustPin) -> Result<(), String> {
 /// one repository share a pin — never write from a stale read: a lowered
 /// rollback mark, or keys and grants another process just learned, lost. `f`
 /// gets the pin as it is now and returns the pin to write, or `None` to leave
-/// it, or an error to report.
+/// it, or an error to report. A caller may hold the vault lock, never the
+/// pin lock (see [`LOCK_ORDER`]).
 pub fn update<F>(vault_path: &str, f: F) -> Result<(), String>
 where
     F: FnOnce(Option<&TrustPin>) -> Result<Option<TrustPin>, String>,
 {
-    use fs2::FileExt;
-
     let path = writable_pin_path(vault_path)?;
-    let lock = open_lock(&path)?;
-    let current = read(vault_path)?;
-    let result = match f(current.as_ref())? {
+    let _lock = open_lock(&path)?;
+    let current = read_held(vault_path)?;
+    match f(current.as_ref())? {
         Some(pin) => write(vault_path, &pin),
         None => Ok(()),
-    };
-    let _ = FileExt::unlock(&lock);
-    result
+    }
+}
+
+/// [`read`] for a caller that holds the pin lock: it takes no lock.
+fn read_held(vault_path: &str) -> Result<Option<TrustPin>, String> {
+    parse_raw(&read_raw(vault_path)?)
+}
+
+/// The lock order, which every write path follows:
+///
+/// 1. A thread takes the vault lock (`<vault>.lock`, [`crate::vault::lock`])
+///    before the pin lock (`<hash>.lock`, next to the pin), never the
+///    reverse.
+/// 2. A thread holds at most one vault lock and at most one pin lock.
+/// 3. While a thread holds the pin lock, it calls nothing that takes a lock:
+///    not `vault::lock`, [`update`], [`remove`] or [`Snapshot::publish`]. It
+///    reads with [`read_held`] and writes with [`write`]. The only
+///    subprocesses it runs are read-only git commands (`symbolic-ref`,
+///    `rev-parse`, `merge-base --is-ancestor`, `cat-file -e`,
+///    `diff --quiet HEAD --`), which take no `index.lock`.
+/// 4. The pin lock is never held across a signature, a confirmation prompt
+///    or an editor session.
+///
+/// A flock lock belongs to the open file description, so a second lock of
+/// the same lock file by the same thread would block for ever. A
+/// thread-local count of held pin locks makes every lock request on a
+/// thread that holds one fail with this error instead, in release builds
+/// too.
+pub const LOCK_ORDER: &str =
+    "internal error: lock order (a lock was requested while the trust pin lock is held)";
+
+thread_local! {
+    /// How many pin locks this thread holds (see [`LOCK_ORDER`]).
+    static PIN_LOCKS_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Refuse a lock request on a thread that holds the pin lock (see
+/// [`LOCK_ORDER`]). `vault::lock` and every pin-lock entry call this first.
+pub(crate) fn check_lock_order() -> Result<(), String> {
+    if PIN_LOCKS_HELD.with(std::cell::Cell::get) > 0 {
+        return Err(LOCK_ORDER.to_string());
+    }
+    Ok(())
+}
+
+/// A held pin lock: `<pin>.lock`, released when dropped.
+pub(crate) struct PinLock {
+    file: std::fs::File,
+}
+
+impl Drop for PinLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+        PIN_LOCKS_HELD.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// Take the pin lock for `vault_path`. Errors when there is no home
+/// directory, or when this thread already holds a pin lock.
+pub(crate) fn lock(vault_path: &str) -> Result<PinLock, String> {
+    let path = pin_path(vault_path)
+        .ok_or_else(|| "no home directory to keep the trust pin in".to_string())?;
+    open_lock(&path)
 }
 
 /// Open and take the exclusive lock of the pin file `path`: `<pin>.lock`.
-fn open_lock(path: &Path) -> Result<std::fs::File, String> {
+fn open_lock(path: &Path) -> Result<PinLock, String> {
     use fs2::FileExt;
 
+    check_lock_order()?;
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid trust pin path {}", path.display()))?;
@@ -591,12 +676,174 @@ fn open_lock(path: &Path) -> Result<std::fs::File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let lock = opts
+    let file = opts
         .open(&lock_path)
         .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
-    lock.lock_exclusive()
+    file.lock_exclusive()
         .map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
-    Ok(lock)
+    PIN_LOCKS_HELD.with(|n| n.set(n.get() + 1));
+    Ok(PinLock { file })
+}
+
+/// How many times a save or a merge prepares its result when the trust
+/// state changes before it can publish (see [`Snapshot`]).
+pub const PUBLISH_ATTEMPTS: u32 = 3;
+
+/// What a save, a keyed merge or a `murk trust` re-sign decided against:
+/// the pin and sidecar bytes, the target file's bytes, and the branch and
+/// commit checked out. The writer runs its checks against [`Snapshot::pin`],
+/// prepares and signs its result without the pin lock, and then publishes
+/// it with [`Snapshot::publish`], which renames the result over the target
+/// only if all of this is unchanged.
+pub struct Snapshot {
+    vault_path: String,
+    target: PathBuf,
+    token: Token,
+    pin: Option<TrustPin>,
+}
+
+/// What must be unchanged for a publish (see [`Snapshot`]).
+#[derive(Debug, PartialEq, Eq)]
+struct Token {
+    pin: RawPin,
+    target: Option<Vec<u8>>,
+    head: crate::git::HeadState,
+    commit: Option<String>,
+}
+
+/// How a publish ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Publish {
+    /// The result replaced the target.
+    Published,
+    /// The pin, the sidecar, the branch or the commit changed since the
+    /// snapshot. Nothing was written. The caller decides again from a new
+    /// snapshot.
+    TrustChanged,
+    /// The target file changed since the snapshot. Nothing was written, and
+    /// a new attempt cannot help: the caller's change was made to the file
+    /// as it was.
+    TargetChanged,
+}
+
+impl Snapshot {
+    /// Read the trust state for `vault_path` and the target file `target`
+    /// (the vault file for a save, git's `%A` for the merge driver).
+    pub fn take(vault_path: &str, target: &Path) -> Result<Self, String> {
+        let raw = read_raw(vault_path)?;
+        let pin = parse_raw(&raw)?;
+        let token = Token {
+            pin: raw,
+            target: read_target(target)?,
+            head: crate::trust::head_of(vault_path),
+            commit: crate::trust::commit_of(vault_path),
+        };
+        Ok(Self {
+            vault_path: vault_path.to_string(),
+            target: target.to_path_buf(),
+            token,
+            pin,
+        })
+    }
+
+    /// The pin the checks run against.
+    pub fn pin(&self) -> Option<&TrustPin> {
+        self.pin.as_ref()
+    }
+
+    /// Publish `staged` over the target under the pin lock, if the pin, the
+    /// sidecar, the target file, the branch and the commit are as the
+    /// snapshot read them. Then, still under the lock, write the pin that
+    /// `record` makes from the pin as it is now, the branch and the commit,
+    /// unless pin writes are off. A failed pin write only warns: the vault
+    /// is already written. Without a pin and without pin writes there is no
+    /// pin lock: only the target file is compared.
+    ///
+    /// The rename is the only write to the target, so a crash leaves the
+    /// old file or the new one. A crash before the pin write leaves the pin
+    /// as it was, which records nothing that was not published.
+    pub fn publish<F>(
+        &self,
+        staged: crate::vault::Staged,
+        record: Option<F>,
+    ) -> Result<Publish, String>
+    where
+        F: FnOnce(Option<&TrustPin>, &crate::git::HeadState, Option<&str>) -> TrustPin,
+    {
+        #[cfg(test)]
+        test_hooks::run(&test_hooks::BEFORE_LOCK);
+        let writes = signer_pin_available();
+        let needs_lock = pin_path(&self.vault_path).is_some()
+            && (writes || self.token.pin.file.is_some() || self.token.pin.sidecar.is_some());
+        // Lock order: the caller may hold the vault lock; this takes the
+        // pin lock after it, and nothing below takes another lock.
+        let _lock = needs_lock.then(|| lock(&self.vault_path)).transpose()?;
+        if read_target(&self.target)? != self.token.target {
+            return Ok(Publish::TargetChanged);
+        }
+        let raw = read_raw(&self.vault_path)?;
+        let head = crate::trust::head_of(&self.vault_path);
+        let commit = crate::trust::commit_of(&self.vault_path);
+        if raw != self.token.pin || head != self.token.head || commit != self.token.commit {
+            return Ok(Publish::TrustChanged);
+        }
+        #[cfg(test)]
+        test_hooks::run(&test_hooks::UNDER_LOCK);
+        staged.persist(&self.target).map_err(|e| e.to_string())?;
+        if let Some(record) = record.filter(|_| writes) {
+            let pin = record(self.pin.as_ref(), &head, commit.as_deref());
+            if let Err(e) = write(&self.vault_path, &pin) {
+                eprintln!("warn {e}");
+            }
+        }
+        Ok(Publish::Published)
+    }
+}
+
+/// The bytes of the target file, or `None` when it does not exist.
+fn read_target(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+/// Test hooks around the publish section: each runs once per publish, on
+/// the thread that publishes, while it is set.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::RefCell;
+
+    pub(crate) type Hook = RefCell<Option<Box<dyn FnMut()>>>;
+
+    thread_local! {
+        /// After the result is prepared and before the pin lock is taken.
+        pub(crate) static BEFORE_LOCK: Hook = const { RefCell::new(None) };
+        /// Under the pin lock, after the token matched, before the rename.
+        pub(crate) static UNDER_LOCK: Hook = const { RefCell::new(None) };
+        /// In a save, just before the vault is signed.
+        pub(crate) static BEFORE_SIGN: Hook = const { RefCell::new(None) };
+    }
+
+    /// Set `hook` on this thread.
+    pub(crate) fn set(hook: &'static std::thread::LocalKey<Hook>, f: impl FnMut() + 'static) {
+        hook.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    /// Run `hook` if it is set on this thread.
+    pub(crate) fn run(hook: &'static std::thread::LocalKey<Hook>) {
+        let Some(mut f) = hook.with(|h| h.borrow_mut().take()) else {
+            return;
+        };
+        f();
+        hook.with(|h| {
+            let mut slot = h.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(f);
+            }
+        });
+    }
 }
 
 /// Write the pin file atomically: a `0600` temp file in the same directory,
@@ -894,6 +1141,104 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(sidecar_path(&pin_file)).unwrap()).unwrap();
             assert_eq!(sidecar.vault_id, "id-2");
             assert!(sidecar.deleted_groups.is_empty());
+        });
+    }
+
+    // -- publication under the pin lock --
+
+    /// A vault file at `<home>/work/.murk` holding `old`, and its path.
+    fn old_target(home: &str) -> String {
+        let dir = Path::new(home).join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(".murk");
+        std::fs::write(&target, b"old").unwrap();
+        target.to_str().unwrap().to_string()
+    }
+
+    type Record = fn(Option<&TrustPin>, &crate::git::HeadState, Option<&str>) -> TrustPin;
+
+    #[test]
+    fn row_r_i5_race_reentrant() {
+        // The real publish section runs to completion while it holds the
+        // pin lock: the rename, then the sidecar and pin writes, which take
+        // no lock. It never asks for the lock it holds.
+        with_home(|home| {
+            let vp = old_target(home);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread_vp = vp.clone();
+            std::thread::spawn(move || {
+                let target = Path::new(&thread_vp);
+                let snapshot = Snapshot::take(&thread_vp, target).unwrap();
+                let staged = crate::vault::stage(target, &crate::testutil::empty_vault()).unwrap();
+                let record: Record = |prior, _, _| TrustPin {
+                    v: PIN_VERSION,
+                    vault_id: "00112233445566778899aabbccddeeff".into(),
+                    generation: 7,
+                    ..prior.cloned().unwrap_or_default()
+                };
+                let published = snapshot.publish(staged, Some(record));
+                let held = PIN_LOCKS_HELD.with(std::cell::Cell::get);
+                let _ = tx.send((published, held));
+            });
+            let (published, held) = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the publish completes within 5 seconds");
+            assert_eq!(published, Ok(Publish::Published));
+            assert_eq!(held, 0, "the pin lock is released");
+            assert!(
+                crate::vault::read(Path::new(&vp)).is_ok(),
+                "the result replaced the vault file"
+            );
+            let pin = read(&vp).unwrap().expect("the own-save pin is written");
+            assert_eq!(pin.generation, 7);
+            let sidecar: Sidecar = serde_json::from_slice(
+                &std::fs::read(sidecar_path(&pin_path(&vp).unwrap())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(sidecar.vault_id, "00112233445566778899aabbccddeeff");
+        });
+    }
+
+    #[test]
+    fn row_r_i5_lockorder() {
+        // Under the pin lock, a request for the vault lock or the pin lock
+        // fails at once with the lock-order error. Neither blocks.
+        with_home(|home| {
+            let vp = old_target(home);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread_vp = vp.clone();
+            std::thread::spawn(move || {
+                let target = Path::new(&thread_vp);
+                let results = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let (seen, hook_vp) = (results.clone(), thread_vp.clone());
+                test_hooks::set(&test_hooks::UNDER_LOCK, move || {
+                    let vault_lock = crate::vault::lock(Path::new(&hook_vp))
+                        .map(drop)
+                        .map_err(|e| e.to_string());
+                    let pin_update = update(&hook_vp, |_| {
+                        Ok(Some(TrustPin {
+                            v: PIN_VERSION,
+                            generation: 99,
+                            ..TrustPin::default()
+                        }))
+                    });
+                    *seen.borrow_mut() = Some((vault_lock, pin_update));
+                });
+                let snapshot = Snapshot::take(&thread_vp, target).unwrap();
+                let staged = crate::vault::stage(target, &crate::testutil::empty_vault()).unwrap();
+                snapshot.publish(staged, None::<Record>).unwrap();
+                let _ = tx.send(results.borrow_mut().take());
+            });
+            let (vault_lock, pin_update) = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("neither lock request blocks")
+                .expect("the hook ran under the pin lock");
+            assert!(
+                vault_lock.as_ref().is_err_and(|e| e.contains(LOCK_ORDER)),
+                "{vault_lock:?}"
+            );
+            assert_eq!(pin_update, Err(LOCK_ORDER.to_string()));
+            assert_eq!(read(&vp).unwrap(), None, "nothing wrote a pin");
         });
     }
 }

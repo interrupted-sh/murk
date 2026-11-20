@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -683,7 +683,7 @@
+ 
+ /// How many times a save or a merge prepares its result when the trust
+ /// state changes before it can publish (see [`Snapshot`]).
+-pub const PUBLISH_ATTEMPTS: u32 = 3;
++pub const PUBLISH_ATTEMPTS: u32 = u32::MAX;
+ 
+ /// What a save, a keyed merge or a `murk trust` re-sign decided against:
+ /// the pin and sidecar bytes, the target file's bytes, and the branch and

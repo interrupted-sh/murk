@@ -11,7 +11,10 @@ use murk_cli::types;
 use std::io::IsTerminal;
 
 pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>, vault_path: &str) {
-    // Hold the vault lock: accepting an unsigned vault re-signs it.
+    // Hold the vault lock: accepting an unsigned vault re-signs it. Lock
+    // order: this vault lock first, then the trust pin lock, which each pin
+    // update below and the re-signing save take and release in turn (see
+    // `murk_cli::pins::LOCK_ORDER`).
     let _lock = try_or_die(
         murk_cli::vault::lock(std::path::Path::new(vault_path)).map_err(murk_cli::MurkError::Vault),
     );

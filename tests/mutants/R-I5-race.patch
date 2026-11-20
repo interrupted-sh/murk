@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -776,7 +776,7 @@
+         let raw = read_raw(&self.vault_path)?;
+         let head = crate::trust::head_of(&self.vault_path);
+         let commit = crate::trust::commit_of(&self.vault_path);
+-        if raw != self.token.pin || head != self.token.head || commit != self.token.commit {
++        if head != self.token.head || commit != self.token.commit {
+             return Ok(Publish::TrustChanged);
+         }
+         #[cfg(test)]
