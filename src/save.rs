@@ -463,13 +463,99 @@ fn refuse_unsafe_recipients(vault: &types::Vault) -> Result<(), MurkError> {
 /// Also refuses, writing nothing, when the state was loaded by an agent grant
 /// ([`crate::ensure_writable`]), or when the change adds recipients to a value
 /// the writer couldn't decrypt.
+///
+/// The save is published under the trust pin lock (see
+/// [`crate::pins::Snapshot`]): it runs its checks and signs against a
+/// snapshot of the pin, the vault file, the branch and the commit, and
+/// renames the result over the vault file only if none of them changed. When
+/// the trust state changed, it starts again from `vault` as the caller
+/// passed it, up to [`crate::pins::PUBLISH_ATTEMPTS`] times. When the vault
+/// file changed, it stops. Either way a failed save writes nothing. The
+/// caller may hold the vault lock, never the pin lock.
 pub fn save_vault(
     vault_path: &str,
     vault: &mut types::Vault,
     original: &types::Murk,
     current: &types::Murk,
 ) -> Result<(), MurkError> {
+    use crate::pins::Publish;
+
     crate::ensure_writable(original)?;
+    let loaded = vault.clone();
+    for attempt in 1..=crate::pins::PUBLISH_ATTEMPTS {
+        if attempt > 1 {
+            *vault = loaded.clone();
+        }
+        let snapshot = crate::pins::Snapshot::take(vault_path, Path::new(vault_path))
+            .map_err(MurkError::Trust)?;
+        let prepared = prepare_save(vault_path, vault, original, current, snapshot.pin())?;
+        let current = prepared.pruned.as_ref().unwrap_or(current);
+        let record = |prior: Option<&crate::pins::TrustPin>, head: &_, commit: Option<&str>| {
+            own_save_pin(
+                vault_path,
+                vault,
+                current,
+                &prepared.registry,
+                prepared.replaced.as_ref(),
+                prior,
+                (head, commit),
+            )
+        };
+        match snapshot
+            .publish(prepared.staged, Some(record))
+            .map_err(MurkError::Trust)?
+        {
+            Publish::Published => return Ok(()),
+            Publish::TrustChanged => {}
+            Publish::TargetChanged => {
+                *vault = loaded;
+                return Err(MurkError::Secret(changed_on_disk(vault_path, "saving")));
+            }
+        }
+    }
+    *vault = loaded;
+    Err(MurkError::Trust(trust_state_changed(vault_path, "saving")))
+}
+
+/// The error when the trust state for `vault_path` changed on every attempt
+/// of a save or merge (`doing`).
+pub(crate) fn trust_state_changed(vault_path: &str, doing: &str) -> String {
+    format!(
+        "the trust state for {vault_path} changed {} times while murk was {doing}. Nothing was written. Run the command again.",
+        crate::pins::PUBLISH_ATTEMPTS
+    )
+}
+
+/// The error when another program changed the file at `vault_path` while
+/// murk was `doing` a save or merge.
+pub(crate) fn changed_on_disk(vault_path: &str, doing: &str) -> String {
+    format!(
+        "{vault_path} changed on disk while murk was {doing}, so murk did not overwrite it. Nothing was written. Check {vault_path} (for example with `git status`), then run the command again."
+    )
+}
+
+/// A save prepared against one snapshot of the trust pin, not yet published.
+struct Prepared {
+    /// The signed vault, written to a temporary file next to the vault file.
+    staged: vault::Staged,
+    /// The signer registry the save signed.
+    registry: BTreeMap<String, String>,
+    /// The vault file the save replaces, as it was read.
+    replaced: Option<types::Vault>,
+    /// The state after expired and narrowed grants were dropped, if any were.
+    pruned: Option<types::Murk>,
+}
+
+/// Run every check of a save against `pin`, build and encrypt the meta, sign
+/// the vault, and write it to a temporary file. Takes no pin lock: a signature
+/// can wait for a touch or a confirmation. `vault` holds the signed result.
+fn prepare_save(
+    vault_path: &str,
+    vault: &mut types::Vault,
+    original: &types::Murk,
+    current: &types::Murk,
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<Prepared, MurkError> {
     // Text a write adds to the header (descriptions, examples, tags, names,
     // policy tags) must not be able to forge or reorder output. Every writer
     // goes through here, the bindings included. Text already in the vault on
@@ -492,7 +578,7 @@ pub fn save_vault(
     let recipients = meta_recipients(vault, current)?;
     refuse_unsafe_recipients(vault)?;
 
-    let prior_pin = check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver)?;
+    check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver, pin)?;
 
     announce_new_group_members(original, current);
 
@@ -587,22 +673,36 @@ pub fn save_vault(
     vault.secrets = new_secrets;
     crate::agents::rebuild(vault, original, current)?;
 
-    let meta = build_meta(vault, current, &saver, prior_pin.as_ref());
+    let meta = build_meta(vault, current, &saver, pin);
     crate::validate::meta(&meta)
         .map_err(|e| MurkError::Secret(format!("refusing to write invalid vault meta: {e}")))?;
     let meta_json =
         serde_json::to_vec(&meta).map_err(|e| MurkError::Secret(format!("meta serialize: {e}")))?;
     vault.meta = encrypt_value(&meta_json, &recipients)?;
 
-    // Sign last: signed view v2 covers the finished file, meta ciphertext
-    // included. SSH-RSA/hardware identities can't sign, so the vault is then
-    // written unsigned.
-    vault.sig = None;
-    vault.sig = sign_vault(vault, &saver);
+    let staged = sign_and_stage(vault_path, vault, &saver)?;
+    Ok(Prepared {
+        staged,
+        registry: meta.signers,
+        replaced: on_disk,
+        pruned,
+    })
+}
 
-    vault::write(Path::new(vault_path), vault)?;
-    record_own_save(vault_path, vault, current, &meta.signers, on_disk.as_ref());
-    Ok(())
+/// Sign `vault` and write it to a temporary file next to the vault file.
+/// Sign last: signed view v2 covers the finished file, meta ciphertext
+/// included. SSH-RSA/hardware identities can't sign, so the vault is then
+/// written unsigned. The pin lock is not held here.
+fn sign_and_stage(
+    vault_path: &str,
+    vault: &mut types::Vault,
+    saver: &crypto::MurkIdentity,
+) -> Result<vault::Staged, MurkError> {
+    #[cfg(test)]
+    crate::pins::test_hooks::run(&crate::pins::test_hooks::BEFORE_SIGN);
+    vault.sig = None;
+    vault.sig = sign_vault(vault, saver);
+    Ok(vault::stage(Path::new(vault_path), vault)?)
 }
 
 /// Refuse a save over a murk 0.13 file read as history that this machine has
@@ -631,29 +731,29 @@ fn refuse_unaccepted_pre_upgrade(
     Ok(())
 }
 
-/// Read the trust pin for a save and run the checks against it, in order:
-/// no removed key carried back, no unaccepted recipient carried by an
-/// unsigned save, no unaccepted 0.13 file upgraded. Then give the vault its
-/// id and next counter.
+/// Run a save's checks against the trust pin `pin`, in order: no removed
+/// key carried back, no unaccepted recipient carried by an unsigned save, no
+/// unaccepted 0.13 file upgraded. Then give the vault its id and next
+/// counter.
 fn check_against_pin(
     vault_path: &str,
     vault: &mut types::Vault,
     on_disk: Option<&types::Vault>,
     current: &types::Murk,
     saver: &crypto::MurkIdentity,
-) -> Result<Option<crate::pins::TrustPin>, MurkError> {
-    let prior_pin = refuse_carried_removed_keys(vault_path, vault, on_disk, current)?;
-    refuse_unsigned_carried_recipients(vault, on_disk, current, saver, prior_pin.as_ref())?;
-    refuse_unaccepted_pre_upgrade(vault_path, vault, on_disk, prior_pin.as_ref())?;
-    advance_identity(vault_path, vault, prior_pin.as_ref())?;
-    Ok(prior_pin)
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    refuse_carried_removed_keys(vault_path, vault, on_disk, current, pin)?;
+    refuse_unsigned_carried_recipients(vault, on_disk, current, saver, pin)?;
+    refuse_unaccepted_pre_upgrade(vault_path, vault, on_disk, pin)?;
+    advance_identity(vault_path, vault, pin)
 }
 
-/// Read the trust pin for a save, refusing one that would write back a key
-/// this machine recorded as removed only because the file it replaces — an
-/// older revision, numbered at or below the removal — still lists it: the
-/// save is numbered past the removal and signed by a trusted key, so every
-/// machine would take it as the key re-added. A save that adds the key itself
+/// Refuse a save that would write back a key this machine recorded as
+/// removed only because the file it replaces — an older revision, numbered
+/// at or below the removal — still lists it: the save is numbered past the
+/// removal and signed by a trusted key, so every machine would take it as
+/// the key re-added. A save that adds the key itself
 /// (`circle authorize`) re-adds it on purpose and is allowed, and so is a save
 /// on a branch this machine accepted before the removal reached it (see
 /// [`crate::trust::removal_applies`]), where the key is still a member. On a
@@ -665,10 +765,10 @@ fn refuse_carried_removed_keys(
     vault: &types::Vault,
     on_disk: Option<&types::Vault>,
     current: &types::Murk,
-) -> Result<Option<crate::pins::TrustPin>, MurkError> {
-    let prior_pin = crate::pins::read(vault_path).map_err(MurkError::Trust)?;
-    let (Some(pin), Some(on_disk)) = (prior_pin.as_ref(), on_disk) else {
-        return Ok(prior_pin);
+    pin: Option<&crate::pins::TrustPin>,
+) -> Result<(), MurkError> {
+    let (Some(pin), Some(on_disk)) = (pin, on_disk) else {
+        return Ok(());
     };
     let checkout = crate::trust::Checkout::at(crate::trust::head_of(vault_path));
     let canonical = |r: &String| crate::recipients::canonical_recipient(r).into_owned();
@@ -685,7 +785,7 @@ fn refuse_carried_removed_keys(
             crate::trust::label(&current.recipients, key),
             on_disk.generation
         ))),
-        None => Ok(prior_pin),
+        None => Ok(()),
     }
 }
 
@@ -774,26 +874,26 @@ fn announce_new_group_members(original: &types::Murk, current: &types::Murk) {
     }
 }
 
-/// Record this machine's own write in the trust pin: the save is accepted as
+/// The pin that records this machine's own write: the save is accepted as
 /// this machine's decision, changing the trusted set by what the save added
-/// and removed relative to `before`, the recipients of the file it replaced
-/// (see [`crate::trust::Acceptance::OwnSave`]), and advancing the counters.
-/// An unsigned save (the key cannot sign) is recorded the same way, so the
-/// next load here still refuses an older revision, and an unsigned file that
-/// adds a recipient or changes a group this save did not make. It also clears
-/// `was_signed`, since the next load here would otherwise refuse the
-/// operator's own write. The pin is re-read under its lock. Best-effort: the
-/// vault is already written, so a pin failure only warns.
-fn record_own_save(
+/// and removed relative to `replaced`, the file it replaced (see
+/// [`crate::trust::Acceptance::OwnSave`]), and advancing the counters at
+/// `checkout` (the branch and commit). An unsigned save (the key cannot
+/// sign) is recorded the same way, so the next load here still refuses an
+/// older revision, and an unsigned file that adds a recipient or changes a
+/// group this save did not make. It also clears `was_signed`, since the next
+/// load here would otherwise refuse the operator's own write. Runs under the
+/// pin lock (see [`crate::pins::Snapshot::publish`]), from the pin as it is
+/// then, `prior`.
+fn own_save_pin(
     vault_path: &str,
     vault: &types::Vault,
     current: &types::Murk,
     registry: &BTreeMap<String, String>,
     replaced: Option<&types::Vault>,
-) {
-    if !crate::pins::signer_pin_available() {
-        return;
-    }
+    prior: Option<&crate::pins::TrustPin>,
+    (head, commit): (&crate::trust::HeadState, Option<&str>),
+) -> crate::pins::TrustPin {
     let before: Option<BTreeSet<String>> = replaced.map(|v| {
         v.recipients
             .iter()
@@ -822,29 +922,24 @@ fn record_own_save(
         loader_can_sign: vault.sig.is_some(),
         operator_key: None,
     };
-    let result = crate::pins::update(vault_path, |prior| {
-        let mut pin = crate::trust::accepted_pin(
-            &loaded,
-            prior,
-            crate::trust::Acceptance::OwnSave {
-                before: before.as_ref(),
-            },
-            &crate::trust::head_of(vault_path),
-            crate::trust::commit_of(vault_path).as_deref(),
-        );
-        if vault.sig.is_none() {
-            if prior.is_some_and(|p| p.was_signed) {
-                eprintln!(
-                    "warn {vault_path} was written unsigned (this key cannot sign) — teammates' murk will refuse it until someone with an age or ssh-ed25519 key reviews it and runs `murk trust`"
-                );
-            }
-            pin.was_signed = false;
+    let mut pin = crate::trust::accepted_pin(
+        &loaded,
+        prior,
+        crate::trust::Acceptance::OwnSave {
+            before: before.as_ref(),
+        },
+        head,
+        commit,
+    );
+    if vault.sig.is_none() {
+        if prior.is_some_and(|p| p.was_signed) {
+            eprintln!(
+                "warn {vault_path} was written unsigned (this key cannot sign) — teammates' murk will refuse it until someone with an age or ssh-ed25519 key reviews it and runs `murk trust`"
+            );
         }
-        Ok(Some(pin))
-    });
-    if let Err(e) = result {
-        eprintln!("warn {e}");
+        pin.was_signed = false;
     }
+    pin
 }
 
 /// Build the meta blob for a save: a fresh MAC key + MAC, and the signer
@@ -2080,5 +2175,253 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("tampered with"), "{err}");
+    }
+
+    // -- publication under the pin lock --
+
+    /// A machine that saved alice's vault, which also lists bob, once into
+    /// `dir`: the vault file and the pin exist. Returns the vault path, the
+    /// vault as saved, its state, the same state with one more value, and
+    /// bob's key. The caller holds `murk_key_env` for alice.
+    fn saved_once(
+        dir: &std::path::Path,
+        alice: &str,
+    ) -> (String, types::Vault, types::Murk, types::Murk, String) {
+        unsafe {
+            std::env::remove_var("MURK_NO_SIGNER_PIN");
+            std::env::remove_var("MURK_TRUSTED_SIGNERS");
+        }
+        let (_, bob) = generate_keypair();
+        let ps = dir.join(".murk").to_str().unwrap().to_string();
+        let mut vault = signed_test_vault(alice, &make_recipient(alice));
+        vault.recipients.push(bob.clone());
+        let state = types::Murk {
+            values: HashMap::from([("API_KEY".into(), secret("REAL"))]),
+            recipients: HashMap::from([
+                (alice.to_string(), "alice".to_string()),
+                (bob.clone(), "bob".to_string()),
+            ]),
+            ..Default::default()
+        };
+        save_vault(&ps, &mut vault, &state, &state).unwrap();
+        let mut changed = state.clone();
+        changed.values.insert("NEW".into(), secret("value"));
+        (ps, vault, state, changed, bob)
+    }
+
+    /// Set the hook that runs between a save's decision and its publish, and
+    /// return how many times it ran.
+    fn before_publish(mut f: impl FnMut(u32) + 'static) -> std::rc::Rc<std::cell::Cell<u32>> {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = runs.clone();
+        crate::pins::test_hooks::set(&crate::pins::test_hooks::BEFORE_LOCK, move || {
+            counter.set(counter.get() + 1);
+            f(counter.get());
+        });
+        runs
+    }
+
+    #[test]
+    fn row_r_i5_race_save_removal() {
+        // A sibling worktree records bob's removal after the save decided
+        // and signed, before it publishes. The save must not publish: it
+        // decides again against the new pin, which refuses carrying bob.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let dir = tempfile::tempdir().unwrap();
+        let (ps, vault, state, changed, bob) = saved_once(dir.path(), &alice);
+        let before = fs::read(&ps).unwrap();
+
+        let (hook_ps, hook_bob) = (ps.clone(), bob.clone());
+        let runs = before_publish(move |run| {
+            if run == 1 {
+                crate::pins::update(&hook_ps, |pin| {
+                    let mut pin = pin.cloned().unwrap();
+                    pin.removed.insert(hook_bob.clone(), pin.generation);
+                    pin.trusted.remove(&hook_bob);
+                    Ok(Some(pin))
+                })
+                .unwrap();
+            }
+        });
+        let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("still lists bob"), "{err}");
+        assert_eq!(runs.get(), 1, "the restart was refused before its publish");
+        assert_eq!(
+            fs::read(&ps).unwrap(),
+            before,
+            "the vault file is unchanged"
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_limit() {
+        // The trust state changes before every publish: after three
+        // attempts the save stops and writes nothing.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let dir = tempfile::tempdir().unwrap();
+        let (ps, vault, state, changed, _) = saved_once(dir.path(), &alice);
+        let before = fs::read(&ps).unwrap();
+
+        let pin_file = crate::pins::pin_path(&ps).unwrap();
+        let runs = before_publish(move |run| {
+            // Stop after ten, so a save that never gives up still ends.
+            if run <= 10 {
+                let mut bytes = fs::read(&pin_file).unwrap();
+                bytes.push(b'\n');
+                fs::write(&pin_file, bytes).unwrap();
+            }
+        });
+        let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed 3 times"), "{err}");
+        assert!(err.contains("Nothing was written"), "{err}");
+        assert_eq!(runs.get(), 3);
+        assert_eq!(
+            fs::read(&ps).unwrap(),
+            before,
+            "the vault file is unchanged"
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_no_hold() {
+        // While the save signs, another thread can take the pin lock: no
+        // signature, touch or confirmation waits under it.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let dir = tempfile::tempdir().unwrap();
+        let (ps, vault, state, changed, _) = saved_once(dir.path(), &alice);
+
+        let lock_file = crate::pins::pin_path(&ps).unwrap().with_extension("lock");
+        let taken = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen = taken.clone();
+        crate::pins::test_hooks::set(&crate::pins::test_hooks::BEFORE_SIGN, move || {
+            let lock_file = lock_file.clone();
+            let got = std::thread::spawn(move || {
+                let file = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(&lock_file)
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                loop {
+                    if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
+                        let _ = fs2::FileExt::unlock(&file);
+                        return true;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+            .join()
+            .unwrap();
+            seen.set(Some(got));
+        });
+        save_vault(&ps, &mut vault.clone(), &state, &changed).unwrap();
+        assert_eq!(
+            taken.get(),
+            Some(true),
+            "another thread takes the pin lock while the save signs"
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_vault_changed() {
+        // Another program (git checkout) writes the vault file after the save
+        // read it: the save stops at once and overwrites nothing.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let dir = tempfile::tempdir().unwrap();
+        let (ps, vault, _, changed, _) = saved_once(dir.path(), &alice);
+        let first = fs::read(&ps).unwrap();
+        let mut second = vault.clone();
+        save_vault(&ps, &mut second, &changed, &changed).unwrap();
+
+        let pin_file = crate::pins::pin_path(&ps).unwrap();
+        let sidecar = crate::pins::sidecar_path(&pin_file);
+        let (pin_before, sidecar_before) =
+            (fs::read(&pin_file).unwrap(), fs::read(&sidecar).unwrap());
+        let (hook_ps, checkout) = (ps.clone(), first.clone());
+        let runs = before_publish(move |_| fs::write(&hook_ps, &checkout).unwrap());
+        let mut third = changed.clone();
+        third.values.insert("THIRD".into(), secret("value"));
+        let err = save_vault(&ps, &mut second.clone(), &changed, &third)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed on disk"), "{err}");
+        assert!(err.contains("Nothing was written"), "{err}");
+        assert_eq!(runs.get(), 1, "no restart");
+        assert_eq!(
+            fs::read(&ps).unwrap(),
+            first,
+            "the file holds the other program's bytes"
+        );
+        assert_eq!(
+            fs::read(&pin_file).unwrap(),
+            pin_before,
+            "the pin is unchanged"
+        );
+        assert_eq!(
+            fs::read(&sidecar).unwrap(),
+            sidecar_before,
+            "the sidecar is unchanged"
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_head() {
+        // HEAD moves (a commit lands) after the save decided: the branch
+        // marks it records would be for the wrong commit, so it decides
+        // again before it publishes.
+        let (alice_secret, alice) = generate_keypair();
+        let _env = murk_key_env(&alice_secret);
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::testutil::real_path(tmp.path());
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        let (ps, vault, state, changed, _) = saved_once(&repo, &alice);
+        git(&["add", ".murk"]);
+        git(&["commit", "-q", "-m", "vault"]);
+
+        let hook_repo = repo.clone();
+        let runs = before_publish(move |run| {
+            if run == 1 {
+                let out = std::process::Command::new("git")
+                    .args(["commit", "-q", "--allow-empty", "-m", "next"])
+                    .current_dir(&hook_repo)
+                    .env("GIT_AUTHOR_NAME", "test")
+                    .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                    .env("GIT_COMMITTER_NAME", "test")
+                    .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success());
+            }
+        });
+        save_vault(&ps, &mut vault.clone(), &state, &changed).unwrap();
+        assert_eq!(runs.get(), 2, "the save decided again after HEAD moved");
     }
 }

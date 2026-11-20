@@ -78,15 +78,26 @@ pub(crate) fn cmd_merge_driver(
     let keep_ours_or_theirs = format!(
         "to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg})"
     );
-    let output = murk_cli::run_merge_driver(
+    // The merge and its write of %A run under the trust pin lock (see
+    // `run_merge_driver_into`): %A is written only if the trust state and %A
+    // are as the merge read them, and a failure leaves %A as it was.
+    let (output, _) = murk_cli::run_merge_driver_into(
         &base_contents,
         &ours_contents,
         &theirs_contents,
         &vault_path,
+        Path::new(ours_path),
     )
     .unwrap_or_else(|e| {
         let mut lines = vec![e];
-        lines.extend(ours_unchanged.iter().cloned());
+        if fs::read(ours_path).is_ok_and(|now| now == ours_bytes) {
+            lines.extend(ours_unchanged.iter().cloned());
+        } else {
+            lines.push(format!(
+                "the working file {shown} is no longer ours as git gave it, and theirs was NOT merged"
+            ));
+            lines.push("do not commit it as it is".into());
+        }
         lines.push(keep_ours_or_theirs.clone());
         die(&lines.join("\n"), 1)
     });
@@ -149,23 +160,8 @@ pub(crate) fn cmd_merge_driver(
         );
     }
 
-    // Write merged result to ours path (%A). The write replaces the file
-    // atomically, so a failed write normally leaves ours as it was; say what
-    // the working file holds either way.
-    if let Err(e) = vault::write(Path::new(ours_path), &output.result.vault) {
-        let mut lines = vec![format!("writing merged vault: {e}")];
-        if fs::read(ours_path).is_ok_and(|now| now == ours_bytes) {
-            lines.extend(ours_unchanged.iter().cloned());
-        } else {
-            lines.push(format!(
-                "the working file {shown} may hold part of the merge, and theirs was NOT merged"
-            ));
-            lines.push("do not commit it as it is".into());
-        }
-        lines.push(keep_ours_or_theirs);
-        die(&lines.join("\n"), 1);
-    }
-
+    // The merged result is in %A now (see above). The rename is atomic, so
+    // %A holds either ours or the whole merged vault.
     if output.result.conflicts.is_empty() {
         // Final guard: exit 0 only with a file murk reads as a vault.
         if !reads_back_as_vault(Path::new(ours_path)) {

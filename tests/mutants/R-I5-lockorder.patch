@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -628,7 +628,7 @@
+ /// Refuse a lock request on a thread that holds the pin lock (see
+ /// [`LOCK_ORDER`]). `vault::lock` and every pin-lock entry call this first.
+ pub(crate) fn check_lock_order() -> Result<(), String> {
+-    if PIN_LOCKS_HELD.with(std::cell::Cell::get) > 0 {
++    if false {
+         return Err(LOCK_ORDER.to_string());
+     }
+     Ok(())

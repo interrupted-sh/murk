@@ -1016,6 +1016,59 @@ pub fn run_merge_driver(
     })
 }
 
+impl MergeDriverOutput {
+    /// Whether the driver writes this result over `%A`: not when the merge
+    /// needs a key it does not have and found no conflict, and not when it
+    /// refused an input or its result (see [`MergeConflict::writes_nothing`]).
+    pub fn writes_result(&self) -> bool {
+        let conflicts = &self.result.conflicts;
+        (self.needs_key.is_none() || !conflicts.is_empty())
+            && !conflicts.iter().any(MergeConflict::writes_nothing)
+    }
+}
+
+/// Run the merge driver (see [`run_merge_driver`]) and write its result
+/// over `target`, git's `%A`, under the trust pin lock (see
+/// [`crate::pins::Snapshot`]): only if the trust pin, its sidecar, `%A`, the
+/// branch and the commit are as they were before the merge read them. When
+/// the trust state changed, the merge runs again from the same inputs
+/// against the new pin, up to [`crate::pins::PUBLISH_ATTEMPTS`] times. When
+/// `%A` changed, it stops. Every failure leaves `%A` as it was. A merge
+/// writes no pin. Returns the output and whether `%A` was written.
+pub fn run_merge_driver_into(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    vault_path: &str,
+    target: &std::path::Path,
+) -> Result<(MergeDriverOutput, bool), String> {
+    use crate::pins::{Publish, Snapshot, TrustPin};
+    type NoRecord = fn(Option<&TrustPin>, &crate::trust::HeadState, Option<&str>) -> TrustPin;
+
+    for _ in 0..crate::pins::PUBLISH_ATTEMPTS {
+        // The snapshot comes first: every pin read of the merge is then at
+        // least as new as the token, so a change after any of them is seen.
+        let snapshot = Snapshot::take(vault_path, target)?;
+        let output = run_merge_driver(base, ours, theirs, vault_path)?;
+        if !output.writes_result() {
+            return Ok((output, false));
+        }
+        let staged = crate::vault::stage(target, &output.result.vault)
+            .map_err(|e| format!("writing merged vault: {e}"))?;
+        match snapshot.publish(staged, None::<NoRecord>)? {
+            Publish::Published => return Ok((output, true)),
+            Publish::TrustChanged => {}
+            Publish::TargetChanged => {
+                return Err(crate::save::changed_on_disk(
+                    &target.display().to_string(),
+                    "merging",
+                ));
+            }
+        }
+    }
+    Err(crate::save::trust_state_changed(vault_path, "merging"))
+}
+
 /// Group membership in the meta: group name → member pubkeys.
 type Groups = BTreeMap<String, Vec<String>>;
 /// Whether the key for `vault_path` (see [`crate::resolve_key_for_vault`]) is
@@ -4055,6 +4108,96 @@ mod tests {
             forged.conflicts.iter().any(|c| c.field == "base"),
             "{:?}",
             forged.conflicts
+        );
+    }
+
+    #[test]
+    fn row_r_i5_race_merge() {
+        // bob signed theirs, and the pin trusts him when the merge decides.
+        // A sibling worktree records his removal before the driver writes
+        // %A: the driver must not write a signed result that lists him. It
+        // merges again against the new pin, which refuses theirs, so %A
+        // keeps ours' bytes.
+        use crate::testutil::{generate_keypair, make_identity, murk_key_env};
+
+        let (alice_secret, alice) = generate_keypair();
+        let (bob_secret, bob) = generate_keypair();
+        let (alice_id, bob_id) = (make_identity(&alice_secret), make_identity(&bob_secret));
+        let _env = murk_key_env(&alice_secret);
+        unsafe {
+            std::env::remove_var("MURK_NO_SIGNER_PIN");
+            std::env::remove_var("MURK_TRUSTED_SIGNERS");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join(".murk");
+        let vault_path = vault_path.to_str().unwrap();
+
+        let recipients = crate::parse_recipients(&[alice.clone(), bob.clone()]).unwrap();
+        let mut base = base_vault();
+        base.recipients = vec![alice.clone(), bob.clone()];
+        base.vault_id = "00112233445566778899aabbccddeeff".into();
+        base.secrets.get_mut("DB_URL").unwrap().shared =
+            crate::encrypt_value(b"db", &recipients).unwrap();
+        let (mut ours, mut theirs) = (base.clone(), base.clone());
+        base.generation = 1;
+        ours.generation = 2;
+        theirs.generation = 2;
+        theirs.secrets.insert(
+            "NEW".into(),
+            SecretEntry {
+                shared: crate::encrypt_value(b"new", &recipients).unwrap(),
+                private: BTreeMap::new(),
+                grouped: BTreeMap::new(),
+            },
+        );
+        let meta = crate::types::Meta::default();
+        seal(&mut base, &meta, &alice_id);
+        seal(&mut ours, &meta, &alice_id);
+        seal(&mut theirs, &meta, &bob_id);
+        let vk = |id: &crate::crypto::MurkIdentity| id.signing_key().unwrap().verifying_key();
+        let pin = crate::pins::TrustPin {
+            v: crate::pins::PIN_VERSION,
+            vault_id: base.vault_id.clone(),
+            generation: 1,
+            trusted: [alice.clone(), bob.clone()].into(),
+            ever_trusted: [alice.clone(), bob.clone()].into(),
+            signers: [(alice.clone(), vk(&alice_id)), (bob.clone(), vk(&bob_id))].into(),
+            was_signed: true,
+            ..Default::default()
+        };
+        crate::pins::write(vault_path, &pin).unwrap();
+
+        let [base, ours, theirs] =
+            [&base, &ours, &theirs].map(|v| serde_json::to_string_pretty(v).unwrap());
+        let target = dir.path().join("ours-A");
+        std::fs::write(&target, &ours).unwrap();
+        let hook_path = vault_path.to_string();
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = runs.clone();
+        crate::pins::test_hooks::set(&crate::pins::test_hooks::BEFORE_LOCK, move || {
+            counter.set(counter.get() + 1);
+            crate::pins::update(&hook_path, |pin| {
+                let mut pin = pin.cloned().unwrap();
+                pin.removed.insert(bob.clone(), 2);
+                pin.trusted.remove(&bob);
+                Ok(Some(pin))
+            })
+            .unwrap();
+        });
+
+        let (output, written) =
+            run_merge_driver_into(&base, &ours, &theirs, vault_path, &target).unwrap();
+        assert_eq!(runs.get(), 1, "the first merge reached the publish");
+        assert!(!written, "{:?}", output.result.conflicts);
+        assert!(
+            output.result.conflicts.iter().any(|c| c.field == "theirs"),
+            "{:?}",
+            output.result.conflicts
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            ours,
+            "%A keeps ours"
         );
     }
 }

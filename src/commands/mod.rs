@@ -236,6 +236,8 @@ pub(crate) fn load_vault_locked(
     MurkIdentity,
     murk_cli::vault::VaultLock,
 ) {
+    // Lock order: the vault lock first. The load and the save then take the
+    // trust pin lock in short sections of their own (`murk_cli::pins::LOCK_ORDER`).
     let lock = try_or_die(
         murk_cli::vault::lock(std::path::Path::new(vault)).map_err(murk_cli::MurkError::Vault),
     );
