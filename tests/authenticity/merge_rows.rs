@@ -1703,6 +1703,9 @@ enum Side {
     EditedRecipients,
     /// A vault an outsider (mallory) signed, listing alice and herself.
     Outsider,
+    /// The genuine save re-written with a byte-order mark, so the vault
+    /// parser cannot read it.
+    Unparseable,
 }
 
 /// Alice's repo with the driver, a branch `side` off the fork point holding
@@ -1736,6 +1739,15 @@ fn side_scene(base: &Path, side: &Side) -> (Machine, PathBuf, Vec<String>) {
             .unwrap();
             put(&repo, &forged, "side: signed by an outsider");
             recipients_added(&forged, &fork_point)
+        }
+        Side::Unparseable => {
+            let saved = working(&repo);
+            put(
+                &repo,
+                &[&b"\xef\xbb\xbf"[..], &saved].concat(),
+                "side: re-saved with a byte-order mark",
+            );
+            Vec::new()
         }
     };
     git_ok(&repo, &["checkout", "-q", "main"]);
@@ -1784,6 +1796,49 @@ fn row_r_i12_b() {
 #[test]
 fn row_r_i13_b_theirs() {
     check("R-I13-b:theirs", |p| refused_side(p, &Side::Outsider));
+}
+
+/// Theirs cannot be parsed (a genuine save re-written with a byte-order
+/// mark). The driver never merges it as text: it writes both sides between
+/// conflict markers, a file that never loads and so can never be signed, and
+/// the pin and its sidecar are unchanged.
+#[test]
+fn row_r_i13_b_unparseable() {
+    check("R-I13-b:unparseable", |p| {
+        let base = TempDir::new().unwrap();
+        let (alice, repo, _) = side_scene(base.path(), &Side::Unparseable);
+        let before = Before::of(&alice, &repo)?;
+        let merged = Merged::merge(&alice, &repo, "side");
+        p.require(
+            merged.stderr.contains("murk never merges a vault as text"),
+            format!("the murk driver refused the input: {}", merged.stderr),
+        )?;
+        p.reached();
+        p.target(!merged.ok, "the merge stops");
+        p.target(
+            merged.file.starts_with(b"<<<<<<< ours"),
+            "the working file holds both sides between conflict markers",
+        );
+        p.target(
+            merged.vault().is_none(),
+            "the working file is not a vault, so it carries no signature",
+        );
+        p.target(
+            !alice
+                .murk(&repo)
+                .args(["get", "DB_URL"])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "the working file does not load",
+        );
+        p.target(
+            pin_state(&alice) == before.pins,
+            "the pin and its sidecar are unchanged",
+        );
+        Ok(())
+    });
 }
 
 /// A cherry-pick of a genuine revision (alice's second laptop authorizes
