@@ -99,7 +99,7 @@ A cell marked with a number was decided where the policy left it open; the notes
 | `agent revoke bot --rotate (piped value)` | yes (current) | yes (current) | yes (current) | yes (current) | yes (current) | no | no | no | no | no |
 | `agent connect claude --only AGENT_OK` | yes (current) | yes (current) | yes (current) | yes (current) | yes (current) | no | no | no | no | no |
 | `agent disconnect claude --rotate --name bot` | yes (current) | yes (current) | yes (current) | yes (current) | yes (current) | no | no | no | no | no |
-| `merge-driver BASE OURS THEIRS` | yes | yes | yes | yes | yes | no | no | no | conflict (13) | conflict (13) |
+| `merge-driver BASE OURS THEIRS` | yes | yes | yes | yes | yes | no | no | no | no (13) | no (13) |
 
 ## Decided cells
 
@@ -115,7 +115,7 @@ A cell marked with a number was decided where the policy left it open; the notes
 10. only a group member can change a group key, its schema included, as with `rm`.
 11. piped values are matched by position, so a batch that would skip a value the caller can't rotate (another group's value, or another recipient's override) refuses before writing.
 12. revoking your own key would lock the writer out mid-command, so murk asks another recipient to do it.
-13. a key that can't read both sides' meta can't rebuild the integrity metadata, so the driver reports a conflict and git keeps the merge out of history.
+13. a key that can't read ours and theirs can't check them, so the driver refuses the merge and writes nothing: the working file stays ours, and git records a conflict.
 
 ## Under review
 
