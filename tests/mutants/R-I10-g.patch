@@ -1,0 +1,20 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -2315,7 +2315,7 @@
+     if let types::SignatureState::Signed { signer, .. } = ancestor.signature
+         && let Some(&removed_at) = pin
+             .as_ref()
+-            .filter(|p| p.v >= pins::PIN_VERSION)
++            .filter(|p| p.v >= pins::PIN_VERSION && false)
+             .and_then(|p| p.removed.get(canonical_recipient(signer).as_ref()))
+     {
+         return Ok(Verdict::Refused(Refusal::RemovedKey {
+@@ -2336,6 +2336,8 @@
+         }));
+     }
+     let judged = pin.map(|mut p| {
++        p.trusted = p.ever_trusted.clone();
++        p.removed.clear();
+         p.generation = 0;
+         p.branches.clear();
+         p.groups.clear();

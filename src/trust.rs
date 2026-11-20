@@ -2242,17 +2242,18 @@ fn pin_signing_keys(pin: &mut TrustPin, loaded: &Loaded<'_>, current: bool) {
     }
 }
 
-/// Check a historical revision of the vault (`murk diff` against a git ref,
-/// the merge driver's common ancestor) without writing anything. Unlike a
-/// load there is no rollback or group-change check — an older revision is
-/// expected — and the signer must be one this machine *ever* trusted, so a
-/// teammate revoked since still verifies for the revisions they signed. The
-/// signer's key must still be the pinned one, and a grant key or a signer
-/// never trusted is refused. The vault id must match, except that a revision
-/// with none is pre-0.14 history: it predates the id (and the counter), so
-/// neither its missing id nor its 0.13 signature makes it a rollback. A
-/// view-1 revision is compared by the id its first 0.14 save takes (see
-/// `verdict`), so another vault's 0.13 file is still another vault.
+/// Check a historical revision of the vault (`murk diff` against a git ref)
+/// without writing anything. Unlike a load there is no rollback or
+/// group-change check — an older revision is expected — and the signer must
+/// be one this machine *ever* trusted, so a teammate revoked since still
+/// verifies for the revisions they signed. The signer's key must still be the
+/// pinned one, and a grant key or a signer never trusted is refused. The
+/// vault id must match, except that a revision with none is pre-0.14
+/// history: it predates the id (and the counter), so neither its missing id
+/// nor its 0.13 signature makes it a rollback. A view-1 revision is compared
+/// by the id its first 0.14 save takes (see `verdict`), so another vault's
+/// 0.13 file is still another vault. The merge driver judges its common
+/// ancestor by the stricter [`ancestor_verdict`].
 pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdict, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
@@ -2290,6 +2291,96 @@ pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdic
         other => other,
     };
     Ok(verdict)
+}
+
+/// Whether the common ancestor of a merge is an authority on what changed:
+/// `Trusted` only when it is signed by a key in the current anchor (the
+/// pin's trusted set, or `MURK_TRUSTED_SIGNERS` when set) under the verifying
+/// key pinned or given for it, by a key this machine has not recorded as
+/// removed, and when it is the vault the pin and both `sides` name. A key
+/// this machine only ever trusted does not count, and nor does a removed
+/// key's own history from before its removal: a revision a removed member
+/// signed never decides a merge. Its counter is not judged, since an
+/// ancestor is older than the sides by nature, and nor are its groups, since
+/// group authority is a property of the working vault. An unsigned ancestor
+/// never gets `Trusted`.
+pub fn ancestor_verdict(
+    vault_path: &str,
+    ancestor: &Loaded<'_>,
+    sides: [&types::Vault; 2],
+) -> Result<Verdict, String> {
+    let pin = pins::read(vault_path)?;
+    let env_signers = env_trusted_signers()?;
+    let found = ancestor.vault.generation;
+    if let types::SignatureState::Signed { signer, .. } = ancestor.signature
+        && let Some(&removed_at) = pin
+            .as_ref()
+            .filter(|p| p.v >= pins::PIN_VERSION)
+            .and_then(|p| p.removed.get(canonical_recipient(signer).as_ref()))
+    {
+        return Ok(Verdict::Refused(Refusal::RemovedKey {
+            key: signer.clone(),
+            removed_at,
+            found,
+            signer: true,
+        }));
+    }
+    let id = judged_vault_id(ancestor);
+    if let Some(side) = sides
+        .iter()
+        .find(|s| !s.vault_id.is_empty() && s.vault_id != id)
+    {
+        return Ok(Verdict::Refused(Refusal::OtherVault {
+            pinned: side.vault_id.clone(),
+            found: id,
+        }));
+    }
+    let judged = pin.map(|mut p| {
+        p.generation = 0;
+        p.branches.clear();
+        p.groups.clear();
+        p
+    });
+    Ok(
+        match verdict(
+            ancestor,
+            judged.as_ref(),
+            env_signers.as_ref(),
+            &HeadState::Detached,
+        ) {
+            Verdict::Refused(Refusal::GroupChange { .. }) => Verdict::Trusted,
+            other => other,
+        },
+    )
+}
+
+/// The refusal a load of a merge result would get on this machine, if any:
+/// the full load verdict with the pin as it is, the environment's anchor and
+/// `MURK_EXPECTED_VAULT`, at the checkout being merged into. The merge driver
+/// signs a result only when this is `None`. Returns the refusal's first line.
+pub fn merge_result_refusal(
+    vault_path: &str,
+    merged: &Loaded<'_>,
+) -> Result<Option<String>, String> {
+    let pin = pins::read(vault_path)?;
+    let env_signers = env_trusted_signers()?;
+    let expected = env_expected_vault()?;
+    let checkout = Checkout::of(vault_path, pin.as_ref());
+    Ok(
+        match load_verdict(
+            merged,
+            pin.as_ref(),
+            env_signers.as_ref(),
+            expected.as_ref(),
+            &checkout,
+        ) {
+            Verdict::Refused(r) => {
+                let msg = refusal_message(vault_path, &r, merged, pin.as_ref());
+                Some(msg.lines().next().unwrap_or_default().to_string())
+            }
+            Verdict::Trusted | Verdict::UnsignedAllowed => None,
+        },
+    )
 }
 
 /// Recipient-set changes of `loaded` against the pinned trusted set, as

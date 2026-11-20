@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1637,6 +1637,7 @@
+         && changed
+         && base.generation > 0
+         && side.vault.generation <= base.generation
++        && false
+     {
+         return Err(format!(
+             "rolled back: it changed the vault but its generation {} is not above the common ancestor's {}",

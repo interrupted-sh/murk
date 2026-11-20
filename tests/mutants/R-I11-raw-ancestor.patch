@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1081,7 +1081,7 @@
+         .iter()
+         .all(|v| v.vault_id.is_empty() && v.generation == 0);
+     let authority = matches!(ancestor, Ancestor::Authority(_));
+-    let mode = if authority || both_0_13 {
++    let mode = if true || authority || both_0_13 {
+         Base::Authority(base)
+     } else {
+         Base::TwoWay
