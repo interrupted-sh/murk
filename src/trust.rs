@@ -65,6 +65,66 @@ use crate::types;
 /// See [`parse_trusted_signer`] for the entry format.
 pub const TRUSTED_SIGNERS_VAR: &str = "MURK_TRUSTED_SIGNERS";
 
+/// Environment variable naming the vault a process expects and the oldest
+/// revision of it the process may load: `<vault id>:<minimum generation>`.
+/// A runner with no pin (CI) sets it from a protected variable to get an id
+/// and a rollback check. When set, every keyed load, grant load and merge
+/// side checks it, with or without a pin. See [`env_expected_vault`].
+pub const EXPECTED_VAULT_VAR: &str = "MURK_EXPECTED_VAULT";
+
+/// The value of [`EXPECTED_VAULT_VAR`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedVault {
+    pub vault_id: String,
+    pub min_generation: u64,
+}
+
+impl ExpectedVault {
+    /// Why a vault whose id is `found_id` (the id a load judges it by)
+    /// and whose counter is `found_generation` is not the one expected: the
+    /// id first, then the minimum.
+    pub fn mismatch(&self, found_id: &str, found_generation: u64) -> Option<ExpectedMismatch> {
+        if found_id != self.vault_id {
+            return Some(ExpectedMismatch::OtherVault {
+                expected: self.vault_id.clone(),
+                found: found_id.to_string(),
+            });
+        }
+        (found_generation < self.min_generation).then_some(ExpectedMismatch::BelowMinimum {
+            minimum: self.min_generation,
+            found: found_generation,
+        })
+    }
+}
+
+/// How a vault differs from what [`EXPECTED_VAULT_VAR`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedMismatch {
+    /// The vault id differs from the expected one.
+    OtherVault { expected: String, found: String },
+    /// The generation is below the expected minimum.
+    BelowMinimum { minimum: u64, found: u64 },
+}
+
+impl ExpectedMismatch {
+    /// The refusal message for the vault at `vault_path`.
+    pub fn message(&self, vault_path: &str) -> String {
+        match self {
+            ExpectedMismatch::OtherVault { expected, found } => format!(
+                "vault {vault_path} is not the vault that {EXPECTED_VAULT_VAR} names: its vault id is {}, and {EXPECTED_VAULT_VAR} expects {expected} — another vault's file may have been copied over it\ncheck out the correct vault file, or set {EXPECTED_VAULT_VAR} again from the correct vault",
+                if found.is_empty() {
+                    "empty".to_string()
+                } else {
+                    crate::validate::show(found)
+                }
+            ),
+            ExpectedMismatch::BelowMinimum { minimum, found } => format!(
+                "vault {vault_path} is older than {EXPECTED_VAULT_VAR} allows: its generation is {found}, and the minimum is {minimum} — an older revision may have been replayed\ncheck out the current vault, or set {EXPECTED_VAULT_VAR} again from the current vault"
+            ),
+        }
+    }
+}
+
 /// The largest generation accepted: 2^53 − 1, the largest integer every JSON
 /// reader holds exactly. A vault above it is refused as tampering, so no
 /// signer can push the counter to where it stops increasing.
@@ -201,6 +261,9 @@ pub enum Refusal {
     GenerationJump { pinned: u64, found: u64 },
     /// The generation is above [`MAX_GENERATION`].
     GenerationOutOfRange { found: u64 },
+    /// The vault is not the one `MURK_EXPECTED_VAULT` names, or is older
+    /// than its minimum.
+    NotExpected(ExpectedMismatch),
 }
 
 impl Refusal {
@@ -209,8 +272,9 @@ impl Refusal {
     /// key: an age key's verifying key is derived from its secret, so a
     /// different one for the same recipient is a forgery. Nor a grant bound
     /// to an operator key, which is tampering, nor a generation past
-    /// [`MAX_GENERATION`]. A removed key is accepted only when named (see
-    /// [`Refusal::RemovedKey`]).
+    /// [`MAX_GENERATION`], nor a vault `MURK_EXPECTED_VAULT` refuses (the
+    /// variable, not this machine, decides it). A removed key is accepted
+    /// only when named (see [`Refusal::RemovedKey`]).
     pub fn acceptable(&self) -> bool {
         !matches!(
             self,
@@ -219,6 +283,7 @@ impl Refusal {
                 | Refusal::SignerKeyChanged { .. }
                 | Refusal::GrantBindsOperator { .. }
                 | Refusal::GenerationOutOfRange { .. }
+                | Refusal::NotExpected(_)
         )
     }
 }
@@ -244,6 +309,9 @@ pub struct Assessment {
     /// The signer set the verdict used in place of the pin's (environment
     /// and anchor together), when either was given.
     pub external: Option<TrustedSigners>,
+    /// `MURK_EXPECTED_VAULT`, when set: the verdict refuses another vault
+    /// and a revision below its minimum.
+    pub expected: Option<ExpectedVault>,
 }
 
 impl Assessment {
@@ -337,6 +405,67 @@ pub fn env_trusted_signers() -> Result<Option<TrustedSigners>, String> {
         out.insert(key, vk);
     }
     Ok((!out.is_empty()).then_some(out))
+}
+
+/// Parse a value of [`EXPECTED_VAULT_VAR`]: `<vault id>:<minimum generation>`,
+/// the id as 32 lowercase hex characters and the generation as a decimal
+/// number no larger than [`MAX_GENERATION`]. A third part (a revision) is an
+/// error: this release does not check revisions, and a value that names one
+/// must not seem to give that check. An empty value is an error too: it
+/// usually comes from a CI secret that is missing, and must not turn the
+/// check off.
+pub fn parse_expected_vault(value: &str) -> Result<ExpectedVault, String> {
+    let usage = "set it to <vault id>:<minimum generation>";
+    if value.trim().is_empty() {
+        return Err(format!(
+            "{EXPECTED_VAULT_VAR} is set but empty — a CI secret or variable is usually missing\n{usage}, or unset {EXPECTED_VAULT_VAR} to turn the check off"
+        ));
+    }
+    let parts: Vec<&str> = value.trim().split(':').collect();
+    let (id, generation) = match parts.as_slice() {
+        [id, generation] => (*id, *generation),
+        [_, _, _] => {
+            return Err(format!(
+                "{EXPECTED_VAULT_VAR} has three parts, but this release of murk does not check a revision — {usage}"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "{EXPECTED_VAULT_VAR} is not <vault id>:<minimum generation> — {usage}"
+            ));
+        }
+    };
+    if id.len() != 32 || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(format!(
+            "{EXPECTED_VAULT_VAR}: the vault id is not 32 lowercase hex characters — {usage}"
+        ));
+    }
+    let min_generation = generation
+        .parse::<u64>()
+        .ok()
+        .filter(|g| *g <= MAX_GENERATION && generation.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| {
+            format!(
+                "{EXPECTED_VAULT_VAR}: the minimum generation is not a whole number from 0 to {MAX_GENERATION} — {usage}"
+            )
+        })?;
+    Ok(ExpectedVault {
+        vault_id: id.to_string(),
+        min_generation,
+    })
+}
+
+/// Parse `MURK_EXPECTED_VAULT`. `Ok(None)` only when unset. A value that does
+/// not parse, an empty one included, is an error (fail closed rather than
+/// check less than the operator meant).
+pub fn env_expected_vault() -> Result<Option<ExpectedVault>, String> {
+    match std::env::var(EXPECTED_VAULT_VAR) {
+        Ok(raw) => parse_expected_vault(&raw).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{EXPECTED_VAULT_VAR} is not valid UTF-8 — set it to <vault id>:<minimum generation>"
+        )),
+    }
 }
 
 /// Canonical keys of the grants in `grants`.
@@ -583,13 +712,16 @@ fn counter_refusal(
 }
 
 /// The verdict for a load of the working vault: the core rules, then the
-/// removal and counter rules. A refusal `murk trust` can never accept comes
-/// first; a removed key next, so a vault that is also refused for another
-/// reason still needs the key named.
+/// removal rule, `MURK_EXPECTED_VAULT` (`expected`) and the counter rule. A
+/// refusal `murk trust` can never accept comes first; a removed key next, so a
+/// vault that is also refused for another reason still needs the key named.
+/// A refusal by the pin comes before one by `expected`, so a machine with a
+/// pin names what its pin recorded.
 fn load_verdict(
     loaded: &Loaded<'_>,
     pin: Option<&TrustPin>,
     external_signers: Option<&TrustedSigners>,
+    expected: Option<&ExpectedVault>,
     checkout: &Checkout,
 ) -> Verdict {
     let head = &checkout.head;
@@ -620,6 +752,11 @@ fn load_verdict(
     }
     if matches!(core, Verdict::Refused(_)) {
         return core;
+    }
+    if let Some(mismatch) =
+        expected.and_then(|e| e.mismatch(&judged_vault_id(loaded), loaded.vault.generation))
+    {
+        return Verdict::Refused(Refusal::NotExpected(mismatch));
     }
     match counter_refusal(loaded, pin, head) {
         Some(refusal) => Verdict::Refused(refusal),
@@ -712,6 +849,7 @@ pub fn assess(
 ) -> Result<Assessment, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
+    let expected = env_expected_vault()?;
     let external: Option<TrustedSigners> = match (anchor, &env_signers) {
         (None, None) => None,
         (a, e) => Some(
@@ -727,19 +865,27 @@ pub fn assess(
         p.removed.retain(|k, _| !readmit.contains(k));
         p
     });
-    let verdict = load_verdict(loaded, judged.as_ref(), external.as_ref(), &checkout);
+    let verdict = load_verdict(
+        loaded,
+        judged.as_ref(),
+        external.as_ref(),
+        expected.as_ref(),
+        &checkout,
+    );
     Ok(Assessment {
         verdict,
         pin,
         env_signers,
         external,
+        expected,
     })
 }
 
 /// The verdict for `loaded` against `pin` as it is now (re-read under the
-/// pin lock), with the external signers `assessment` was computed with. Used
-/// to confirm an acceptance just before it is recorded: another process may
-/// have raised the rollback mark or learned keys since the first read.
+/// pin lock), with the external signers and expected vault `assessment` was
+/// computed with. Used to confirm an acceptance just before it is recorded:
+/// another process may have raised the rollback mark or learned keys since
+/// the first read.
 pub fn reassess(
     vault_path: &str,
     loaded: &Loaded<'_>,
@@ -750,6 +896,7 @@ pub fn reassess(
         loaded,
         pin,
         assessment.external.as_ref(),
+        assessment.expected.as_ref(),
         &Checkout::of(vault_path, pin),
     )
 }
@@ -1101,18 +1248,23 @@ fn signer_verdict(
 /// file, has no id of its own: it is judged by the id its first 0.14 save
 /// takes (`save::derived_vault_id`, from `created` and `vault_name`), which
 /// is how a vault upgraded from 0.13 got the id pinned here. Those two fields
-/// are not covered by the v1 signature or the MAC, so this check catches
-/// another vault's file, not one whose header was edited to match. Such a
-/// file is read-only where it loads (see `pre_upgrade_read_only`).
-fn id_refusal(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+/// are not covered by the v1 signature or the MAC, so a check by this id
+/// catches another vault's file, not one whose header was edited to match.
+/// Such a file is read-only where it loads (see `pre_upgrade_read_only`).
+fn judged_vault_id(loaded: &Loaded<'_>) -> String {
     let derived = signed_v1(loaded)
         || (matches!(loaded.signature, types::SignatureState::Unsigned)
             && written_by_0_13(loaded.vault));
-    let found = if derived {
+    if derived {
         crate::save::derived_vault_id(loaded.vault)
     } else {
         loaded.vault.vault_id.clone()
-    };
+    }
+}
+
+/// The vault id check against the pin (see [`judged_vault_id`]).
+fn id_refusal(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+    let found = judged_vault_id(loaded);
     (!pin.vault_id.is_empty() && found != pin.vault_id).then(|| Refusal::OtherVault {
         pinned: pin.vault_id.clone(),
         found,
@@ -1219,7 +1371,8 @@ fn unsigned_widening(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
 /// shares with the ancestor: if it changed anything it is refused, rather
 /// than letting an old signed revision (or another 0.13 vault of the team)
 /// override newer content. A side with only one of the two fields is judged
-/// against any 0.14 state in the pin. Returns the reason a side is refused.
+/// against any 0.14 state in the pin. `MURK_EXPECTED_VAULT`, when set, is
+/// checked last, as for a load. Returns the reason a side is refused.
 pub fn check_merge_side(
     vault_path: &str,
     side: &Loaded<'_>,
@@ -1298,6 +1451,13 @@ pub fn check_merge_side(
             "rolled back: it changed the vault but its generation {} is not above the common ancestor's {}",
             side.vault.generation, base.generation
         ));
+    }
+    // As for a load, the checks against this machine's pin speak first.
+    if let Some(mismatch) = env_expected_vault()?
+        .and_then(|e| e.mismatch(&judged_vault_id(side), side.vault.generation))
+    {
+        let msg = mismatch.message(vault_path);
+        return Err(msg.lines().next().unwrap_or_default().to_string());
     }
     Ok(())
 }
@@ -2042,6 +2202,7 @@ pub fn refusal_message(
         Refusal::GenerationOutOfRange { found } => format!(
             "vault {vault_path} has generation {found}, above the largest murk accepts ({MAX_GENERATION}) — it may have been tampered with to exhaust the counter\nrestore {vault_path} from git"
         ),
+        Refusal::NotExpected(mismatch) => mismatch.message(vault_path),
     }
 }
 
@@ -2957,6 +3118,7 @@ mod tests {
             std::env::set_var("HOME", home.path());
             std::env::remove_var("MURK_NO_SIGNER_PIN");
             std::env::remove_var("MURK_TRUSTED_SIGNERS");
+            std::env::remove_var(EXPECTED_VAULT_VAR);
         }
         pins::write(vault_path, pin).unwrap();
         let out = f();
@@ -3063,6 +3225,92 @@ mod tests {
             check_merge_side(path, &own.loaded(), Some((&base, None)), true, true)
         });
         assert_eq!(accepted, Ok(()));
+    }
+
+    #[test]
+    fn a_merge_side_meets_murk_expected_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".murk");
+        let path = path.to_str().unwrap();
+        let pin = pin_for(&Case::new(&[A], 3, A));
+        let base = Case::new(&[A], 3, A).vault;
+        let side = Case::new(&[A], 5, A);
+        let id = side.vault.vault_id.clone();
+        let check = |expected: String| {
+            with_pin(path, &pin, || {
+                unsafe { std::env::set_var(EXPECTED_VAULT_VAR, &expected) };
+                let out = check_merge_side(path, &side.loaded(), Some((&base, None)), true, true);
+                unsafe { std::env::remove_var(EXPECTED_VAULT_VAR) };
+                out
+            })
+        };
+        assert_eq!(check(format!("{id}:5")), Ok(()));
+        let other = check("ffeeddccbbaa99887766554433221100:5".into());
+        assert!(
+            other
+                .as_ref()
+                .is_err_and(|e| e.contains("not the vault that MURK_EXPECTED_VAULT names")),
+            "{other:?}"
+        );
+        let older = check(format!("{id}:6"));
+        assert!(
+            older
+                .as_ref()
+                .is_err_and(|e| e.contains("generation is 5, and the minimum is 6")),
+            "{older:?}"
+        );
+        let malformed = check(format!("{id}:5:abc"));
+        assert!(
+            malformed
+                .as_ref()
+                .is_err_and(|e| e.contains("does not check a revision")),
+            "{malformed:?}"
+        );
+    }
+
+    #[test]
+    fn murk_expected_vault_takes_an_id_and_a_minimum_only() {
+        let id = "00112233445566778899aabbccddeeff";
+        assert_eq!(
+            parse_expected_vault(&format!(" {id}:12\n")),
+            Ok(ExpectedVault {
+                vault_id: id.into(),
+                min_generation: 12,
+            })
+        );
+        // A revision part is refused, never ignored: this release does not
+        // check it, and a value that names one must not seem to.
+        let three = parse_expected_vault(&format!("{id}:12:{}", "ab".repeat(32)));
+        assert!(
+            three
+                .as_ref()
+                .is_err_and(|e| e.contains("does not check a revision")
+                    && e.contains("<vault id>:<minimum generation>")),
+            "{three:?}"
+        );
+        // Set but empty is refused, not read as unset: a missing CI secret
+        // expands to nothing and must not turn the check off.
+        for empty in ["", "  \n"] {
+            let refused = parse_expected_vault(empty);
+            assert!(
+                refused.as_ref().is_err_and(
+                    |e| e.contains("set but empty") && e.contains("unset MURK_EXPECTED_VAULT")
+                ),
+                "{empty:?}: {refused:?}"
+            );
+        }
+        for bad in [
+            id.to_string(),
+            format!("{id}:"),
+            format!("{id}:-1"),
+            format!("{id}:+1"),
+            format!("{id}:{}", MAX_GENERATION + 1),
+            format!("{}:1", id.to_uppercase()),
+            "0011:1".to_string(),
+            format!("{id}:1:2:3"),
+        ] {
+            assert!(parse_expected_vault(&bad).is_err(), "{bad:?} parsed");
+        }
     }
 
     #[test]
@@ -3242,6 +3490,7 @@ mod tests {
             pin,
             env_signers: None,
             external,
+            expected: None,
         }
     }
 

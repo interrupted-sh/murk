@@ -261,17 +261,20 @@ one. `MURK_EXPECTED_VAULT` narrows that. Its value is
 - whose `vault_id` is different, or
 - whose save counter (`generation`) is below the minimum.
 
-The check applies to a full key and to a scoped grant, with or without a pin.
-A value that murk can't parse is an error.
+The check applies to a full key, to a scoped grant and to each side of a
+merge, with or without a pin. A value that murk can't parse is an error. So
+is a value with a third part: this release doesn't check a revision. So is a
+value that is set but empty, which usually means the CI secret is missing. To
+turn the check off, don't set the variable at all.
 
 To make the value:
 
 1. On a machine that trusts the vault, check out the branch that the job
    deploys from, and pull.
 2. Run `murk verify`. Continue only when it reports no problem.
-3. Read the two fields from the vault header:
-   `jq -r '"\(.vault_id):\(.generation)"' .murk`.
-4. Store the output as a CI secret named `MURK_EXPECTED_VAULT`.
+3. Copy the line that `murk verify` prints on standard output, after
+   `expected vault`. It is `<vault id>:<generation>` for the vault it checked.
+4. Store that line as a CI secret named `MURK_EXPECTED_VAULT`.
 
 Give it to every step that runs murk, as you do `MURK_TRUSTED_SIGNERS`:
 

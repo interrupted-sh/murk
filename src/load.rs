@@ -499,7 +499,9 @@ pub fn verify_grant_signature(vault: &types::Vault, key_text: &str) -> Result<()
 /// first: the signature must verify under a trusted signer named in the
 /// grant's key file (`key_text`) or `MURK_TRUSTED_SIGNERS`. Only then is the
 /// grant's own record decrypted and its TTL checked, and only then its scoped
-/// values. No pin is read or written.
+/// values. No pin is read or written, so `MURK_EXPECTED_VAULT` is the only
+/// id and rollback check: it runs once the signature verifies, which makes
+/// the header's `vault_id` and `generation` trustworthy.
 ///
 /// The grant is bounded by the earlier of the record's expiry and the key
 /// file's own (`# murk-grant-expires:`), so no record a trusted signer later
@@ -507,6 +509,7 @@ pub fn verify_grant_signature(vault: &types::Vault, key_text: &str) -> Result<()
 /// the record. A key file without an expiry falls back to the record alone,
 /// with a warning (once per process) to re-mint it.
 fn inspect_as_grant(
+    vault_path: &str,
     vault: types::Vault,
     identity: crypto::MurkIdentity,
     key_text: &str,
@@ -514,8 +517,15 @@ fn inspect_as_grant(
 ) -> Result<InspectedVault, MurkError> {
     let pubkey = identity.pubkey_string()?;
     let anchor = grant_anchor(key_text)?;
+    let expected = trust::env_expected_vault().map_err(MurkError::Trust)?;
     let bound = crate::agents::grant_from_key_text(key_text).map_err(MurkError::Key)?;
     let signer = verify_under_anchor(&vault, &anchor)?;
+    if let Some(mismatch) = expected
+        .as_ref()
+        .and_then(|e| e.mismatch(&vault.vault_id, vault.generation))
+    {
+        return Err(MurkError::Trust(mismatch.message(vault_path)));
+    }
     let mut record = crate::agents::open_blob(blob, &identity, &pubkey)?;
     if let Some(id) = &bound.id
         && *id != record.name
@@ -574,6 +584,7 @@ fn inspect_as_grant(
             pin: None,
             env_signers: None,
             external: Some(anchor),
+            expected,
         },
         signer_vk: None,
         grant: true,
@@ -798,7 +809,7 @@ fn inspect_read(
     secret_key: &str,
 ) -> Result<InspectedVault, MurkError> {
     if let Some(blob) = crate::agents::loader_blob(&vault, &identity) {
-        return inspect_as_grant(vault, identity, secret_key, &blob);
+        return inspect_as_grant(vault_path, vault, identity, secret_key, &blob);
     }
     let (murk, signer_vk) = decrypt_vault_with_signature(&vault, &identity)?;
     let mut inspected = InspectedVault {
@@ -810,6 +821,7 @@ fn inspect_read(
             pin: None,
             env_signers: None,
             external: None,
+            expected: None,
         },
         signer_vk,
         grant: false,

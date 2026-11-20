@@ -1175,6 +1175,123 @@ fn row_r_i8_c_older() {
     });
 }
 
+/// `murk verify` prints the vault's `MURK_EXPECTED_VAULT` value alone on
+/// standard output, and a pinless runner loads the vault with it. Set but
+/// empty, the variable refuses the load instead of turning the check off: a
+/// missing CI secret expands to an empty value.
+#[test]
+fn verify_prints_the_expected_vault_and_an_empty_value_is_refused() {
+    let w = TwoVaults::build().unwrap();
+    let printed = on_machine(
+        &fresh_machine(w.root.path(), &w.prod),
+        Key::Inline(&w.ci.secret),
+        &[("MURK_TRUSTED_SIGNERS", w.signers.as_str())],
+        &["verify"],
+        "",
+    );
+    assert_eq!(
+        out_text(&printed.stdout).trim(),
+        w.expected(),
+        "verify prints the value on stdout: {}",
+        out_text(&printed.stderr)
+    );
+    let machine = fresh_machine(w.root.path(), &w.prod);
+    let ok = w.get(&machine, out_text(&printed.stdout).trim());
+    assert!(
+        ok.status.success() && out_text(&ok.stdout).contains("value-of-prod"),
+        "the printed value loads prod: {}",
+        out_text(&ok.stderr)
+    );
+    for empty in ["", "  "] {
+        let out = w.get(&fresh_machine(w.root.path(), &w.prod), empty);
+        assert!(
+            !out.status.success()
+                && !out_text(&out.stdout).contains("value-of-prod")
+                && out_text(&out.stderr).contains("MURK_EXPECTED_VAULT is set but empty"),
+            "{empty:?} is refused: {}",
+            out_text(&out.stderr)
+        );
+    }
+}
+
+/// An agent grant reads no trust pin, so `MURK_EXPECTED_VAULT` is its only
+/// vault-id and rollback check. With it, a grant load refuses a vault whose
+/// id is not the expected one, and a revision below the minimum. The
+/// current revision at the minimum loads.
+#[test]
+fn a_grant_load_meets_murk_expected_vault() {
+    let root = TempDir::new().unwrap();
+    let alice = Who::generate("alice");
+    let prod = Org::new(root.path(), "prod", &alice).unwrap();
+    prod.add("API", "value-first").unwrap();
+    let key = root.path().join("bot.key");
+    prod.must(
+        &[
+            "agent",
+            "grant",
+            "--name",
+            "bot",
+            "--only",
+            "API",
+            "--ttl",
+            "1h",
+            "--out",
+            key.to_str().unwrap(),
+        ],
+        "",
+    )
+    .unwrap();
+    prod.add("API", "value-old").unwrap();
+    let old = prod.vault();
+    prod.add("API", "value-new").unwrap();
+    let current = prod.vault();
+    let (id, minimum) = (vault_id(&current), generation(&current));
+    assert!(generation(&old) < minimum && vault_id(&old) == id);
+
+    let get = |vault: &[u8], expected: &str| {
+        let machine = fresh_machine(root.path(), vault);
+        on_machine(
+            &machine,
+            Key::File(&key),
+            &[("MURK_EXPECTED_VAULT", expected)],
+            &["get", "API"],
+            "",
+        )
+    };
+    let expected = format!("{id}:{minimum}");
+
+    let ok = get(&current, &expected);
+    assert!(
+        ok.status.success() && out_text(&ok.stdout).contains("value-new"),
+        "the grant loads the expected vault at the minimum: {}",
+        out_text(&ok.stderr)
+    );
+
+    let other = get(
+        &current,
+        &format!("ffeeddccbbaa99887766554433221100:{minimum}"),
+    );
+    assert!(
+        !other.status.success()
+            && !out_text(&other.stdout).contains("value-new")
+            && out_text(&other.stderr).contains("not the vault that MURK_EXPECTED_VAULT names"),
+        "the grant refuses a vault with another id: {}",
+        out_text(&other.stderr)
+    );
+
+    let older = get(&old, &expected);
+    assert!(
+        !older.status.success()
+            && !out_text(&older.stdout).contains("value-old")
+            && out_text(&older.stderr).contains(&format!(
+                "generation is {}, and the minimum is {minimum}",
+                generation(&old)
+            )),
+        "the grant refuses a revision below the minimum: {}",
+        out_text(&older.stderr)
+    );
+}
+
 /// A runner with no trust pin whose `MURK_EXPECTED_VAULT` also names a
 /// revision (`<id>:<generation>:<revision>`, as `murk verify` prints it for
 /// the current one) refuses a genuine file from a stale fork that has a
