@@ -1,9 +1,9 @@
 --- a/src/load.rs
 +++ b/src/load.rs
-@@ -740,7 +740,6 @@
-                         pin.removed_on = prior.removed_on;
+@@ -761,7 +761,6 @@
                          pin.removed_at_commit = prior.removed_at_commit;
                          pin.groups = prior.groups;
+                         pin.sidecar.deleted_groups = prior.sidecar.deleted_groups;
 -                        pin.accepted_pre_upgrade = prior.accepted_pre_upgrade;
                      }
                      Ok((fresh != Some(&pin)).then_some(pin))
