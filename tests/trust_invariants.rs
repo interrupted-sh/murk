@@ -528,9 +528,10 @@ enum Op {
         m: M,
         who: P,
     },
-    /// Machine `m` holds a removal record for a person: another machine
-    /// (`by`, or the next one that fits) syncs, authorizes them again and
-    /// pushes; `m` then loads the tip (refused) and runs `ReAdd` for them.
+    /// Machine `m` (or, when it holds none, the next machine that does)
+    /// holds a removal record for a person: another machine (`by`, or the
+    /// next one that fits) syncs, authorizes them again and pushes; `m` then
+    /// loads the tip (refused) and runs `ReAdd` for them.
     AuthorizeAgain {
         m: M,
         by: M,
@@ -3059,9 +3060,17 @@ impl<'f> World<'f> {
             Op::AuthorizeAgain { m, by } => {
                 // m holds a record for `who`; another machine authorizes
                 // them again and pushes; m checks out the tip (its load is
-                // refused) and consents with `murk trust --re-add`.
-                let records = self.removals(&Obs::Machine(m.0));
-                let who = *records.keys().next()?;
+                // refused) and consents with `murk trust --re-add`. When the
+                // drawn machine holds no record, the next machine that does
+                // stands in for it, so the step is not skipped for want of
+                // one.
+                let (m, who) = (0..MACHINES.len())
+                    .map(|i| (m.0 + i) % MACHINES.len())
+                    .find_map(|i| {
+                        let records = self.removals(&Obs::Machine(i));
+                        records.keys().next().map(|&who| (M(i), who))
+                    })?;
+                let m = &m;
                 let by = [by.0].into_iter().chain(0..MACHINES.len()).find(|&i| {
                     i != m.0 && MACHINES[i].1 != who && MACHINES[i].1 != MACHINES[m.0].1
                 })?;
