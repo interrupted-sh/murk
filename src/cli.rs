@@ -463,11 +463,13 @@ pub enum Command {
         /// Check only the vault signature, with no key
         ///
         /// Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed
-        /// this exact file. The signature covers the whole file, so a text
-        /// merge of two changed vaults fails this check: use it as a
-        /// pull-request check in CI with no secret. murk reads no key and
-        /// decrypts nothing. So it does not check the MAC over the values,
-        /// grant expiry, rollback against earlier saves or the last commit's
+        /// this vault's content. The signature covers every field except
+        /// itself, so a text merge of two changed vaults fails this check: use
+        /// it as a pull-request check in CI with no secret. It covers the
+        /// parsed content, not the file's bytes: a reformatted file still
+        /// passes. murk reads no key and decrypts nothing. So it does not check
+        /// the MAC over the values, grant expiry, rollback against earlier
+        /// saves, removed keys, group membership changes or the last commit's
         /// signature. `murk verify` with a key checks those
         #[arg(long)]
         signature_only: bool,

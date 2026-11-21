@@ -336,6 +336,28 @@ test('add one-liner stores a secret', () => {
   assert.strictEqual(get('ONELINER'), 'oneliner-value')
 })
 
+test('a handle loaded by a relative path keeps writing to that vault after chdir', () => {
+  // A second vault the same key opens, in another directory.
+  const other = mkdtempSync(join(tmpdir(), 'murk-node-other-'))
+  runMurk(other, ['init', '--vault', '.murk'], 'testuser\n')
+  const otherBefore = readFileSync(join(other, '.murk'))
+
+  const vault = load('.murk')
+  process.chdir(other)
+  try {
+    vault.add('WHERE', 'meant-for-the-first')
+    vault.describe('WHERE', 'described on the first')
+  } finally {
+    process.chdir(testDir)
+  }
+
+  assert.deepStrictEqual(readFileSync(join(other, '.murk')), otherBefore)
+  assert.strictEqual(get('WHERE'), 'meant-for-the-first')
+  const schema = JSON.parse(readFileSync(join(testDir, '.murk'), 'utf8')).schema
+  assert.strictEqual(schema.WHERE.description, 'described on the first')
+  rmSync(other, { recursive: true, force: true })
+})
+
 test('vault.describe documents a key without a value', () => {
   const vault = load()
   vault.describe('DOCUMENTED', 'documented but unset', { tags: ['agents'] })

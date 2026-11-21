@@ -116,6 +116,14 @@ binding, doesn't check the record at all. Upgrade every murk component on
 each machine together. See the
 [threat model](/security/threat-model/#vault-signatures), limit 10.
 
+The removal rule lives in each machine's trust pin.
+`murk verify --signature-only` reads no pin, so it does not apply the removal
+rule or the group-membership rule. It trusts every signer in
+`MURK_TRUSTED_SIGNERS`. A pull-request check that uses it keeps accepting
+vaults the revoked teammate signs until you remove their entry. So when
+someone leaves, also remove their entry from `MURK_TRUSTED_SIGNERS` in CI and
+everywhere else it is set.
+
 Revoke on the main branch. A revoke on an unmerged branch does not change
 the vaults on main. Until you merge it, they are still a recipient on main
 and on each branch the revoke has not reached. There they can read every

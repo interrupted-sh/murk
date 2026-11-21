@@ -290,12 +290,54 @@ checks the signature, the signer and the save counter. Such a merge is often
 a fast-forward. To see what it changed, run `murk diff ORIG_HEAD` right after
 it (see [Reviewing a merge](#reviewing-a-merge)).
 
-Server-side merges (the GitHub web UI, merge queues) also do not run the
-driver. When both sides changed the vault, the text merge either conflicts or
-gives a vault that fails verification on the next load. murk never gives
-values from a vault that it cannot verify. So a bad server-side merge shows
-as a refusal, not as wrong values. Run the merge locally if both sides
-changed the vault.
+### Server-side merges
+
+The GitHub merge button and GitHub merge queues do not run the murk merge
+driver. They merge `.murk` as plain text. In the usual flow, only the pull
+request branch changed the vault. The button then takes that branch's
+`.murk` as it is, and the merge is correct.
+
+When the pull request branch and the base branch both changed the vault, the
+text merge conflicts, because each save rewrites the metadata and signature
+lines of the vault. GitHub then blocks the merge button. Do not resolve this
+conflict as text: not in the GitHub conflict editor, and not on your machine
+with `-X ours`, `-X theirs` or by picking hunks. A text resolution that mixes
+lines of both sides gives a `.murk` with no conflict markers that fails the
+murk integrity check. murk never gives values from a vault that it cannot
+verify: every load refuses it. So such a merge never gives wrong values. But
+when it reaches the base branch, every job and teammate that loads the vault
+fails there.
+
+A text resolution that keeps one whole side, such as `git checkout --ours
+.murk`, gives a vault that still verifies. It silently drops the vault
+changes of the other side. Neither a load nor the pull request check finds
+this. Keep one whole side only to redo the other side's changes with murk,
+as [Conflicts](#conflicts) describes.
+
+To merge a pull request when both sides changed the vault:
+
+1. On your machine, check out the pull request branch. If this clone does
+   not have the merge driver yet, run `murk setup-merge-driver`.
+2. Run `git fetch origin && git merge origin/main`. Use the name of the base
+   branch if it is not `main`. The murk merge driver merges the vault. If it
+   reports a conflict, resolve it as [Conflicts](#conflicts) tells you.
+3. Push the branch.
+4. Merge the pull request on GitHub. The base branch has not changed the
+   vault since your local merge, so the server-side merge takes the vault of
+   the branch as it is.
+
+If the branch already has a merge that resolved `.murk` as text, step 2
+reports that the branch is up to date, and the driver does not run. First
+remove that merge commit from the branch. When it is the last commit, run
+`git reset --hard HEAD~1` with no uncommitted changes. Then do step 2, push
+with `git push --force-with-lease`, and do step 4.
+
+To find a bad vault merge before it reaches the base branch, add the [pull
+request vault check](/guides/cicd/#check-the-vault-on-each-pull-request) of
+murk-action to your CI. It needs no key, so it also runs on pull requests
+from forks. It fails when the signature of the vault that a merge of the
+pull request gives does not verify, and it tells you to merge locally. It
+cannot find a merge that kept one whole side of the vault.
 
 ## Conflicts
 
