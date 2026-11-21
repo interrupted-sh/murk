@@ -13,7 +13,7 @@ R-I4-a	enforced	-	env_anchor	row_r_i4_a	tests/mutants/R-I4-a.patch	H1	A load anc
 R-I4-a:pre-upgrade	enforced	-	env_anchor	row_r_i4_a_pre_upgrade	tests/mutants/R-I4-a-pre-upgrade.patch	-	An environment-anchored load of a newer revision leaves the accepted 0.13 copy recorded in the pin as it was.
 R-I4-a:lineage	pending	lineage-load	env_anchor	row_r_i4_a_lineage	move the lineage reference for any env-trusted signer	-	An environment-anchored load never moves the lineage reference.
 R-I6-a	enforced	-	authenticity	row_r_i6_a	tests/mutants/R-I6-a.patch	-	A replayed older signed revision on a marked branch is refused as rolled back; the same file loads on a branch this machine never accepted.
-R-I6-b	enforced	-	trust_invariants	row_r_i6_b	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned same-id copy with a lower generation.
+R-I6-b	enforced	-	trust_invariants	row_r_i6_b	tests/mutants/R-I6-b.patch	-	A pinned non-signing machine refuses an unsigned same-id copy with a lower generation as rolled back.
 R-I6-c	enforced	-	trust_invariants	row_r_i6_c	tests/mutants/R-I6-c.patch	H3	A non-signing member's own unsigned save advances its branch mark, so a replay of the previous signed file is refused as rolled back.
 R-I6-d	pending	lineage-load	authenticity	row_r_i6_d	skip rule 10 in counter_refusal	H2	A genuine stale-fork revision with a counter above the mark is refused as not descending from the accepted revision.
 R-L-load	pending	lineage-load	trust_invariants	row_r_l_load	skip rule 10 in counter_refusal	H2	Stored-sequence form of R-I6-d: a stale-fork genuine file over main is refused, the rotated value kept.
@@ -27,10 +27,10 @@ R-I8-b:residual	control	lineage-load	authenticity	row_r_i8_b_residual	-	-	Stated
 R-I8-c:other	enforced	-	auth_matrix	row_r_i8_c_other	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses another vault's file.
 R-I8-c:older	enforced	-	auth_matrix	row_r_i8_c_older	tests/mutants/R-I8-c.patch	-	A pinless runner with MURK_EXPECTED_VAULT refuses a prod revision below the minimum generation.
 R-I8-c:fork	pending	lineage-load	auth_matrix	row_r_i8_c_fork	ignore the fp part of MURK_EXPECTED_VAULT	-	A pinless runner whose MURK_EXPECTED_VAULT names a revision refuses a stale fork above the minimum.
-R-I8-d	enforced	-	trust_invariants	row_r_i8_d	tests/mutants/R-I21-a.patch	-	A pinned non-signing machine refuses an unsigned file with another vault id.
+R-I8-d	enforced	-	trust_invariants	row_r_i8_d	tests/mutants/R-I8-d.patch	-	A pinned non-signing machine refuses an unsigned file with another vault id, naming the other vault.
 R-I8-e:a	enforced	-	authenticity	row_r_i8_e_a	tests/mutants/R-I8-e-a.patch	H3	murk trust of a byte copy of a pinned vault is refused and names both paths.
 R-I8-e:b	enforced	-	authenticity	row_r_i8_e_b	tests/mutants/R-I8-e-b.patch	-	A planted copy: the pinned path loads with a warning naming it, a fresh clone refuses until --shares-identity-with, the copy is always refused.
-R-I8-e:c	enforced	-	authenticity	row_r_i8_e_c	tests/mutants/R-I8-e-c.patch	-	A renamed vault path: every load before and after the rename is accepted.
+R-I8-e:c	enforced	-	authenticity	row_r_i8_e_c	tests/mutants/R-I8-e-c.patch	-	A renamed vault path: murk trust at the new path is accepted, and every load before and after the rename is accepted.
 R-I8-e:d	enforced	-	authenticity	row_r_i8_e_d	tests/mutants/R-I8-e-d.patch	-	murk trust --shares-identity-with retires the other path on a machine that recorded both.
 R-I9-a	enforced	-	authenticity	a_merge_never_upgrades_an_unaccepted_0_13_side	tests/mutants/R-I9-a-merge.patch	-	A merge never upgrades a 0.13 side this machine has not accepted.
 R-I9-a	enforced	-	authenticity	murk_trust_never_accepts_a_0_13_copy_on_a_detached_head	tests/mutants/R-I9-a-trust.patch	-	murk trust never accepts a 0.13 copy on a detached head of an upgraded branch.
@@ -76,6 +76,7 @@ R-I16-a	enforced	-	auth_matrix	row_r_i16_a	tests/mutants/R-I16-a.patch	H3	An exp
 R-I16-a:authorize	enforced	-	auth_matrix	row_r_i16_a_authorize	tests/mutants/R-I16-a-authorize.patch	H3	As R-I16-a, with the guard in circle authorize under test: it refuses the revoked grant key and names murk trust --re-add.
 R-I16-b:pinless	enforced	-	auth_matrix	row_r_i16_b_pinless	tests/mutants/R-I16-a.patch	-	A pinless runner refuses a vault listing a revoked grant key, by the vault's own revoked_grants.
 R-I16-b:p4	enforced	-	auth_matrix	row_r_i16_b_p4	tests/mutants/R-I16-b-p4.patch	-	A signer's save after murk trust of a pre-grant revision keeps the revoked grant key in revoked_grants, from the ids its machine saw.
+R-I16-b:no-sighting	enforced	-	auth_matrix	row_r_i16_b_no_sighting	tests/mutants/R-I16-b-event1.patch	-	A grant revoke on a machine that never saw the grant live (no pin, anchored by MURK_TRUSTED_SIGNERS) writes the key into revoked_grants, and a pinless runner refuses a revision that lists it.
 R-I16-b:p4-reset	enforced	-	authenticity	row_r_i16_b_p4_reset	tests/mutants/R-I16-b-p4-ancestor.patch	-	A save after a reset to before a grant this machine saw live on the branch (the commit checked out an ancestor of the sighting) gives the grant key a revocation id; a pinless runner refuses a revision that lists it.
 R-I16-c:recovery	control	grant-tombstone	authenticity	row_r_i16_c_recovery	-	-	After murk trust --re-add of a wrong revocation id, a revision that carries only that id loads with no new consent, and the next save leaves the key out of the set.
 R-I16-c:denial	enforced	-	authenticity	row_r_i16_c_denial	tests/mutants/R-I16-c-denial.patch	-	A re-add covers only the ids it showed: a revocation made elsewhere later (a new id) is kept by this machine's save, and a save that keeps the grant record is refused.

@@ -2424,6 +2424,7 @@ mod tests {
                 .unwrap();
             }
         });
+        eprintln!("ROW R-I5-race:save-removal DECISIVE");
         let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
             .unwrap_err()
             .to_string();
@@ -2455,6 +2456,7 @@ mod tests {
                 fs::write(&pin_file, bytes).unwrap();
             }
         });
+        eprintln!("ROW R-I5-race:limit DECISIVE");
         let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
             .unwrap_err()
             .to_string();
@@ -2508,6 +2510,7 @@ mod tests {
             seen.set(Some(got));
         });
         save_vault(&ps, &mut vault.clone(), &state, &changed).unwrap();
+        eprintln!("ROW R-I5-race:no-hold DECISIVE");
         assert_eq!(
             taken.get(),
             Some(true),
@@ -2535,6 +2538,7 @@ mod tests {
         let runs = before_publish(move |_| fs::write(&hook_ps, &checkout).unwrap());
         let mut third = changed.clone();
         third.values.insert("THIRD".into(), secret("value"));
+        eprintln!("ROW R-I5-race:vault-changed DECISIVE");
         let err = save_vault(&ps, &mut second.clone(), &changed, &third)
             .unwrap_err()
             .to_string();
@@ -2604,6 +2608,7 @@ mod tests {
             }
         });
         save_vault(&ps, &mut vault.clone(), &state, &changed).unwrap();
+        eprintln!("ROW R-I5-race:head DECISIVE");
         assert_eq!(runs.get(), 2, "the save decided again after HEAD moved");
     }
 
@@ -2626,6 +2631,7 @@ mod tests {
         let vp = vp.to_str().unwrap();
         let state = types::Murk::default();
         let refused = refuse_carried_removed_keys(vp, &vault, Some(&on_disk), &state, Some(&pin));
+        eprintln!("ROW R-I10-h:save DECISIVE");
         assert!(
             refused.is_err_and(|e| e.to_string().contains("refusing to save")),
             "a save over a file above the removal that lists bob is refused"
@@ -2687,6 +2693,7 @@ mod tests {
                 .unwrap();
             }
         });
+        eprintln!("ROW R-I5-race:save-tombstone DECISIVE");
         let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
             .unwrap_err()
             .to_string();

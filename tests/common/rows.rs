@@ -22,6 +22,9 @@
 //!
 //! Every row must reach its decisive step ([`Probe::reached`]) before any
 //! target check counts, so no row passes because its scenario never ran.
+//! Reaching it prints the row's [`decisive`] marker, which
+//! `tests/mutants/run.sh` requires in a failing row's output before it counts
+//! the row's mutant as caught: a row that fails in its setup proves nothing.
 
 // Each integration binary compiles this module; most use only part of it.
 #![allow(dead_code)]
@@ -120,9 +123,18 @@ pub fn row(id: &str) -> Row {
     row
 }
 
+/// Print the marker `ROW <id> DECISIVE` on stderr: the row reached the step
+/// its mutant must fail on. A row test that does not run through [`check`]
+/// calls this itself just before its decisive assertions. Keep the text in
+/// step with `tests/mutants/run.sh`.
+pub fn decisive(id: &str) {
+    eprintln!("ROW {id} DECISIVE");
+}
+
 /// What a row's scenario observed.
 #[derive(Debug, Default)]
 pub struct Probe {
+    id: String,
     reached: bool,
     target: Vec<(String, bool)>,
     today: Vec<(String, bool)>,
@@ -133,6 +145,9 @@ impl Probe {
     /// The decisive step ran: the attack (or the change under test) was made
     /// against a setup that the controls before it showed working.
     pub fn reached(&mut self) {
+        if !self.reached {
+            decisive(&self.id);
+        }
         self.reached = true;
     }
 
@@ -197,7 +212,10 @@ pub fn check(id: &str, scenario: impl FnOnce(&mut Probe) -> Result<(), String>) 
         }
         return;
     }
-    let mut probe = Probe::default();
+    let mut probe = Probe {
+        id: id.to_string(),
+        ..Probe::default()
+    };
     if pending {
         report_pending(&row, &mut probe, scenario);
         return;

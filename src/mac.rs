@@ -1112,6 +1112,7 @@ mod tests {
         let mut vault = legacy_vault();
         vault.secrets.get_mut("API_KEY").unwrap().grouped =
             BTreeMap::from([("prod".to_string(), "group-ct".to_string())]);
+        eprintln!("ROW M5:groups DECISIVE");
         assert_minimum_scheme(&vault, &BTreeMap::new(), &BTreeMap::new(), "blake3v4:");
         // Group membership alone needs the same scheme.
         let groups = BTreeMap::from([("prod".to_string(), vec!["age1abc".to_string()])]);
@@ -1131,6 +1132,7 @@ mod tests {
                 anchors: Vec::new(),
             },
         )]);
+        eprintln!("ROW M5:grants DECISIVE");
         assert_minimum_scheme(&legacy_vault(), &BTreeMap::new(), &grants, "blake3v5:");
     }
 
@@ -1140,6 +1142,7 @@ mod tests {
         vault.policy = Some(types::Policy {
             agent_allow_tags: vec!["agents".into()],
         });
+        eprintln!("ROW M5:policy DECISIVE");
         assert_minimum_scheme(&vault, &BTreeMap::new(), &BTreeMap::new(), "blake3v6:");
     }
 

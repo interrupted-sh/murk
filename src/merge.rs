@@ -3646,6 +3646,7 @@ mod tests {
         );
 
         let (ours, result, regenerated) = merge(&bob);
+        eprintln!("ROW R-I20-b:seeded DECISIVE");
         assert!(
             result
                 .conflicts
@@ -4303,6 +4304,7 @@ mod tests {
         let (output, written) =
             run_merge_driver_into(&base, &ours, &theirs, vault_path, &target).unwrap();
         assert_eq!(runs.get(), 1, "the first merge reached the publish");
+        eprintln!("ROW R-I5-race:merge DECISIVE");
         assert!(!written, "{:?}", output.result.conflicts);
         assert!(
             output.result.conflicts.iter().any(|c| c.field == "theirs"),
@@ -4399,6 +4401,7 @@ mod tests {
         let merged = crate::types::Meta::default();
 
         let revoked = merged_revoked_grants(&merged, [&ours, &theirs], None);
+        eprintln!("ROW R-I16-e DECISIVE");
         assert!(
             revoked.get(&g).is_some_and(|ids| ids.len() == 1),
             "the dropped grant gets a new revocation id: {revoked:?}"
@@ -4429,6 +4432,7 @@ mod tests {
         let mut conflicts = Vec::new();
         let merged = merge_meta_two_way(&ours, &theirs, &mut conflicts);
         assert!(conflicts.is_empty(), "{conflicts:?}");
+        eprintln!("ROW R-I11-d:tombstone DECISIVE");
         assert_eq!(
             merged.revoked_grants, theirs.revoked_grants,
             "the two-way merge keeps theirs' revocation id"
@@ -4514,6 +4518,7 @@ mod tests {
             ..Default::default()
         };
         let conflict = revoked_grant_conflict(&merged, &with_record, ".murk");
+        eprintln!("ROW R-I11-f:c-v3 DECISIVE");
         assert!(
             conflict
                 .as_ref()
