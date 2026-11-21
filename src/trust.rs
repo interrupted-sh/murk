@@ -2694,17 +2694,29 @@ pub fn ancestor_verdict(
     )
 }
 
+/// Why this machine would refuse a merge result (see
+/// [`merge_result_refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRefusal {
+    /// The refusal's first line.
+    pub reason: String,
+    /// The signer whose signing key this machine has not confirmed, when
+    /// that is the refusal (canonical). The merge driver compares it with
+    /// the merging key: its own key is confirmed by one ordinary save.
+    pub unconfirmed_signer: Option<String>,
+}
+
 /// The refusal a load of a merge result would get on this machine, if any:
 /// the full load verdict with the pin as it is, the environment's anchor and
 /// `MURK_EXPECTED_VAULT`, at the checkout being merged into. The merge driver
-/// signs a result only when this is `None`. Returns the refusal's first line.
-/// A grant this machine holds as revoked is the merge's own result check
-/// (`merge.rs`), which runs before the result is signed; here the tombstone
-/// rule refuses only a plain recipient, as on any load.
+/// signs a result only when this is `None`. A grant this machine holds as
+/// revoked is the merge's own result check (`merge.rs`), which runs before
+/// the result is signed; here the tombstone rule refuses only a plain
+/// recipient, as on any load.
 pub fn merge_result_refusal(
     vault_path: &str,
     merged: &Loaded<'_>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ResultRefusal>, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
     let expected = env_expected_vault()?;
@@ -2720,7 +2732,15 @@ pub fn merge_result_refusal(
         ) {
             Verdict::Refused(r) => {
                 let msg = refusal_message(vault_path, &r, merged, pin.as_ref());
-                Some(msg.lines().next().unwrap_or_default().to_string())
+                Some(ResultRefusal {
+                    reason: msg.lines().next().unwrap_or_default().to_string(),
+                    unconfirmed_signer: match &r {
+                        Refusal::UnconfirmedSignerKey { signer, .. } => {
+                            Some(canonical_recipient(signer).into_owned())
+                        }
+                        _ => None,
+                    },
+                })
             }
             Verdict::Trusted | Verdict::UnsignedAllowed => None,
         },

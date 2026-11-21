@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -593,7 +593,7 @@
+     let sidecar = parse_sidecar(&pin_file, Some(contents), "")?;
+     let same_vault = crate::vault::read(Path::new(vault_path))
+         .is_ok_and(|v| !v.vault_id.is_empty() && v.vault_id == sidecar.vault_id);
+-    if !sidecar.records_state() || !same_vault {
++    if sidecar.removals.is_empty() || !same_vault {
+         return Ok(None);
+     }
+     let mut pin = TrustPin {

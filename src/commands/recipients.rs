@@ -183,12 +183,14 @@ pub(crate) fn cmd_authorize(
         // Read SSH public key from a file.
         let path = if path_hint.is_empty() {
             // Default: ~/.ssh/id_ed25519.pub
-            let home = std::env::var("HOME").unwrap_or_else(|_| die(&"HOME not set", 1));
-            std::path::PathBuf::from(home).join(".ssh/id_ed25519.pub")
+            murk_cli::home_dir()
+                .unwrap_or_else(|| die(&"HOME is unset, empty or not an absolute path", 1))
+                .join(".ssh/id_ed25519.pub")
         } else {
             if path_hint.starts_with('~') {
-                let home = std::env::var("HOME").unwrap_or_else(|_| die(&"HOME not set", 1));
-                std::path::PathBuf::from(path_hint.replacen('~', &home, 1))
+                let home = murk_cli::home_dir()
+                    .unwrap_or_else(|| die(&"HOME is unset, empty or not an absolute path", 1));
+                std::path::PathBuf::from(path_hint.replacen('~', &home.to_string_lossy(), 1))
             } else {
                 std::path::PathBuf::from(path_hint)
             }

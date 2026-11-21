@@ -728,7 +728,7 @@ The common ancestor must pass its MAC and signature checks. Then it is an author
 - its signer is in this machine's current trusted set (or `MURK_TRUSTED_SIGNERS`), and was not recorded as removed
 - it is the same vault as the pin and both sides.
 
-With an authority, the merge is three-way. Without one, the merge is two-way: every difference between ours and theirs is a conflict, the merge keeps ours, and nothing is signed. An unsigned, forged or unreadable ancestor, and one that a removed member signed, therefore cannot decide what counts as a change. The one exception is a merge where ours and theirs are both murk 0.13 files: it merges three-way over the ancestor as it is.
+With an authority, the merge is three-way. Without one, the merge is two-way: every difference between ours and theirs is a conflict, and the merge keeps ours and signs nothing. A two-way merge with no differences (its content equals ours) is clean, and the merging key signs it. An unsigned, forged or unreadable ancestor, and one that a removed member signed, therefore cannot decide what counts as a change. The one exception is a merge where ours and theirs are both murk 0.13 files: it merges three-way over the ancestor as it is.
 
 The keyed merge then checks ours and theirs the way a load does:
 

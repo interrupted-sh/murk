@@ -68,7 +68,7 @@ pub use agent::{AgentPlan, AgentPlanKey, agent_plan, format_agent_plan_text};
 pub use dotenv::parse_env;
 pub use env::{
     EnvrcStatus, KeySource, StagedKeyFile, UncommittedKeyFile, agent_key_file_path, agent_keys_dir,
-    dotenv_has_murk_key, env_permission_warning, home_short, key_file_path, locate_key,
+    dotenv_has_murk_key, env_permission_warning, home_dir, home_short, key_file_path, locate_key,
     resolve_key, resolve_key_for_vault, resolve_key_with_source, secret_file_loose_mode,
     stage_key_file, strip_key_env, write_envrc, write_key_ref_to_dotenv, write_key_to_dotenv,
     write_key_to_file,
@@ -495,8 +495,6 @@ pub fn read_vault(vault_path: &str) -> Result<types::Vault, MurkError> {
 /// Explicit paths (absolute, or containing `/` or `\`) are returned unchanged — the user
 /// told us exactly where to look, so don't second-guess them.
 pub fn resolve_vault_path(arg: &str) -> String {
-    use std::path::PathBuf;
-
     // Explicit path: no traversal.
     if arg.is_empty() || arg.contains('/') || arg.contains('\\') || Path::new(arg).is_absolute() {
         return arg.to_string();
@@ -517,10 +515,7 @@ pub fn resolve_vault_path(arg: &str) -> String {
     // spelling it was entered by (an 8.3 short name, say), and a canonical
     // HOME is a verbatim `\\?\` path, so neither would ever match HOME.
     let cwd = crate::git::real_dir(&cwd).unwrap_or(cwd);
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .map(|h| crate::git::real_dir(&h).unwrap_or(h));
+    let home = crate::env::home_dir().map(|h| crate::git::real_dir(&h).unwrap_or(h));
     let is_boundary =
         |dir: &Path| dir.join(".git").exists() || home.as_deref().is_some_and(|h| dir == h);
     let Some(boundary) = cwd.ancestors().find(|dir| is_boundary(dir)) else {

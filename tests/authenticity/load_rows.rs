@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use super::common::rows::{self, Probe};
 use super::{
     BobWroteMain, Machine, agent_get, alice_repo, commit, git, git_ok, granted_repo, head_commit,
-    pin_dir,
+    mallory_vault, pin_dir,
 };
 
 /// What one murk (or other) command did.
@@ -1768,6 +1768,151 @@ fn row_r_i5_readonly_pin() {
 #[test]
 fn row_r_i5_readonly_pin_order() {
     readonly_pin_fails_closed("R-I5-readonly:pin-order");
+}
+
+/// With `HOME` set to an empty or a relative path, murk uses no key store:
+/// such a HOME resolves against the working directory, so a key file
+/// committed in the checkout must never be read, and `murk init` must never
+/// store a secret key there. The vault is anchored by MURK_TRUSTED_SIGNERS,
+/// so only the key decides whether the read succeeds.
+#[test]
+fn row_r_i5_home_key_store() {
+    rows::check("R-I5-home:key-store", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let (entry, _) = machine.signer_entry(&repo);
+        commit(&repo, "alice's vault");
+        // alice's stored key, at the path a relative HOME would read it from.
+        let planted = repo.join(".config").join("murk").join("keys");
+        fs::create_dir_all(&planted).unwrap();
+        let keys = machine.home.join(".config").join("murk").join("keys");
+        for entry in fs::read_dir(&keys).unwrap() {
+            let path = entry.unwrap().path();
+            fs::copy(&path, planted.join(path.file_name().unwrap())).unwrap();
+        }
+        let keyless = |dir: &Path, home: &str, args: &[&str], stdin: &str| {
+            let mut cmd = machine.murk(dir);
+            cmd.env("HOME", home)
+                .env("MURK_TRUSTED_SIGNERS", &entry)
+                .args(args)
+                .write_stdin(stdin.to_string());
+            out(cmd)
+        };
+        let control = keyless(
+            &repo,
+            machine.home.to_str().unwrap(),
+            &["get", "DB_URL"],
+            "",
+        );
+        p.require(
+            control.ok && control.stdout.contains("prod-db"),
+            format!("the stored key reads with a real HOME: {}", control.said()),
+        )?;
+
+        let fresh = base.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        git_ok(&fresh, &["init", "-q", "-b", "main"]);
+        let init = keyless(&fresh, "", &["init"], "eve\n");
+        let empty = keyless(&repo, "", &["get", "DB_URL"], "");
+        let relative = keyless(&repo, ".", &["get", "DB_URL"], "");
+        p.reached();
+        p.note(init.said());
+        p.note(empty.said());
+        p.note(relative.said());
+        p.target(
+            !fresh.join(".config").exists(),
+            "murk init with an empty HOME stores no key in the checkout",
+        );
+        for (label, run) in [("empty", &empty), ("relative", &relative)] {
+            p.target(
+                !run.ok && !run.stdout.contains("prod-db"),
+                format!("with a {label} HOME, the key planted in the checkout is not read"),
+            );
+            p.target(
+                run.stderr.matches("not an absolute path").count() == 1,
+                format!("with a {label} HOME, one warning names HOME"),
+            );
+        }
+        Ok(())
+    });
+}
+
+/// With `HOME` set to an empty or a relative path, murk keeps no trust pin:
+/// such a HOME resolves against the working directory, so a pin committed
+/// in the checkout must not become the trust anchor. A `murk trust` there
+/// writes nothing into the checkout, and a pin planted in the checkout that
+/// trusts Mallory does not let her vault load: it is refused as on a
+/// machine with no pin, with one warning that names HOME.
+#[test]
+fn row_r_i5_home_relative() {
+    rows::check("R-I5-home:relative", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let alice = Person::of(machine);
+        commit(&repo, "alice's vault");
+        let with_home = |home: &str, args: &[&str]| {
+            let mut cmd = alice.murk(&repo);
+            cmd.env("HOME", home).args(args);
+            out(cmd)
+        };
+
+        let trust = with_home("", &["trust", "--yes"]);
+        p.note(trust.said());
+        let trust_wrote = repo.join(".config").exists();
+        if trust_wrote {
+            fs::remove_dir_all(repo.join(".config")).unwrap();
+        }
+
+        // Mallory's vault lists alice; the pin a normal HOME would write for
+        // it (the file name depends only on the repository) is planted in the
+        // checkout, where an empty or relative HOME would look for it.
+        let forged = mallory_vault(
+            base.path(),
+            &[("alice", alice.machine.pubkey())],
+            &[("DB_URL", "evil")],
+        );
+        fs::copy(&forged, repo.join(".murk")).unwrap();
+        let planter = Person::new(base.path(), "planter", &alice.key);
+        let planted = planter.trust(&repo, ".murk");
+        p.require(planted.ok, format!("the pin to plant: {}", planted.said()))?;
+        let planted_dir = repo.join(".config").join("murk").join("signer-pins");
+        fs::create_dir_all(&planted_dir).unwrap();
+        for entry in fs::read_dir(pin_dir(&planter.machine)).unwrap() {
+            let path = entry.unwrap().path();
+            fs::copy(&path, planted_dir.join(path.file_name().unwrap())).unwrap();
+        }
+        commit(&repo, "mallory's vault and pin");
+        let control = planter.get(&repo, ".murk", "DB_URL");
+        p.require(
+            control.stdout.contains("evil"),
+            "the planted pin trusts Mallory where it is read",
+        )?;
+
+        let empty = with_home("", &["get", "DB_URL"]);
+        let relative = with_home(".", &["get", "DB_URL"]);
+        p.reached();
+        p.note(empty.said());
+        p.note(relative.said());
+        p.target(
+            !trust_wrote,
+            "murk trust with an empty HOME writes nothing into the checkout",
+        );
+        for (label, run) in [("empty", &empty), ("relative", &relative)] {
+            p.target(
+                !run.ok && !run.stdout.contains("evil"),
+                format!("with a {label} HOME, Mallory's vault is refused"),
+            );
+            p.target(
+                run.stderr.contains("not trusted on this machine"),
+                format!("with a {label} HOME, the refusal is the no-pin one"),
+            );
+            p.target(
+                run.stderr.matches("not an absolute path").count() == 1,
+                format!("with a {label} HOME, one warning names HOME"),
+            );
+        }
+        Ok(())
+    });
 }
 
 /// A repo where `main` and `side` each added a key since they forked, both

@@ -141,14 +141,16 @@ pub(crate) fn cmd_merge_driver(
         for line in &ours_unchanged {
             eprintln!("  {line}");
         }
-        if matches!(refused.field.as_str(), "base" | "theirs" | "vault_id") {
-            eprintln!(
+        match refused.field.as_str() {
+            "base" | "theirs" | "vault_id" => eprintln!(
                 "  to finish: keep ours (git checkout --ours -- {arg}), then make the intended change with murk. Do not take the refused input"
-            );
-        } else {
-            eprintln!(
+            ),
+            "first_write" => eprintln!(
+                "  to finish: this machine has not confirmed your own signing key yet; your first save of this vault here confirms it. Abort the merge (git merge --abort), make one ordinary save (for example `murk describe KEY \"...\"`), commit it, then merge again"
+            ),
+            _ => eprintln!(
                 "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
-            );
+            ),
         }
         process::exit(1);
     }

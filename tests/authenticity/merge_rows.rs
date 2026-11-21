@@ -2372,6 +2372,13 @@ fn row_r_i12_a_first_write() {
             "the driver says this machine would refuse the result",
         );
         p.target(
+            merged.stderr.contains("not confirmed your own signing key")
+                && merged.stderr.contains("make one ordinary save")
+                && merged.stderr.contains("then merge again")
+                && !merged.stderr.contains("redo their changes"),
+            "the driver names the way out: one ordinary save, commit, merge again",
+        );
+        p.target(
             merged.file == ours,
             "the working file is ours, byte for byte",
         );

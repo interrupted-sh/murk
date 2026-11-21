@@ -700,8 +700,22 @@ fn refuse_revoked_grants(
     } else {
         "lists"
     };
+    // Ids the vault itself records came with this revision. With none of
+    // them here, this machine saw the revocation in another revision: most
+    // often a branch that revokes the grant and has not been merged here.
+    let own: BTreeSet<&String> = original
+        .revoked_grants
+        .iter()
+        .filter(|(k, _)| crate::recipients::canonical_recipient(k) == key.as_str())
+        .flat_map(|(_, ids)| ids)
+        .collect();
+    let elsewhere = if ids.iter().any(|id| own.contains(id)) {
+        ""
+    } else {
+        "\nthis revision does not record the revocation: this machine saw it in another revision of the vault, usually on a branch that revokes the grant and is not merged here yet. Merge the branch that revokes the grant first, then save"
+    };
     Err(MurkError::Secret(format!(
-        "refusing to save: this vault {what} {}, an agent grant that this machine holds as revoked (revocation ids {}). An agent grant that was revoked never reads this vault again\nnothing was written\nif it was revoked by mistake, review it and run `murk trust --vault {vault_path} --re-add {key}`",
+        "refusing to save: this vault {what} {}, an agent grant that this machine holds as revoked (revocation ids {}). An agent grant that was revoked never reads this vault again\nnothing was written{elsewhere}\nonly to undo a revoke made by mistake: review it and run `murk trust --vault {vault_path} --re-add {key}`",
         crate::trust::label(&current.recipients, &key),
         crate::trust::show_ids(ids.iter())
     )))

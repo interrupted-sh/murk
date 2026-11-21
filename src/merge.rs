@@ -25,7 +25,8 @@ impl MergeConflict {
     /// theirs), the sides are different vaults, the pin cannot be read, the
     /// merged counter would pass the limit, a side is a murk 0.13 file this
     /// machine has not accepted (see [`crate::trust::pre_upgrade_read_only`]),
-    /// or this machine would refuse the signed result.
+    /// or this machine would refuse the signed result (`first_write` when
+    /// the reason is that it has not confirmed its own signing key).
     pub fn writes_nothing(&self) -> bool {
         matches!(
             self.field.as_str(),
@@ -37,6 +38,7 @@ impl MergeConflict {
                 | "generation"
                 | "pre_upgrade"
                 | "result"
+                | "first_write"
         )
     }
 }
@@ -1328,12 +1330,20 @@ fn regenerate_meta(
     // and `murk trust`. The signature covers the finished file, so it comes last.
     merged.sig = crate::sign_vault(merged, identity);
     if merged.sig.is_some()
-        && let Some(reason) = result_refusal(vault_path, merged, identity)?
+        && let Some(refusal) = result_refusal(vault_path, merged, identity)?
     {
+        // An unconfirmed signing key of the merging key itself means this
+        // machine has never saved this vault: one ordinary save confirms it.
+        let own = identity
+            .pubkey_string()
+            .ok()
+            .map(|k| crate::recipients::canonical_recipient(&k).into_owned());
+        let first_write = refusal.unconfirmed_signer.is_some() && refusal.unconfirmed_signer == own;
         conflicts.push(MergeConflict {
-            field: "result".into(),
+            field: if first_write { "first_write" } else { "result" }.into(),
             reason: format!(
-                "this machine would refuse the merged vault, so murk does not sign it: {reason}"
+                "this machine would refuse the merged vault, so murk does not sign it: {}",
+                refusal.reason
             ),
         });
         *merged = ours.clone();
@@ -1378,7 +1388,7 @@ fn result_refusal(
     vault_path: &str,
     merged: &Vault,
     identity: &crate::crypto::MurkIdentity,
-) -> Result<Option<String>, String> {
+) -> Result<Option<crate::trust::ResultRefusal>, String> {
     let verified = crate::load::verify_side(merged, identity)
         .map_err(|e| format!("the merged vault does not verify: {e}"))?;
     let loaded = crate::trust::Loaded {

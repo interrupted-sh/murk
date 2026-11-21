@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -740,7 +740,7 @@
+ /// murk then reads and writes no pin, as with no `HOME` at all.
+ fn pin_dir() -> Option<PathBuf> {
+     Some(
+-        crate::env::home_dir()?
++        PathBuf::from(std::env::var_os("HOME")?)
+             .join(".config")
+             .join("murk")
+             .join("signer-pins"),

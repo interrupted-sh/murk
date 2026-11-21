@@ -213,6 +213,33 @@ pub struct Sidecar {
     pub members_at_mark: BTreeMap<String, BTreeSet<String>>,
 }
 
+impl Sidecar {
+    /// Whether the sidecar records any trust state: a field past its
+    /// identity (`v`, `vault_id`, `repo_dir`, `path`) that is not empty.
+    fn records_state(&self) -> bool {
+        let Self {
+            v: _,
+            vault_id: _,
+            repo_dir: _,
+            path: _,
+            identity_siblings,
+            deleted_groups,
+            removals,
+            revoked_grants_seen,
+            readmitted_grants,
+            grants_live_on,
+            members_at_mark,
+        } = self;
+        !(identity_siblings.is_empty()
+            && deleted_groups.is_empty()
+            && removals.is_empty()
+            && revoked_grants_seen.is_empty()
+            && readmitted_grants.is_empty()
+            && grants_live_on.is_empty()
+            && members_at_mark.is_empty())
+    }
+}
+
 /// One removal record as the sidecar keeps it (see [`Sidecar::removals`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalRecord {
@@ -399,11 +426,10 @@ pub fn pin_writes_off() -> bool {
 }
 
 /// Whether a trust pin can be stored on this machine — false when opted out
-/// ([`pin_writes_off`]) or when there is no home directory. A pin that
-/// already exists is still read under the opt-out.
+/// ([`pin_writes_off`]) or when there is no usable home directory (see
+/// [`pin_dir`]). A pin that already exists is still read under the opt-out.
 pub fn signer_pin_available() -> bool {
-    !pin_writes_off()
-        && (std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some())
+    !pin_writes_off() && pin_dir().is_some()
 }
 
 /// The pin file a write goes to, or why no pin can be written.
@@ -551,12 +577,15 @@ fn parse_raw(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin>, String>
 
 /// The pin for `vault_path` when its pin file is missing but its sidecar is
 /// not. No murk version deletes a pin file, so a missing one is the user's
-/// own act, and the removal records must not go with it. When the sidecar's
-/// vault id is the id of the vault file at `vault_path`, the result is a pin
-/// with no trust decision that holds only the sidecar's removal records: a
-/// load needs `murk trust` as on a new machine, and that names each removed
-/// key the vault lists. A sidecar of another vault, or with no records,
-/// applies to nothing.
+/// own act (the advice for a corrupt pin), and what the sidecar records must
+/// not go with it: removal records, grant revocations seen and re-admitted,
+/// grant sightings, deleted groups. When the sidecar's vault id is the id of
+/// the vault file at `vault_path`, the result is a pin with no trust
+/// decision that holds the sidecar and its removal records: a load needs
+/// `murk trust` as on a new machine, which names each removed key and
+/// revoked grant the vault lists, and the next pin write keeps the sidecar's
+/// fields. A sidecar of another vault, or that records nothing, applies to
+/// nothing.
 fn sidecar_without_pin(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin>, String> {
     let (Some(contents), Some(pin_file)) = (&raw.sidecar, pin_path(vault_path)) else {
         return Ok(None);
@@ -564,7 +593,7 @@ fn sidecar_without_pin(vault_path: &str, raw: &RawPin) -> Result<Option<TrustPin
     let sidecar = parse_sidecar(&pin_file, Some(contents), "")?;
     let same_vault = crate::vault::read(Path::new(vault_path))
         .is_ok_and(|v| !v.vault_id.is_empty() && v.vault_id == sidecar.vault_id);
-    if sidecar.removals.is_empty() || !same_vault {
+    if !sidecar.records_state() || !same_vault {
         return Ok(None);
     }
     let mut pin = TrustPin {
@@ -704,13 +733,14 @@ pub fn remove(pin_file: &Path) -> Result<(), String> {
         })
 }
 
-/// The directory that holds the pins: `~/.config/murk/signer-pins`.
+/// The directory that holds the pins: `~/.config/murk/signer-pins`. `None`
+/// when there is no usable home directory (see [`crate::env::home_dir`]): an
+/// empty or relative `HOME` would put the pin inside the checkout, where a
+/// pin committed to the repository would become this machine's trust anchor.
+/// murk then reads and writes no pin, as with no `HOME` at all.
 fn pin_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
     Some(
-        Path::new(&home)
+        crate::env::home_dir()?
             .join(".config")
             .join("murk")
             .join("signer-pins"),
@@ -1959,6 +1989,53 @@ mod tests {
             vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
             std::fs::write(&vault_file, serde_json::to_string(&vault).unwrap()).unwrap();
             assert_eq!(read(vp).unwrap(), None, "another vault's file reads no pin");
+        });
+    }
+
+    #[test]
+    fn row_r_l_oldpin_no_pin_l1() {
+        // The pin file is gone, its sidecar is not, and the sidecar holds
+        // grant state but no removal record. The grant state still applies,
+        // and the next pin write keeps it.
+        with_home(|home| {
+            let dir = Path::new(home).join("proj");
+            std::fs::create_dir_all(&dir).unwrap();
+            let vault_file = dir.join(".murk");
+            let vp = vault_file.to_str().unwrap();
+            let mut vault = crate::testutil::empty_vault();
+            vault.vault_id = "00112233445566778899aabbccddeeff".into();
+            std::fs::write(&vault_file, serde_json::to_string(&vault).unwrap()).unwrap();
+            let seen = BTreeMap::from([(BOB.to_string(), BTreeSet::from(["id-1".to_string()]))]);
+            let pin = TrustPin {
+                v: PIN_VERSION,
+                vault_id: "00112233445566778899aabbccddeeff".into(),
+                trusted: BTreeSet::from(["age1alice".to_string()]),
+                sidecar: Sidecar {
+                    revoked_grants_seen: seen.clone(),
+                    ..Sidecar::default()
+                },
+                ..TrustPin::default()
+            };
+            write(vp, &pin).unwrap();
+            let pin_file = pin_path(vp).unwrap();
+            std::fs::remove_file(&pin_file).unwrap();
+
+            eprintln!("ROW R-L-oldpin:no-pin-l1 DECISIVE");
+            let read_back = read(vp).unwrap().expect("the sidecar applies");
+            assert_eq!(read_back.sidecar.revoked_grants_seen, seen);
+            assert!(!read_back.has_trust(), "no trust decision comes with it");
+
+            update(vp, |fresh| {
+                let mut next = fresh.cloned().expect("the sidecar applies under the lock");
+                next.trusted = BTreeSet::from(["age1alice".to_string()]);
+                Ok(Some(next))
+            })
+            .unwrap();
+            assert_eq!(
+                sidecar_on_disk(&pin_file).map(|s| s.revoked_grants_seen),
+                Some(seen),
+                "the next pin write keeps the grant state"
+            );
         });
     }
 
