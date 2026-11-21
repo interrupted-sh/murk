@@ -1,11 +1,11 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -676,7 +676,7 @@
-     match lists_key(commit) {
-         Some(false) => true,
-         None => false,
--        Some(true) => on.iter().any(|branch| {
-+        Some(true) => true || on.iter().any(|branch| {
-             crate::git::branch_tip(dir, branch).is_some_and(|tip| {
-                 tip != *commit
-                     && crate::git::is_ancestor(dir, &tip, "HEAD")
+@@ -688,7 +688,7 @@
+         && match lists_key(commit) {
+             Some(false) => true,
+             None => false,
+-            Some(true) => on.iter().any(|branch| {
++            Some(true) => true || on.iter().any(|branch| {
+                 crate::git::branch_tip(dir, branch).is_some_and(|tip| {
+                     tip != *commit
+                         && crate::git::is_ancestor(dir, &tip, "HEAD")

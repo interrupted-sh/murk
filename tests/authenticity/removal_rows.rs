@@ -699,36 +699,433 @@ fn row_r_i10_h_pr_flow_unmerged() {
     });
 }
 
-/// Stated limit: where git cannot show the removal in HEAD's history — a
-/// shallow boundary that hides it, or the branch the removal was saved on
-/// deleted since — the removal applies where it did by name alone, so the
-/// pull-request scene's replay loads on main.
+/// Stated limit: where git cannot show the removal in HEAD's history — here
+/// a shallow boundary at main's tip after a squash merge hides both the
+/// removal commit and the squash's parent — the removal applies where it did
+/// by name alone, so the pull-request scene's replay loads on main. It is
+/// never silent: stderr says the history could not be checked and that the
+/// removal was not applied.
 #[test]
 fn row_r_i10_h_pr_flow_unknown() {
     check("R-I10-h:pr-flow-unknown", |p: &mut Probe| {
         let s = Scene::new();
         let stale = pr_flow_scene(&s);
-        merge_pr_then_replay(&s, &stale);
+        merge_pr_as(&s, PrMerge::Squash { delete: true });
+        put(&s.repo, &stale, "pr: change");
         let shallow = s.repo.join(".git").join("shallow");
         fs::write(&shallow, format!("{}\n", head_commit(&s.repo))).unwrap();
         let get = s.run(&s.alice, &["get", "DB_URL"]);
         p.reached();
-        p.note(format!("shallow: {}", text(&get.stderr).trim()));
+        let stderr = text(&get.stderr);
+        p.note(format!("shallow: {}", stderr.trim()));
         p.target(
             get.status.success() && text(&get.stdout).contains("prod-db"),
             "behind a shallow boundary the replay loads (the stated limit)",
+        );
+        p.target(
+            stderr.contains("history not available to check")
+                && stderr.contains(&format!(
+                    "the removal of {} was not applied on this branch",
+                    s.bob.pubkey()
+                )),
+            "stderr says the history could not be checked and the removal was not applied",
         );
         fs::remove_file(&shallow).unwrap();
         p.target(
             !s.run(&s.alice, &["get", "DB_URL"]).status.success(),
             "with the full history the same load is refused",
         );
-        git_ok(&s.repo, &["branch", "-q", "-D", "revoke-bob"]);
+        Ok(())
+    });
+}
+
+/// The cap on the history walk: after the squash merge of the pull request,
+/// main gets more than 1000 further commits that change the vault file (here
+/// only its trailing whitespace), and the stale fork is committed on top.
+/// The drop is past the newest 1000 revisions, so the removal is not applied
+/// on main and the replay loads (the stated limit), but never silently:
+/// stderr says the history was too long to check and that the removal of
+/// bob was not applied on this branch.
+#[test]
+fn row_r_i10_h_pr_flow_cap() {
+    check("R-I10-h:pr-flow-cap", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = pr_flow_scene(&s);
+        merge_pr_as(&s, PrMerge::Squash { delete: true });
+        let squashed = working(&s.repo);
+        let mut stream = Vec::new();
+        for i in 1..=1001 {
+            let mut file = squashed.clone();
+            file.extend(std::iter::repeat_n(b' ', i));
+            stream.extend(
+                format!(
+                    "commit refs/heads/main\ncommitter t <t@t> {i} +0000\ndata 4\nfill\n{}M 100644 inline .murk\ndata {}\n",
+                    if i == 1 { "from refs/heads/main^0\n" } else { "" },
+                    file.len()
+                )
+                .into_bytes(),
+            );
+            stream.extend(file);
+            stream.push(b'\n');
+        }
+        let mut import = std::process::Command::new("git")
+            .args(["fast-import", "--quiet", "--force"])
+            .current_dir(&s.repo)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            import.stdin.take().unwrap().write_all(&stream).unwrap();
+        }
+        p.require(import.wait().unwrap().success(), "git fast-import ran")?;
+        git_ok(&s.repo, &["reset", "-q", "--hard", "main"]);
+        put(&s.repo, &stale, "pr: change");
         let get = s.run(&s.alice, &["get", "DB_URL"]);
-        p.note(format!("branch deleted: {}", text(&get.stderr).trim()));
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on main: {}", stderr.trim()));
+        p.target(
+            stderr.contains("history too long to check")
+                && stderr.contains(&format!(
+                    "the removal of {} was not applied on this branch",
+                    s.bob.pubkey()
+                )),
+            "stderr says the history was too long to check and the removal was not applied",
+        );
+        p.target(
+            stderr.matches("history too long to check").count() == 1,
+            "the warning prints once in the process",
+        );
+        let stdout = text(&get.stdout);
+        p.target(
+            get.status.success() && stdout.trim() == "prod-db",
+            format!("past the cap the replay loads (the stated limit) and stdout holds only the value: {stdout:?}"),
+        );
+        Ok(())
+    });
+}
+
+/// How the pull request that revokes bob reaches main.
+#[derive(Clone, Copy)]
+enum PrMerge {
+    /// GitHub's squash merge: one new commit on main; the topic branch kept
+    /// or deleted.
+    Squash { delete: bool },
+    /// A squash merge of a topic branch that also authorizes another member
+    /// (dave) after the revoke, which also rotated a value: the squash
+    /// commit changes values and other recipients besides dropping bob.
+    SquashWithChanges,
+    /// A fast-forward, then the topic branch deleted.
+    FastForwardDeleted,
+    /// A fast-forward, then the topic branch renamed.
+    FastForwardRenamed,
+    /// A fast-forward, then more work on the topic branch, so its tip is no
+    /// longer in main's history.
+    FastForwardMovedOn,
+    /// GitHub's rebase merge: main has moved on, and the revoke is replayed
+    /// onto it as a new commit; the topic branch is kept.
+    Rebase,
+}
+
+/// Merge `revoke-bob` into main (checked out) as `how` says.
+fn merge_pr_as(s: &Scene, how: PrMerge) {
+    match how {
+        PrMerge::Squash { delete } => {
+            git_ok(&s.repo, &["merge", "-q", "--squash", "revoke-bob"]);
+            commit(&s.repo, "revoke bob (#1)");
+            if delete {
+                git_ok(&s.repo, &["branch", "-q", "-D", "revoke-bob"]);
+            }
+        }
+        PrMerge::SquashWithChanges => {
+            let dave = Machine::new(&s.base, "dave");
+            dave.init(&s.base.join("dave-scratch"), "dave");
+            git_ok(&s.repo, &["checkout", "-q", "revoke-bob"]);
+            authorize(&s.alice, &s.repo, &dave, "dave");
+            commit(&s.repo, "authorize dave");
+            git_ok(&s.repo, &["checkout", "-q", "main"]);
+            merge_pr_as(s, PrMerge::Squash { delete: true });
+        }
+        PrMerge::FastForwardDeleted => {
+            git_ok(&s.repo, &["merge", "-q", "--ff-only", "revoke-bob"]);
+            git_ok(&s.repo, &["branch", "-q", "-D", "revoke-bob"]);
+        }
+        PrMerge::FastForwardRenamed => {
+            git_ok(&s.repo, &["merge", "-q", "--ff-only", "revoke-bob"]);
+            git_ok(&s.repo, &["branch", "-q", "-m", "revoke-bob", "rb-merged"]);
+        }
+        PrMerge::FastForwardMovedOn => {
+            git_ok(&s.repo, &["merge", "-q", "--ff-only", "revoke-bob"]);
+            git_ok(&s.repo, &["checkout", "-q", "revoke-bob"]);
+            fs::write(s.repo.join("NOTES"), "more work on the topic\n").unwrap();
+            commit(&s.repo, "topic: more work");
+            git_ok(&s.repo, &["checkout", "-q", "main"]);
+        }
+        PrMerge::Rebase => {
+            fs::write(s.repo.join("NOTES"), "main moved on\n").unwrap();
+            commit(&s.repo, "main: notes");
+            git_ok(
+                &s.repo,
+                &["-c", "commit.gpgsign=false", "cherry-pick", "revoke-bob"],
+            );
+        }
+    }
+}
+
+/// The pull-request scene merged into main as `how` says, then the stale
+/// fork committed on main: no commit of alice's revoke is in main's history
+/// (or its branch is gone), yet main's vault history drops bob. alice's load
+/// on main is refused and her next save does not happen.
+fn pr_merge_row(id: &str, how: PrMerge) {
+    check(id, |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = pr_flow_scene(&s);
+        merge_pr_as(&s, how);
+        p.require(!s.lists_bob(), "main's vault after the merge drops bob")?;
+        put(&s.repo, &stale, "pr: change");
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on main: {}", stderr.trim()));
+        p.target(!get.status.success(), "the load on main is refused");
+        p.target(
+            !text(&get.stdout).contains("prod-db"),
+            "the pre-rotation value is not printed",
+        );
+        p.target(names_re_add(&stderr), "stderr names bob and --re-add");
+        p.target(
+            next_save_writes_nothing(&s, &s.alice),
+            "the next save on main does not happen",
+        );
+        Ok(())
+    });
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_squash() {
+    pr_merge_row("R-I10-h:pr-flow-squash", PrMerge::Squash { delete: false });
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_squash_deleted() {
+    pr_merge_row(
+        "R-I10-h:pr-flow-squash-deleted",
+        PrMerge::Squash { delete: true },
+    );
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_ff_deleted() {
+    pr_merge_row("R-I10-h:pr-flow-ff-deleted", PrMerge::FastForwardDeleted);
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_rebase() {
+    pr_merge_row("R-I10-h:pr-flow-rebase", PrMerge::Rebase);
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_squash_changes() {
+    pr_merge_row("R-I10-h:pr-flow-squash-changes", PrMerge::SquashWithChanges);
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_renamed() {
+    pr_merge_row("R-I10-h:pr-flow-renamed", PrMerge::FastForwardRenamed);
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_moved_on() {
+    pr_merge_row("R-I10-h:pr-flow-moved-on", PrMerge::FastForwardMovedOn);
+}
+
+/// The teammate case: carol's machine, marked on main and on her topic
+/// branch, accepts alice's removal of bob by loading it on the topic branch,
+/// after main took the pull request (as a merge commit, or a squash) and she
+/// merged main into her topic (a merge commit of her own). Her record's
+/// commit is that topic merge commit, which main never holds. A stale fork
+/// then committed on main is refused on her machine: main's vault history
+/// drops bob after the last vault on her topic's own path that listed him.
+fn teammate_row(id: &str, squash: bool) {
+    check(id, |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = s.stale_fork("stale", &s.r0, 10);
+        s.run_ok(&s.carol, &["get", "DB_URL"]);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "topic"]);
+        fs::write(s.repo.join("NOTES"), "carol's topic work\n").unwrap();
+        commit(&s.repo, "topic: notes");
+        s.carol_add("TOPIC_TMP", "t");
+        git_ok(&s.repo, &["checkout", "-q", "--", ".murk"]);
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "revoke-bob"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        if squash {
+            merge_pr_as(&s, PrMerge::Squash { delete: false });
+        } else {
+            git_ok(
+                &s.repo,
+                &["merge", "-q", "--no-ff", "-m", "merge PR", "revoke-bob"],
+            );
+        }
+        git_ok(&s.repo, &["checkout", "-q", "topic"]);
+        git_ok(
+            &s.repo,
+            &["merge", "-q", "--no-ff", "-m", "topic: merge main", "main"],
+        );
+        s.run_ok(&s.carol, &["get", "DB_URL"]);
+        let (pin, _) = s.pin(&s.carol);
+        let bob = s.bob.pubkey();
+        p.require(
+            pin["removed_on"][&bob] == serde_json::json!(["topic"])
+                && pin["removed_at_commit"][&bob] == serde_json::json!(head_commit(&s.repo)),
+            format!(
+                "carol's machine records the removal on topic, at topic's merge commit: {} {}",
+                pin["removed_on"], pin["removed_at_commit"]
+            ),
+        )?;
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        put(&s.repo, &stale, "pr: change");
+        let get = s.run(&s.carol, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("carol on main: {}", stderr.trim()));
+        p.target(
+            !get.status.success() && names_re_add(&stderr),
+            "carol's load on main is refused and names --re-add",
+        );
+        p.target(
+            !text(&get.stdout).contains("prod-db"),
+            "the pre-rotation value is not printed",
+        );
+        p.target(
+            next_save_writes_nothing(&s, &s.carol),
+            "carol's next save on main does not happen",
+        );
+        Ok(())
+    });
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_teammate_merge() {
+    teammate_row("R-I10-h:pr-flow-teammate-merge", false);
+}
+
+#[test]
+fn row_r_i10_h_pr_flow_teammate_squash() {
+    teammate_row("R-I10-h:pr-flow-teammate-squash", true);
+}
+
+/// alice's machine, marked on main, revokes bob on a detached HEAD at
+/// main's tip, so the removal is recorded on no branch. main is then moved
+/// to that commit and a stale fork is committed on it: main's vault history
+/// drops bob, so the load is refused and the next save does not happen.
+#[test]
+fn row_r_i10_h_pr_flow_detached_save() {
+    check("R-I10-h:pr-flow-detached-save", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = s.stale_fork("stale", &s.r0, 10);
+        s.run_ok(&s.alice, &["get", "DB_URL"]);
+        git_ok(&s.repo, &["checkout", "-q", "--detach"]);
+        s.revoke_bob();
+        let (pin, _) = s.pin(&s.alice);
+        p.require(
+            pin["removed_on"][s.bob.pubkey()] == serde_json::json!([]),
+            format!(
+                "the removal is recorded on no branch: {}",
+                pin["removed_on"]
+            ),
+        )?;
+        git_ok(&s.repo, &["branch", "-q", "-f", "main", "HEAD"]);
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        put(&s.repo, &stale, "pr: change");
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on main: {}", stderr.trim()));
+        p.target(
+            !get.status.success() && names_re_add(&stderr),
+            "the load on main is refused and names --re-add",
+        );
+        p.target(
+            next_save_writes_nothing(&s, &s.alice),
+            "the next save on main does not happen",
+        );
+        Ok(())
+    });
+}
+
+/// Control for the content arm's bound: alice revoked bob on main once and
+/// authorized him again, so main's older history drops bob. She then
+/// revokes him again on a topic branch that never merges. main's history
+/// since the commit the removal is recorded at holds no drop, so main still
+/// loads.
+#[test]
+fn row_r_i10_h_pr_flow_content_bound() {
+    check("R-I10-h:pr-flow-content-bound", |p: &mut Probe| {
+        let s = Scene::new();
+        s.revoke_bob();
+        authorize(&s.alice, &s.repo, &s.bob, "bob");
+        commit(&s.repo, "authorize bob again");
+        p.require(
+            !s.pin_on_bob(&s.alice).0,
+            "alice's own authorize cleared her record",
+        )?;
+        git_ok(&s.repo, &["checkout", "-q", "-b", "revoke-bob"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        p.require(s.pin_on_bob(&s.alice).0, "alice records bob removed again")?;
+        p.require(s.lists_bob(), "main's vault lists bob")?;
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        p.note(format!("get on main: {}", text(&get.stderr).trim()));
         p.target(
             get.status.success(),
-            "with the revoke's branch deleted the replay loads (the stated limit)",
+            "main, which never merged the second removal, still loads",
+        );
+        Ok(())
+    });
+}
+
+/// Control for the content arm's drop test: carol's branch `old`, cut and
+/// marked before dave ever joined, never merges main's add (carol's own) and
+/// removal (alice's) of dave, which carol's machine recorded. alice then
+/// authorizes dave on `old`. old's history since the fork holds revisions
+/// that do not list dave, but none that drops him, so carol's load there
+/// still works.
+#[test]
+fn row_r_i10_h_pr_flow_content_add() {
+    check("R-I10-h:pr-flow-content-add", |p: &mut Probe| {
+        let s = Scene::new();
+        let dave = Machine::new(&s.base, "dave");
+        dave.init(&s.base.join("dave-scratch"), "dave");
+        git_ok(&s.repo, &["checkout", "-q", "-b", "old"]);
+        s.carol_add("OLD_K", "old-k");
+        commit(&s.repo, "old: add OLD_K");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.run_ok(
+            &s.carol,
+            &["circle", "authorize", &dave.pubkey(), "--name", "dave"],
+        );
+        commit(&s.repo, "authorize dave");
+        s.run_ok(&s.alice, &["trust", "--yes"]);
+        s.run_ok(&s.alice, &["circle", "revoke", &dave.pubkey()]);
+        commit(&s.repo, "revoke dave");
+        s.run_ok(&s.carol, &["get", "DB_URL"]);
+        p.require(
+            s.pin(&s.carol).0["removed"].get(dave.pubkey()).is_some(),
+            "carol's machine records dave's removal",
+        )?;
+        git_ok(&s.repo, &["checkout", "-q", "old"]);
+        authorize(&s.alice, &s.repo, &dave, "dave");
+        commit(&s.repo, "old: authorize dave");
+        let get = s.run(&s.carol, &["get", "OLD_K"]);
+        p.reached();
+        p.note(format!("get on old: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("old-k"),
+            "old, whose history adds dave but never drops him, still loads",
         );
         Ok(())
     });

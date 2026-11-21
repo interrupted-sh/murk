@@ -95,10 +95,7 @@ A vault that still lists the removed key is a separate case. murk refuses it at 
 
 A branch this machine accepted before the removal reached it keeps loading and saving vaults that list the key until the removal is merged there. `murk trust` accepts a vault that murk refused for a removed key only when you name the key with `--re-add KEY`. No load clears the removal. To re-add someone on purpose, a member runs `murk circle authorize`, and each teammate whose machine recorded the removal runs `murk trust --re-add KEY` once. A teammate can run it before the re-add arrives: when the vault doesn't list the key, it clears the record and writes nothing.
 
-The record has limits. On a branch this machine accepted before, the removal applies only after this machine accepts a vault there without the key when:
-
-- git can't show the removal in the branch's history: a shallow clone, a missing object, or the branch the removal was saved on was deleted or rewritten;
-- this machine saved the removal on a detached HEAD.
+The record has limits. On a branch this machine accepted before, the removal applies only after this machine accepts a vault there without the key when git can't show the removal in the branch's history: a shallow clone, a missing object, or a removal further back than the newest 1000 revisions of the vault file. murk then warns that the history couldn't be checked and the removal wasn't applied on that branch. Otherwise murk finds the removal in the branch's own vault history whichever way it merged: fast-forward, merge commit, squash merge or rebase merge, with the topic branch kept, deleted, renamed or moved on, including a removal saved on a detached HEAD and one a teammate's machine accepted on its own branch.
 
 The record also belongs to one vault path. A renamed vault file (`git mv .murk secrets.murk`) starts with no record after `murk trust`, and `murk trust --shares-identity-with` deletes the other path's record. A load of an unsigned vault records nothing. See [limit 10 in the threat model](/security/threat-model/#vault-signatures).
 

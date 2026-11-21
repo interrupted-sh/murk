@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -764,7 +764,8 @@
+     if by_ancestry {
+         return HistoryCheck::Found;
+     }
+-    crate::git::vault_history_drops(abs_vault, commit, lists)
++    let _ = lists;
++    HistoryCheck::NotFound
+ }
+ 
+ /// Whether the listing part of the removal rule applies to `key` (canonical)

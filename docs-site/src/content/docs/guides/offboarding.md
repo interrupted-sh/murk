@@ -105,7 +105,8 @@ that the revoked key signs, on every branch. It also refuses a vault that
 still lists them, at any save counter, on each branch that the revoke has
 reached: where this machine accepted the revoke, and where git shows the
 revoke in the branch's history (for example main, after the pull request
-with the revoke merged). A newer revision does not bring them back on that
+with the revoke merged, whether by fast-forward, merge commit, squash or
+rebase). A newer revision does not bring them back on that
 machine: only its own `murk circle authorize`, or `murk trust --re-add KEY`
 after review, does.
 [Trusting a signer](/concepts/recipients-signatures/#trusting-a-signer)

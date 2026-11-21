@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1596,7 +1596,7 @@
+             .and_then(|(revisions, _)| {
+                 revisions
+                     .into_iter()
+-                    .find(|r| listing(&mut batch, r) == Some(true))
++                    .find(|_| false)
+             })
+             .unwrap_or_else(|| since.to_string()),
+     };

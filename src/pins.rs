@@ -886,8 +886,9 @@ fn read_held(vault_path: &str) -> Result<Option<TrustPin>, String> {
 ///    reads with [`read_held`] and writes with [`write`]. The only
 ///    subprocesses it runs are read-only git commands (`symbolic-ref`,
 ///    `rev-parse`, `merge-base --is-ancestor`, `cat-file -e`,
-///    `cat-file blob <commit>:<path>`, `diff --quiet HEAD --`), which take
-///    no `index.lock`.
+///    `cat-file blob <commit>:<path>`, `cat-file --batch`,
+///    `rev-list --first-parent <commit>..HEAD -- <path>`,
+///    `diff --quiet HEAD --`), which take no `index.lock`.
 /// 4. The pin lock is never held across a signature, a confirmation prompt
 ///    or an editor session.
 ///
