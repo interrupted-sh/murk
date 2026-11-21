@@ -3105,7 +3105,7 @@ pub fn unchecked_removal_text(
                 "a vault revision in its history cannot be read (not a vault, recipients that do not parse, over {} MiB, a missing object, or a git failure)",
                 crate::git::VAULT_BLOB_LIMIT / (1024 * 1024)
             ),
-            format!("fetching cannot fix a revision committed that way. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+            format!("fetching cannot fix a revision committed that way (not a vault, or too big); a missing object in a full clone can be repaired with `git fetch --refetch`, then try again. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
         ),
     };
     format!(
@@ -3130,7 +3130,7 @@ fn removed_key_message(
         )
     } else if found > removed_at {
         return format!(
-            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). To trust them again on this machine, run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
+            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). If this branch should not have them, merge the branch that holds the removal into this branch with the murk merge driver, keeping the side that removed them. To trust them again on purpose instead, run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
             canonical_recipient(key)
         );
     } else {

@@ -1568,6 +1568,9 @@ fn tree_has_entry(tree: &[u8], name: &str, oid_len: usize) -> Option<bool> {
 /// Reads the vault file at commits, once per distinct blob.
 struct VaultReader<'a, F: Fn(&[u8]) -> Option<bool>> {
     name: &'a str,
+    /// The vault's directory inside the checkout, as path components (empty
+    /// at the root).
+    prefix: Vec<String>,
     lists: F,
     check: CatFile,
     contents: CatFile,
@@ -1639,37 +1642,58 @@ impl<F: Fn(&[u8]) -> Option<bool>> VaultReader<'_, F> {
     }
 
     /// git answered `missing` for the vault file at `commit`: either the
-    /// commit's tree has no such entry (no vault file there) or the entry's
-    /// object is not here. The vault's directory tree tells which; a missing
-    /// tree is itself a missing object.
+    /// commit has no such file (the file, or a directory on its path, is not
+    /// in the commit's tree) or the file's object is not here. Walking up the
+    /// path from the vault's directory to the root, the first tree that is
+    /// here tells which: no entry for the next path component means no vault
+    /// file there ([`Listing::Absent`]; also a commit that deleted the whole
+    /// vault directory, or one from before it existed); an entry means its
+    /// object is missing ([`Listing::Missing`]).
     fn missing(&mut self, commit: &str) -> Listing {
-        let Some(header) = self.check.ask(&format!("{commit}:./")) else {
-            self.broken = true;
-            return Listing::Unreadable;
-        };
-        let [oid, kind, size] = header.as_slice() else {
-            return Listing::Missing;
-        };
-        if kind != "tree" {
-            return Listing::Unreadable;
+        let mut path = self.prefix.clone();
+        path.push(self.name.to_string());
+        for depth in (0..path.len()).rev() {
+            let spec = if depth == 0 {
+                format!("{commit}^{{tree}}")
+            } else {
+                format!("{commit}:{}", path[..depth].join("/"))
+            };
+            let Some(header) = self.check.ask(&spec) else {
+                self.broken = true;
+                return Listing::Unreadable;
+            };
+            match header.as_slice() {
+                [oid, kind, size] if kind == "tree" => {
+                    let oid = oid.clone();
+                    return match self.tree_has(&oid, size, &path[depth]) {
+                        Some(true) => Listing::Missing,
+                        Some(false) => Listing::Absent,
+                        None => Listing::Unreadable,
+                    };
+                }
+                [.., last] if last == "missing" => {}
+                _ => return Listing::Unreadable,
+            }
         }
-        let (oid, size) = (oid.clone(), size.clone());
-        let Some(answer) = self.contents.ask(&oid) else {
+        Listing::Missing
+    }
+
+    /// Whether tree `oid` (`size` bytes, as `--batch-check` said) has an
+    /// entry named `name`. `None` when it cannot be read.
+    fn tree_has(&mut self, oid: &str, size: &str, name: &str) -> Option<bool> {
+        let size: usize = size.parse().ok()?;
+        let Some(answer) = self.contents.ask(oid) else {
             self.broken = true;
-            return Listing::Unreadable;
+            return None;
         };
         if answer.get(1).map(String::as_str) != Some("tree") {
-            return Listing::Missing;
+            return None;
         }
-        let Some(tree) = size.parse().ok().and_then(|s| self.contents.body(s)) else {
+        let Some(tree) = self.contents.body(size) else {
             self.broken = true;
-            return Listing::Unreadable;
+            return None;
         };
-        match tree_has_entry(&tree, self.name, oid.len() / 2) {
-            Some(true) => Listing::Missing,
-            Some(false) => Listing::Absent,
-            None => Listing::Unreadable,
-        }
+        tree_has_entry(&tree, name, oid.len() / 2)
     }
 }
 
@@ -1761,8 +1785,18 @@ fn boundary_between(dir: &Path, boundary: &[String], bound: &str, range_top: &st
 /// The promisor remote of a partial clone (`remote.<name>.promisor`, or the
 /// older `extensions.partialClone`), if any.
 fn promisor_remote(dir: &Path) -> Option<String> {
-    let listed =
-        git_output(dir, &["config", "--get-regexp", r"^remote\..*\.promisor$"]).unwrap_or_default();
+    // `--type=bool` makes git read every boolean spelling (true, yes, on, 1,
+    // a bare key; any case) and print `true` or `false`.
+    let listed = git_output(
+        dir,
+        &[
+            "config",
+            "--type=bool",
+            "--get-regexp",
+            r"^remote\..*\.promisor$",
+        ],
+    )
+    .unwrap_or_default();
     listed
         .lines()
         .find_map(|line| {
@@ -1882,8 +1916,16 @@ pub fn vault_history_drops(
     ) else {
         return HistoryCheck::Unreadable;
     };
+    let Some(prefix) = git_output(dir, &["rev-parse", "--show-prefix"]) else {
+        return HistoryCheck::Unreadable;
+    };
     let mut reader = VaultReader {
         name,
+        prefix: prefix
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .collect(),
         lists,
         check,
         contents,

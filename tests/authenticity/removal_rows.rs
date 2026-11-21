@@ -268,6 +268,12 @@ fn row_r_i10_h_replay() {
             "the old value is not printed",
         );
         p.target(names_re_add(&stderr), "stderr names bob and --re-add");
+        let merge_first = stderr.find("merge the branch that holds the removal into this branch");
+        p.target(
+            merge_first.is_some_and(|m| stderr.find("--re-add").is_some_and(|r| m < r))
+                && stderr.contains(READD_SCOPE),
+            "the refusal offers merging the removal first, then --re-add with what it does",
+        );
         p.target(
             s.pin_on_bob(&s.alice) == (true, false),
             "the pin still records bob as removed and does not trust him",
@@ -946,6 +952,80 @@ fn row_r_i10_h_pr_flow_shallow_decided() {
         p.target(
             get.status.success() && text(&get.stdout).contains("old-k"),
             "in the shallow clone, old, which never merged the removal, still loads",
+        );
+        Ok(())
+    });
+}
+
+/// A vault in a subdirectory (`secrets/.murk`) and a side branch forked
+/// before that directory existed, merged into main: at the side branch's
+/// fork point there is no `secrets/` at all, which is no vault file there,
+/// not a missing object. alice's machine, marked on main, revoked bob on
+/// `topic`, never merged; main, which still lists bob, loads.
+#[test]
+fn row_r_i10_h_pr_flow_subdir() {
+    check("R-I10-h:pr-flow-subdir", |p: &mut Probe| {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("README"), "hi\n").unwrap();
+        commit(&repo, "R0: no secrets/ yet");
+        let r0 = head_commit(&repo);
+        let alice = Machine::new(base, "alice");
+        let bob = Machine::new(base, "bob");
+        bob.init(&base.join("bob-scratch"), "bob");
+        let secrets = repo.join("secrets");
+        alice.init(&secrets, "alice");
+        alice
+            .murk(&secrets)
+            .args(["circle", "authorize", &bob.pubkey(), "--name", "bob"])
+            .assert()
+            .success();
+        alice.add(&secrets, "DB_URL", "prod-db");
+        commit(&repo, "M1: secrets/.murk");
+        alice
+            .murk(&secrets)
+            .args(["get", "DB_URL"])
+            .assert()
+            .success();
+        git_ok(&repo, &["checkout", "-q", "-b", "topic"]);
+        alice
+            .murk(&secrets)
+            .args(["circle", "revoke", &bob.pubkey()])
+            .assert()
+            .success();
+        commit(&repo, "topic: revoke bob");
+        git_ok(&repo, &["checkout", "-q", "-b", "sb", &r0]);
+        fs::create_dir_all(&secrets).unwrap();
+        fs::write(
+            secrets.join(".murk"),
+            format!(
+                "{{\"recipients\":[\"{}\"],\"generation\":1}}\n",
+                alice.pubkey()
+            ),
+        )
+        .unwrap();
+        commit(&repo, "sb: its own secrets/.murk");
+        git_ok(&repo, &["checkout", "-q", "-f", "main"]);
+        git(&repo, &["merge", "-q", "--no-commit", "sb"]);
+        git_ok(&repo, &["checkout", "-q", "--ours", "--", "secrets/.murk"]);
+        commit(&repo, "M2: merge sb, keep main's vault");
+        p.require(
+            lists(&fs::read(secrets.join(".murk")).unwrap(), &bob.pubkey()),
+            "main's vault lists bob",
+        )?;
+        let get = alice
+            .murk(&secrets)
+            .args(["get", "DB_URL"])
+            .output()
+            .unwrap();
+        p.reached();
+        p.note(format!("get on main: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("prod-db"),
+            "main, which never merged the removal, loads",
         );
         Ok(())
     });
