@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -878,7 +878,7 @@
+         .env("GIT_NO_LAZY_FETCH", "1")
+         .env("GIT_TERMINAL_PROMPT", "0")
+         .arg("-C")
+-        .arg(from)
++        .arg(dir.ancestors().find(|d| d.join(".git").is_dir()).unwrap_or(from))
+         .args(["ls-files", "-z", "--"])
+         .arg(dir)
+         .output();

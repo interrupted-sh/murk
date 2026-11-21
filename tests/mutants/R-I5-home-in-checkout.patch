@@ -1,12 +1,12 @@
 --- a/src/pins.rs
 +++ b/src/pins.rs
-@@ -753,7 +753,8 @@
+@@ -751,7 +751,8 @@
          "the trust pin directory",
-         "murk uses no trust pin for this vault: every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer",
+         "murk uses no trust pin, and every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer",
      );
 -    (!committed).then_some(dir)
 +    let _ = committed;
 +    Some(dir)
  }
  
- /// Whether the directory `dir` under HOME (`what` names it in the warning)
+ /// Why murk does not use a directory under HOME: a repository tracks a

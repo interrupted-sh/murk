@@ -59,11 +59,13 @@ Do these steps on each machine that uses murk.
   reads and writes no trust pin, and reads no stored key. Set `HOME` to an
   absolute path, or set `MURK_KEY` or `MURK_KEY_FILE` and
   `MURK_TRUSTED_SIGNERS`.
-- **A trust pin or key file that git tracks is not used.** When `HOME` is
-  inside the checkout (for example `HOME=/workspace` in a container) and git
-  tracks a file in the trust pin directory or a key directory, murk warns
-  and uses no trust pin, or no stored key, for that vault. Set `HOME` to a
-  directory outside the repository.
+- **A trust pin or key file that a repository tracks is not used.** When
+  `HOME` is at or above a checkout (for example `HOME=/workspace` in a
+  container), murk asks git whether the repository that holds the trust pin
+  directory or a key directory lists a file there. If it does, or if git
+  fails, murk warns and uses no trust pin, or no stored key. murk checks
+  only that repository's index, not git history or files copied in by
+  other means. Set `HOME` to a directory outside every repository.
 - **`MURK_EXPECTED_VAULT` set but empty is an error.** A missing CI secret
   expands to an empty string, so murk fails closed. To turn the check off,
   unset the variable.
