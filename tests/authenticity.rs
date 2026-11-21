@@ -2371,6 +2371,7 @@ fn accepting_an_older_0_13_copy_never_removes_a_later_member() {
 fn re_signing_an_older_0_13_copy_never_removes_a_later_member() {
     let (_base, alice, bob, repo) = upgraded_with_a_later_member();
     git_ok(&repo, &["checkout", "-q", "HEAD~1", "--", ".murk"]);
+    common::rows::decisive("R-I9-a");
     alice
         .murk(&repo)
         .args(["trust", "--yes"])
@@ -2405,6 +2406,7 @@ fn murk_trust_never_accepts_a_0_13_copy_on_a_detached_head() {
     common::forgery::strip_v1(&mut vault, &alice_id);
     murk_cli::vault::write(&path, &vault).unwrap();
     let before = fs::read_to_string(&path).unwrap();
+    common::rows::decisive("R-I9-a");
     alice
         .murk(&detached)
         .args(["trust", "--yes"])
@@ -2771,6 +2773,7 @@ fn merging_the_upgrade_marks_a_branch_only_once_this_machine_saves_there() {
         .success();
     commit(&repo, "save on side");
     git_ok(&repo, &["checkout", "-q", "HEAD~2", "--", ".murk"]);
+    common::rows::decisive("R-I9-a");
     get().assert().failure().stderr(predicate::str::contains(
         "already been upgraded on this branch",
     ));
@@ -2853,6 +2856,7 @@ fn a_merge_never_upgrades_an_unaccepted_0_13_side() {
         .success()
         .stderr(predicate::str::contains("accepted .murk on this machine"));
 
+    common::rows::decisive("R-I9-a");
     let (merged, stderr) = merge_side(&alice, &repo, &key);
     assert!(!merged, "the merge must not complete: {stderr}");
     assert!(
@@ -3310,6 +3314,7 @@ fn removal_is_permanent_on_the_machine_that_accepted_it() {
     git_ok(&repo, &["checkout", "-q", "-b", "replay"]);
     fs::write(repo.join(".murk"), &with_bob).unwrap();
     commit(&repo, "replay: bob listed");
+    common::rows::decisive("R-I10-a");
     assert_refused_everywhere(&alice, &repo, "prod-db", "rolled back");
     // Bob's own older signed revision on that branch.
     fs::write(repo.join(".murk"), &by_bob).unwrap();
@@ -3679,6 +3684,7 @@ fn a_generation_near_the_u64_limit_is_refused_outright() {
     let id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
     common::forgery::reseal(&mut vault, &id);
     murk_cli::vault::write(&repo.join(".murk"), &vault).unwrap();
+    common::rows::decisive("R-I7-a");
     alice
         .murk(&repo)
         .args(["get", "TOP"])
@@ -3724,6 +3730,7 @@ fn a_merge_past_the_generation_limit_leaves_ours_and_the_pin() {
             (p, bytes)
         })
         .collect();
+    common::rows::decisive("R-I7-a:merge");
     let (merged, stderr) = git_merge(&alice, &repo, "side");
     assert!(!merged, "{stderr}");
     assert!(stderr.contains("save counter"), "{stderr}");
@@ -3919,6 +3926,7 @@ fn a_merge_side_never_brings_a_removed_recipient_back() {
     commit(&repo, "remove bob");
 
     git_ok(&repo, &["checkout", "-q", "f1"]);
+    common::rows::decisive("R-I10-b");
     let (merged, stderr) = git_merge(&alice, &repo, "f2");
     assert!(!merged, "the merge must not complete: {stderr}");
     assert!(stderr.contains("neither side re-adds them"), "{stderr}");
@@ -3977,6 +3985,7 @@ fn a_save_over_an_older_revision_never_writes_a_removed_recipient_back() {
         );
     };
     git_ok(&repo, &["checkout", "-q", "-b", "pulled", "HEAD~1"]);
+    common::rows::decisive("R-I10-c");
     refuse_save();
     git_ok(&repo, &["checkout", "-q", "--detach", "main~1"]);
     refuse_save();
@@ -4058,6 +4067,7 @@ fn reading_a_pull_request_never_trusts_what_it_adds() {
     fs::write(repo.join(".murk"), &forged).unwrap();
     commit(&repo, "mallory on main");
 
+    common::rows::decisive("R-I3-a");
     alice
         .murk(&repo)
         .args(["get", "DB_URL"])
@@ -4315,6 +4325,7 @@ fn merging_the_removal_into_a_branch_the_removed_member_wrote_to() {
     commit(&repo, "bob writes on main");
 
     // Alice pulls main: Bob's vault is refused, and the hint names the merge.
+    common::rows::decisive("R-I10-d");
     alice
         .murk(&repo)
         .args(["get", "DB_URL"])
@@ -4597,6 +4608,7 @@ fn a_removed_signers_later_vault_is_refused_on_a_new_branch() {
         .failure()
         .stdout("")
         .stderr(predicate::str::contains("signed by bob"));
+    common::rows::decisive("R-I10-e");
     t.refused_on_new_branch("debug", &after);
 
     git_ok(&t.repo, &["checkout", "-q", "-b", "old", &t.bob0]);
@@ -4639,6 +4651,7 @@ fn a_replayed_pre_removal_vault_is_refused_on_a_new_branch() {
     git_ok(&t.repo, &["checkout", "-q", &t.bob0, "--", ".murk"]);
     commit(&t.repo, "bob: replay");
     let replay = head_commit(&t.repo);
+    common::rows::decisive("R-I10-f");
     t.refused_on_new_branch("debug", &replay);
 }
 

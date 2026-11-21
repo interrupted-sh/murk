@@ -3379,6 +3379,7 @@ mod tests {
         let pin = pin_for(&Case::new(&[A], 1, A));
         let mut other = Case::new(&[A], 9, A);
         other.vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
+        eprintln!("ROW R-I8-a DECISIVE");
         assert!(matches!(
             verdict(&other.loaded(), Some(&pin), None),
             Verdict::Refused(Refusal::OtherVault { .. })
@@ -3577,6 +3578,7 @@ mod tests {
         assert!(!pin.trusted.contains("age1agent"));
         // The grant deletes its own record and signs.
         let forged = Case::new(&[A, "age1agent"], 2, "age1agent");
+        eprintln!("ROW R-I17-a DECISIVE");
         assert!(matches!(
             verdict(&forged.loaded(), Some(&pin), None),
             Verdict::Refused(Refusal::GrantSigner { .. })
@@ -4185,6 +4187,7 @@ mod tests {
         side.generation = 9;
         let merged = side.clone();
         let on = |b: &str| Checkout::at(HeadState::Branch(b.into()));
+        eprintln!("ROW R-I10-h:merge-result DECISIVE");
         assert_eq!(
             removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("main")),
             Some(("age1bob".to_string(), 4))
@@ -4217,6 +4220,7 @@ mod tests {
         other.vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
         let pin = accepted_pin(&other.loaded(), Some(&prior), true);
         assert_eq!(pin.vault_id, other.vault.vault_id);
+        eprintln!("ROW R-I16-c:other-vault DECISIVE");
         assert!(pin.grants.is_empty(), "pin.grants: {:?}", pin.grants);
         assert!(pin.sidecar.revoked_grants_seen.is_empty());
     }

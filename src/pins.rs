@@ -1336,6 +1336,7 @@ mod tests {
             );
             write(vault, &pin).unwrap();
             let written = read(vault).unwrap().unwrap();
+            eprintln!("ROW R-L-oldpin:sidecar DECISIVE");
             assert_eq!(
                 written.sidecar.path, ".murk",
                 "the sidecar records the path"
@@ -1468,6 +1469,7 @@ mod tests {
                 crate::vault::read(Path::new(&vp)).is_ok(),
                 "the result replaced the vault file"
             );
+            eprintln!("ROW R-I5-race:reentrant DECISIVE");
             let pin = read(&vp).unwrap().expect("the own-save pin is written");
             assert_eq!(pin.generation, 7);
             let sidecar: Sidecar = serde_json::from_slice(
@@ -1508,6 +1510,7 @@ mod tests {
                 snapshot.publish(staged, None::<Record>).unwrap();
                 let _ = tx.send(results.borrow_mut().take());
             });
+            eprintln!("ROW R-I5-lockorder DECISIVE");
             let (vault_lock, pin_update) = rx
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("neither lock request blocks")
@@ -1569,6 +1572,7 @@ mod tests {
             let pin_bytes = std::fs::read(&file).unwrap();
             let copies = count_copies();
             read("/proj/.murk").unwrap().unwrap();
+            eprintln!("ROW R-L-oldpin:copy DECISIVE");
             assert_eq!(copies.get(), 1);
             let sidecar = sidecar_on_disk(&file).expect("the first read writes the sidecar");
             let pin: TrustPin = serde_json::from_slice(&pin_bytes).unwrap();
@@ -1612,6 +1616,7 @@ mod tests {
                 std::fs::write(&hook_file, pin.to_string()).unwrap();
             });
             read("/proj/.murk").unwrap().unwrap();
+            eprintln!("ROW R-L-oldpin:copy-union DECISIVE");
             let sidecar = sidecar_on_disk(&file).expect("the copy was written");
             assert_eq!(sidecar.removals.get(BOB).map(|r| r.at), Some(4));
             let pin = read("/proj/.murk").unwrap().unwrap();
@@ -1626,6 +1631,7 @@ mod tests {
             let file = pin_without_copy();
             let pin_bytes = std::fs::read(&file).unwrap();
             update("/proj/.murk", |_| Ok(None)).unwrap();
+            eprintln!("ROW R-L-oldpin:held DECISIVE");
             let sidecar = sidecar_on_disk(&file).expect("the update copies the record");
             assert_eq!(sidecar.removals.get(BOB).map(|r| r.at), Some(4));
             assert_eq!(
@@ -1654,6 +1660,7 @@ mod tests {
             std::fs::write(&file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
 
             let pin = read("/proj/.murk").unwrap().unwrap();
+            eprintln!("ROW R-L-oldpin:removals DECISIVE");
             assert_eq!(pin.removed.get(BOB), Some(&4));
             assert_eq!(
                 pin.removed_on.get(BOB),
@@ -1745,6 +1752,7 @@ mod tests {
             let failed = write("/proj/.murk", &added);
             test_hooks::FAIL_AFTER_SIDECAR.with(|f| f.set(false));
             assert!(failed.is_err());
+            eprintln!("ROW R-L-oldpin:order DECISIVE");
             assert!(sidecar_on_disk(&file).unwrap().removals.contains_key(BOB));
             let on_disk: TrustPin = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
             assert!(
@@ -1801,6 +1809,7 @@ mod tests {
             std::fs::write(&file, pin.to_string()).unwrap();
             let read_back = read("/proj/.murk").unwrap().unwrap();
             assert_eq!(read_back.vault_id, "id-2");
+            eprintln!("ROW R-L-oldpin:other-vault DECISIVE");
             assert!(
                 read_back.removed.is_empty(),
                 "no record of the old vault applies"
@@ -1832,6 +1841,7 @@ mod tests {
             write(vp, &pin).unwrap();
             std::fs::remove_file(pin_path(vp).unwrap()).unwrap();
 
+            eprintln!("ROW R-L-oldpin:no-pin DECISIVE");
             let read_back = read(vp).unwrap().expect("the sidecar applies");
             assert_eq!(read_back.removed.get(BOB), Some(&4));
             assert!(!read_back.has_trust(), "no trust decision comes with it");
@@ -1847,6 +1857,7 @@ mod tests {
         with_home(|_| {
             pin_without_copy();
             let held = lock("/proj/.murk").unwrap();
+            eprintln!("ROW R-I5-lockorder:read DECISIVE");
             assert_eq!(read("/proj/.murk"), Err(LOCK_ORDER.to_string()));
             drop(held);
             assert!(read("/proj/.murk").unwrap().is_some());

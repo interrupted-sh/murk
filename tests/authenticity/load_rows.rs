@@ -955,11 +955,13 @@ fn row_r_i8_e_c() {
         fs::create_dir_all(repo.join("config")).unwrap();
         git_ok(&repo, &["mv", ".murk", "config/.murk"]);
         commit(&repo, "move the vault");
-        must(
-            alice.trust(&repo, "config/.murk"),
-            "trust the renamed vault",
-        )?;
+        // The decisive step: the old path is recorded on this machine but no
+        // longer tracked, so it is no second copy of the vault and does not
+        // stop murk trust at the new path.
         p.reached();
+        let trusted = alice.trust(&repo, "config/.murk");
+        p.note(trusted.said());
+        p.target(trusted.ok, "murk trust accepts the vault at its new path");
         let renamed = alice.get(&repo, "config/.murk", "DB_URL");
         p.note(renamed.stderr.clone());
         p.target(
@@ -1757,6 +1759,7 @@ fn a_grant_key_that_signs_is_refused_as_a_grant_signer() {
         String::from_utf8_lossy(&forge.stderr)
     );
 
+    rows::decisive("R-I17-a");
     let read = alice.get(&repo, ".murk", "DB_URL");
     assert!(refused(&read, "attacker"), "{}", read.said());
     assert!(

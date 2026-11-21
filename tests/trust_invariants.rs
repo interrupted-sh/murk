@@ -5151,12 +5151,19 @@ fn row_r_i6_b() {
         p.require(!has_sig(&erin.vault()), "erin's save is unsigned")?;
         let own = export(&erin);
         p.require(own.ok, format!("erin loads her own save: {}", own.stderr))?;
-        let attack = load_file(&erin, &replay);
         p.reached();
+        let attack = load_file(&erin, &replay);
         p.target(
             !attack.ok && !attack.stdout.contains(stale),
             format!(
                 "the unsigned copy of an older revision is refused and its value absent: {}",
+                attack.stderr
+            ),
+        );
+        p.target(
+            attack.stderr.contains("rolled back"),
+            format!(
+                "the refusal names the rollback, not another rule: {}",
                 attack.stderr
             ),
         );
@@ -5233,12 +5240,19 @@ fn row_r_i8_d() {
                 signed.stderr
             ),
         )?;
-        let attack = load_file(&erin, &unsigned(&other));
         p.reached();
+        let attack = load_file(&erin, &unsigned(&other));
         p.target(
             !attack.ok && !attack.stdout.contains("POISONED"),
             format!(
                 "the unsigned file of another vault is refused: {}",
+                attack.stderr
+            ),
+        );
+        p.target(
+            attack.stderr.contains("different vault"),
+            format!(
+                "the refusal names the vault id, not another rule: {}",
                 attack.stderr
             ),
         );

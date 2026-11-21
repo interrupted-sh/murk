@@ -11,6 +11,12 @@
 # that stays green with its guard gone is vacuous. Before any patch, every row
 # must pass on the unpatched tree, so a failure under a patch means something.
 #
+# A row prints `ROW <id> DECISIVE` on stderr when it reaches its decisive step
+# (tests/common/rows.rs `decisive`). A mutant counts as caught only when the
+# row's own test fails and its output holds that marker: a row that fails in
+# its setup, before the step its guard decides, has not shown the guard. The
+# baseline also demands the marker, so every row is known to print it.
+#
 # The working tree is never modified. Builds go to target/row-mutants.
 #
 # Usage: tests/mutants/run.sh [ROW-ID...]   (default: every enforced row)
@@ -50,33 +56,62 @@ fresh_tree() {
   find "$tree/src" -name '*.rs' -exec touch {} +
 }
 
-# Run one row's test in the scratch tree. Prints the test output; returns the
-# test's exit status, or 2 when the filter matched no test.
+# Run one row's test in the scratch tree, extra arguments going to the test
+# binary. Writes the test output to $scratch/out and prints its tail; returns
+# the test's exit status, or 2 when the filter matched no test.
 run_test() {
-  local binary="$1" test="$2" out status=0
+  local binary="$1" test="$2" status=0
+  shift 2
   local target=(--test "$binary")
   [ "$binary" = lib ] && target=(--lib)
-  out="$(cd "$tree" && env -u MURK_KEY -u MURK_KEY_FILE -u MURK_AGENT -u MURK_TRUSTED_SIGNERS \
-    HOME="$home" cargo test --quiet "${target[@]}" "$test" 2>&1)" || status=$?
-  printf '%s\n' "$out" | tail -n 20
-  if ! printf '%s\n' "$out" | grep -Eq 'test result: [a-zA-Z]+\. ([1-9][0-9]* passed|[0-9]+ passed; [1-9][0-9]* failed)'; then
+  (cd "$tree" && env -u MURK_KEY -u MURK_KEY_FILE -u MURK_AGENT -u MURK_TRUSTED_SIGNERS \
+    HOME="$home" cargo test --quiet "${target[@]}" "$test" -- "$@") >"$scratch/out" 2>&1 || status=$?
+  tail -n 20 "$scratch/out"
+  if ! grep -Eq 'test result: [a-zA-Z]+\. ([1-9][0-9]* passed|[0-9]+ passed; [1-9][0-9]* failed)' "$scratch/out"; then
     return 2
   fi
   return "$status"
 }
 
+# The captured output of the failed test named $1 (a unit test's last path
+# segment), as libtest prints it under `---- <path> stdout ----`. Empty when
+# that test did not fail: the filter can match other tests too.
+failed_output() {
+  awk -v t="$1" '
+    /^---- .* stdout ----$/ {
+      name = $2; sub(/^.*::/, "", name); inside = (name == t); next
+    }
+    /^failures:$/ { inside = 0 }
+    inside
+  ' "$scratch/out"
+}
+
+# Whether the marker of row $1 is in standard input. Not a whole-line match:
+# with --nocapture libtest's progress dots can share the marker's line.
+has_marker() {
+  grep -Fq "ROW $1 DECISIVE"
+}
+
 fresh_tree
 echo "== baseline: every selected row passes on the unpatched tree"
 while IFS=$'\t' read -r id binary test patch; do
-  if ! run_test "$binary" "$test" >"$scratch/log"; then
+  if ! run_test "$binary" "$test" --nocapture >"$scratch/log"; then
     cat "$scratch/log"
     echo "::error title=Row fails unpatched::$id ($binary $test) fails or matches no test without its mutant" >&2
+    exit 1
+  fi
+  if ! has_marker "$id" <"$scratch/out"; then
+    cat "$scratch/log"
+    echo "::error title=Row prints no decisive marker::$id ($binary $test) passes without printing ROW $id DECISIVE" >&2
     exit 1
   fi
   echo "ok   $id $test"
 done <<<"$lines"
 
 failures=0
+caught=0
+total=0
+
 for patch in $(printf '%s\n' "$lines" | cut -f4 | sort -u); do
   echo "== $patch"
   fresh_tree
@@ -96,6 +131,7 @@ for patch in $(printf '%s\n' "$lines" | cut -f4 | sort -u); do
   fi
   while IFS=$'\t' read -r id binary test p; do
     [ "$p" = "$patch" ] || continue
+    total=$((total + 1))
     status=0
     run_test "$binary" "$test" >"$scratch/log" || status=$?
     case "$status" in
@@ -109,11 +145,21 @@ for patch in $(printf '%s\n' "$lines" | cut -f4 | sort -u); do
         echo "::error title=Mutant does not build or row not found::$id ($test) under $patch ran no test" >&2
         failures=$((failures + 1))
         ;;
-      *) echo "caught $id $test" ;;
+      *)
+        if failed_output "$test" | has_marker "$id"; then
+          caught=$((caught + 1))
+          echo "caught $id $test"
+        else
+          cat "$scratch/log"
+          echo "::error title=Not caught (failed before the decisive step)::$id ($test) fails under $patch without printing ROW $id DECISIVE: the mutant broke its setup, not its guard" >&2
+          failures=$((failures + 1))
+        fi
+        ;;
     esac
   done <<<"$lines"
 done
 
+echo "$caught of $total row mutant checks caught at the decisive step"
 if [ "$failures" -ne 0 ]; then
   echo "$failures row mutant check(s) failed" >&2
   exit 1

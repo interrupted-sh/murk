@@ -1415,14 +1415,23 @@ struct SpentGrant {
     minted: PathBuf,
     stripped: PathBuf,
     /// The vault before the grant, with the grant's record (expired by now),
-    /// and after `agent revoke`.
+    /// and after `agent revoke` (empty from [`SpentGrant::unrevoked`]).
     before: Vec<u8>,
     live: Vec<u8>,
     revoked: Vec<u8>,
 }
 
 impl SpentGrant {
+    /// The grant, expired, then revoked by alice on her own machine.
     fn build() -> Result<Self, String> {
+        let mut w = Self::unrevoked()?;
+        w.org.must(&["agent", "revoke", "bot"], "")?;
+        w.revoked = w.org.vault();
+        Ok(w)
+    }
+
+    /// The grant, expired, and not revoked yet.
+    fn unrevoked() -> Result<Self, String> {
         let root = TempDir::new().unwrap();
         let alice = Who::generate("alice");
         let org = Org::new(root.path(), "alice", &alice)?;
@@ -1464,8 +1473,6 @@ impl SpentGrant {
         {
             std::thread::sleep(wait);
         }
-        org.must(&["agent", "revoke", "bot"], "")?;
-        let revoked = org.vault();
         Ok(SpentGrant {
             root,
             org,
@@ -1475,7 +1482,7 @@ impl SpentGrant {
             stripped,
             before,
             live,
-            revoked,
+            revoked: Vec::new(),
         })
     }
 
@@ -1684,7 +1691,8 @@ fn pinless_tombstone(p: &mut common::rows::Probe) -> Result<(), String> {
 /// and then saves still writes the grant's key into `revoked_grants`, because
 /// the machine remembers the sets it accepted; a hand-built revision on top,
 /// which lists the key as a recipient and keeps that set, is refused by a
-/// pinless runner. Needs the tombstone in the vault.
+/// pinless runner. Needs the tombstone in the vault. The save is the decisive
+/// step: the guard under test is the one that keeps the key in its set.
 #[test]
 fn row_r_i16_b_p4() {
     common::rows::check("R-I16-b:p4", |p| {
@@ -1695,19 +1703,81 @@ fn row_r_i16_b_p4() {
         // reads as rolled back, which `murk trust` resets), then saves.
         w.org.put(&w.before);
         w.org.must(&["trust", "--yes"], "")?;
+        p.require(
+            !w.tombstones(&w.org.vault(), &w.bot.pubkey),
+            "the revision from before the grant holds no revoked_grants entry for the grant's key",
+        )?;
+
+        p.reached();
         w.org.add("AFTER", "after-value")?;
         let honest = w.org.vault();
-        p.require(
-            w.tombstones(&honest, &w.bot.pubkey),
+        let kept = w.tombstones(&honest, &w.bot.pubkey);
+        p.target(
+            kept,
             "the save after murk trust of the older revision still lists the grant's key in revoked_grants",
-        )?;
+        );
+        if !kept {
+            return Ok(());
+        }
         let listed = w.list_as_recipient(&honest, &w.bot);
         p.require(
             w.tombstones(&listed, &w.bot.pubkey),
             "the hand-built revision keeps the revoked_grants set",
         )?;
+        for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
+            p.note(format!("{how}: {}", out_text(&out.stderr)));
+            p.target(
+                !out.status.success() && !out_text(&out.stdout).contains("real-secret-value"),
+                format!("a pinless runner refuses the revision by its own revoked_grants ({how})"),
+            );
+        }
+        Ok(())
+    });
+}
+
+/// A grant revoke on a machine that never saw the grant live (a fresh `HOME`
+/// anchored by `MURK_TRUSTED_SIGNERS`, so no pin and no sighting) still
+/// writes the grant's key into `revoked_grants`: the save drops the grant's
+/// record, which mints the id by itself. A pinless runner then refuses a
+/// revision on top that lists the key and keeps the set.
+#[test]
+fn row_r_i16_b_no_sighting() {
+    common::rows::check("R-I16-b:no-sighting", |p| {
+        let w = SpentGrant::unrevoked()?;
+        w.controls(p, &w.live)?;
+        p.require(
+            !w.tombstones(&w.live, &w.bot.pubkey),
+            "the vault that holds the grant's record has no revoked_grants entry for its key",
+        )?;
+        let revoker = fresh_machine(w.root.path(), &w.live);
 
         p.reached();
+        let out = on_machine(
+            &revoker,
+            Key::Inline(&w.org.alice.secret),
+            &[("MURK_TRUSTED_SIGNERS", w.signers.as_str())],
+            &["agent", "revoke", "bot"],
+            "",
+        );
+        p.note(format!("agent revoke: {}", out_text(&out.stderr)));
+        p.require(
+            out.status.success(),
+            "alice revokes the grant on the fresh machine",
+        )?;
+        let revoked = fs::read(revoker.1.join(".murk")).unwrap();
+        let kept = w.tombstones(&revoked, &w.bot.pubkey);
+        p.target(
+            kept,
+            "the revoke on a machine with no sighting lists the grant's key in revoked_grants",
+        );
+        if !kept {
+            return Ok(());
+        }
+        let listed = w.list_as_recipient(&revoked, &w.bot);
+        p.require(
+            w.tombstones(&listed, &w.bot.pubkey),
+            "the hand-built revision keeps the revoked_grants set",
+        )?;
         for (how, out, _) in w.holder(&listed, &["get", "S"], "") {
             p.note(format!("{how}: {}", out_text(&out.stderr)));
             p.target(
