@@ -488,7 +488,7 @@ fn attribute_files(
             std::env::var_os("XDG_CONFIG_HOME")
                 .filter(|d| !d.is_empty())
                 .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .or_else(|| crate::env::home_dir().map(|h| h.join(".config")))
                 .map(|d| d.join("git").join("attributes"))
         });
     if let Some(global) = global {

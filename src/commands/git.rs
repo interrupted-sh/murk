@@ -132,12 +132,13 @@ pub(crate) fn cmd_merge_driver(
     // refuse, writes nothing: git keeps ours as the working file, byte for
     // byte, and nothing of a refused input reaches it.
     if let Some(refused) = output.result.conflicts.iter().find(|c| c.writes_nothing()) {
-        eprintln!(
-            "{} {} — {}",
-            "✕".red(),
-            refused.field.bold(),
-            refused.reason
-        );
+        // `first_write` is a refused result with its own advice below; show
+        // it as the result, not by its internal name.
+        let label = match refused.field.as_str() {
+            "first_write" => "result",
+            field => field,
+        };
+        eprintln!("{} {} — {}", "✕".red(), label.bold(), refused.reason);
         for line in &ours_unchanged {
             eprintln!("  {line}");
         }

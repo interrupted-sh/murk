@@ -91,6 +91,14 @@
 //!
 //! `MURK_TRUST_CASES` sets the number of cases (default 8, sized for CI);
 //! `.github/workflows/invariants.yaml` runs a nightly soak with many more.
+//!
+//! Limit: the harness has no pin-side model of agent-grant tombstones. It
+//! does not model `revoked_grants_seen`, `readmitted_grants` or
+//! `grants_live_on` in a machine's pin, and the agent probe has no pin. The
+//! "A revoke takes its grants with it" oracle reads only the vault's own
+//! revoked set. So the soak is not evidence that a machine refuses a revoked
+//! grant from its pin records. The `R-I16` rows in `tests/invariant_rows.tsv`
+//! cover those refusals.
 
 mod common;
 
@@ -1744,9 +1752,14 @@ impl<'f> World<'f> {
             return;
         }
         let dropped = self.pin_takes(&obs, bytes, took);
-        let Some(origin) = self.origins.get(&blob_id(bytes)).copied() else {
-            return;
-        };
+        // Every vault the harness writes records its origin, so an accepted
+        // vault with none is a harness bug: the model would keep no record
+        // and the oracle would give no verdict.
+        let origin = self
+            .origins
+            .get(&blob_id(bytes))
+            .copied()
+            .unwrap_or_else(|| panic!("{obs:?} accepted a vault with no recorded origin at {at}"));
         // The step a removal of `who` counts from: their latest revoke at or
         // before this vault, unless they were authorized again since; else
         // this vault's own step (a member's own code that drops them, or a

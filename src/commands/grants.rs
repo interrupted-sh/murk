@@ -254,6 +254,7 @@ pub(crate) fn mint_grant(
     // Renewal: drop the existing grant and revoke its key before minting the
     // replacement — one vault write covers both, so there is no window with two
     // live keys and no partial revoke-without-regrant state on failure.
+    let mut renewed = None;
     if renew && current.grants.contains_key(name) {
         let old = try_or_die(murk_cli::remove_grant(&mut current, name));
         let exposed = grant_exposure(&vault, &current, &old);
@@ -266,21 +267,7 @@ pub(crate) fn mint_grant(
         // history, so those keys owe a rotation, as after `agent revoke`.
         let owed = still_exposed(&vault, &exposed, &result.exposed_groups);
         murk_cli::mark_revoked(&mut vault, &owed, chrono::Utc::now());
-        eprintln!(
-            "{} renewing {} — its previous key is revoked",
-            "◆".magenta(),
-            name.bold()
-        );
-        if !owed.is_empty() {
-            eprintln!(
-                "  {}",
-                format!(
-                    "it could read {} — rotate them to close it fully (`murk rotate --list` tracks them)",
-                    owed.join(", ")
-                )
-                .dimmed()
-            );
-        }
+        renewed = Some(owed);
     }
 
     // Set the allow-list before validating scope so a single save covers both the
@@ -290,11 +277,6 @@ pub(crate) fn mint_grant(
         vault.policy = Some(murk_cli::types::Policy {
             agent_allow_tags: tags.to_vec(),
         });
-        eprintln!(
-            "{} agent allow-list set to {}",
-            "◆".magenta(),
-            tags.join(", ").bold()
-        );
     }
 
     // The vault's policy decides which keys may be granted to an agent.
@@ -365,6 +347,31 @@ pub(crate) fn mint_grant(
         die(&e, 1);
     }
 
+    // Report what the save did only once it succeeded.
+    if let Some(owed) = &renewed {
+        eprintln!(
+            "{} renewing {} — its previous key is revoked",
+            "◆".magenta(),
+            name.bold()
+        );
+        if !owed.is_empty() {
+            eprintln!(
+                "  {}",
+                format!(
+                    "it could read {} — rotate them to close it fully (`murk rotate --list` tracks them)",
+                    owed.join(", ")
+                )
+                .dimmed()
+            );
+        }
+    }
+    if let Some(tags) = allow_tags {
+        eprintln!(
+            "{} agent allow-list set to {}",
+            "◆".magenta(),
+            tags.join(", ").bold()
+        );
+    }
     eprintln!(
         "{} granted {} read access to {} key{} until {}",
         "◆".magenta(),

@@ -329,6 +329,8 @@ A grant's key file carries the same entries as `# murk-trusted-signer:` header l
 
 **No home directory.** murk takes the home directory from `HOME`, else `USERPROFILE`. An empty or relative value counts as no home directory: murk warns once, and keeps no trust pin and reads no stored key. A relative path would resolve inside the working directory, often a checkout, so a pin that the repository commits there would become this machine's anchor (`docker run -e HOME=` is one way to get an empty `HOME`).
 
+**A pin or key file that git commits.** An absolute `HOME` can also be inside a checkout (`HOME=/workspace` in a container). murk then checks with `git ls-files` whether git tracks a file in the pin directory or in a key directory. When it does, or when git fails, murk warns and uses no trust pin, or no stored key, for that vault. So a pin or key that the repository commits never becomes this machine's own.
+
 **Where the anchor comes from.** Acceptance comes only from the anchor: the trust pin, `MURK_TRUSTED_SIGNERS` when it is set, or for a grant load the `# murk-trusted-signer:` lines of the grant key file. Nothing in the repository is an anchor. The vault chooses its own recipients and its own signer registry, so a valid signature alone proves nothing.
 
 The anchor must reach murk through a channel that someone with repo write cannot edit: a protected CI variable, or your own shell. A value in a workflow file in the repository, or in `.envrc` (which `murk init` can write), is repository content. So is a `.env` file that a dotenv loader reads. Whoever can push to the repository can change such a value, and then chooses the signers. murk cannot tell where a variable came from, so it cannot check this rule.

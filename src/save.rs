@@ -510,7 +510,10 @@ pub fn save_vault(
             .publish(prepared.staged, Some(record))
             .map_err(MurkError::Trust)?
         {
-            Publish::Published => return Ok(()),
+            Publish::Published => {
+                announce_new_group_members(original, current);
+                return Ok(());
+            }
             Publish::TrustChanged => {}
             Publish::TargetChanged => {
                 *vault = loaded;
@@ -756,7 +759,6 @@ fn prepare_save(
     refuse_revoked_grants(vault_path, vault, original, current, pin)?;
     check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver, pin)?;
     let revoked = revoked_grants_for_save(vault_path, original, current, pin);
-    announce_new_group_members(original, current);
 
     // Agent grant pubkeys are deliberately excluded from the shared "everyone"
     // layer: a granted agent must read only the scoped values granted to it, not
@@ -1036,8 +1038,9 @@ pub(crate) fn derived_vault_id(vault: &types::Vault) -> String {
         })
 }
 
-/// Say which recipients a group gains in this save, before their ciphertexts
-/// are written: a membership change should never be silent.
+/// Say which recipients a group gained in this save, once the save is
+/// published: a membership change should never be silent, and a save that
+/// fails must not claim one.
 fn announce_new_group_members(original: &types::Murk, current: &types::Murk) {
     for (group, members) in &current.groups {
         let before = original.groups.get(group);
