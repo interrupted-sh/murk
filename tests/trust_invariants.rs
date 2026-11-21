@@ -2351,9 +2351,22 @@ impl<'f> World<'f> {
                 let mach = self.machine(m.0);
                 let person = MACHINES[m.0].1;
                 let w = &self.fx.people[who.0];
-                // murk on this machine refuses a vault that lists someone it
-                // recorded as removed, so the vouch could not be loaded here.
-                if self.removals(&Obs::Machine(m.0)).contains_key(&who.0) {
+                // A vouch is this member's own code (a forge with no pin), not
+                // murk on this machine. murk here refuses a vault that lists
+                // someone it recorded as removed, so it could not load the
+                // vouch; nor any vault it is built on that lists such a
+                // person where the removal has reached the checkout (a revoked
+                // member's forgery a pull fast-forwarded in, say). No vouch is
+                // drawn there.
+                let obs = Obs::Machine(m.0);
+                let at = head(&mach);
+                let listing = self.listed(&mach.vault());
+                let removals = self.removals(&obs);
+                if removals.contains_key(&who.0)
+                    || removals.iter().any(|(p, (_, commit))| {
+                        listing.contains(p) && self.reaches(&obs, commit, &at)
+                    })
+                {
                     return None;
                 }
                 let forged = self.forge(
@@ -6142,6 +6155,52 @@ fn readers_oracle_follows_the_harness_history_not_the_vault() {
         run.world.check_saved(&saved, "K1", &value).is_err(),
         "a reader the vault does not list must fail the oracle"
     );
+}
+
+/// A revoked member's forgery, signed with their own key, that a pull on
+/// alice's machine fast-forwards in (no merge driver runs, so murk judges
+/// nothing): murk on her machine refuses to load it or write over it, since
+/// it is signed by and lists someone it recorded as removed. A vouch, which is
+/// a member's own code and not murk, is not drawn over it: murk here could
+/// never load the result. Seeds 1794831267910282368 and 1794858455667855160
+/// drew it and failed the oracle as murk's own write.
+#[test]
+fn no_vouch_is_drawn_over_a_vault_murk_here_refuses() {
+    let mut run = Run::seasoned();
+    run.setup(&[
+        runs(Op::Forge {
+            by: Attacker::Revoked,
+            base: Base::NewestOpenable,
+            generation: Gen::Next,
+            sign: Sign::Own,
+            to: Dest::Main,
+        }),
+        accepts(Op::Sync { m: M(0) }),
+    ])
+    .unwrap();
+    let alice = run.world.machine(0);
+    assert!(
+        run.world.listed(&alice.vault()).contains(&3),
+        "the pull brought in the forgery, which lists dave"
+    );
+    assert!(
+        run.play(&Op::Vouch {
+            m: M(0),
+            who: P(0),
+            key: Planted::Sock,
+        })
+        .is_none(),
+        "a vouch over a vault murk here refuses is not drawn"
+    );
+    run.setup(&[
+        refuses(Op::Load {
+            m: M(0),
+            at: At::Main,
+        }),
+        refuses(Op::Save { m: M(0), key: K(1) }),
+        refuses(Op::Authorize { m: M(0), who: P(3) }),
+    ])
+    .unwrap();
 }
 
 /// The pin oracle of an environment-anchored observer that keeps its `HOME`
