@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1603,7 +1603,7 @@
+     }
+     // Only an authority ancestor says that a side kept a key rather than
+     // added it (see `merge_side_counter_or_removal`).
+-    let authority = base.filter(|(_, groups)| groups.is_some()).map(|(b, _)| b);
++    let authority = base.map(|(b, _)| b);
+     if let Some(refusal) = merge_side_counter_or_removal(
+         vault_path,
+         side,

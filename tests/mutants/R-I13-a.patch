@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -897,7 +897,7 @@
+         Some(
+             "theirs' save counter or vault id differs from both base and ours, which only a key can merge",
+         )
+-    } else if theirs_vault.meta != base_vault.meta && theirs_vault.meta != ours_vault.meta {
++    } else if false && theirs_vault.meta != base_vault.meta && theirs_vault.meta != ours_vault.meta {
+         // Any write re-encrypts the meta, so this can't tell a real group,
+         // grant, pin or signer change from a rewrite. Refuse rather than drop
+         // what may be a member removal.

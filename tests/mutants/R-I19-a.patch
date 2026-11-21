@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1164,7 +1164,8 @@
+         });
+     }
+     let signer = signer?;
+-    if p.has_trust()
++    if false
++        && p.has_trust()
+         && let Some(group) = unauthorised_group_change(loaded, p, signer)
+     {
+         return Some(Refusal::GroupChange {

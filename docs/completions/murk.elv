@@ -109,6 +109,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;rm'= {
+            cand --group 'Remove only the value held by this group, which must have no member who is a recipient'
             cand --vault 'Vault filename'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -359,6 +360,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --vault 'Vault filename'
             cand --rotate 'Rotate the secrets they had access to in the same session'
             cand --force 'Revoke every key of a multi-key GitHub user without confirmation'
+            cand --allow-orphan 'Revoke even if a group that holds values is left with no member who is a recipient'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -386,6 +388,7 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --vault 'Vault filename'
             cand --rotate 'Rotate the secrets they had access to in the same session'
             cand --force 'Revoke every key of a multi-key GitHub user without confirmation'
+            cand --allow-orphan 'Revoke even if a group that holds values is left with no member who is a recipient'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -445,7 +448,8 @@ set edit:completion:arg-completer[murk] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'murk;trust'= {
-            cand --re-add 'Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it'
+            cand --re-add 'Trust a key this machine recorded as removed from the vault, or holds as a revoked agent grant, again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key, or holding a revoked grant, is never trusted without it'
+            cand --shares-identity-with 'Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on'
             cand --vault 'Vault filename'
             cand --yes 'Accept without asking, for scripts. Review the vault first'
             cand --print-key 'Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and signing-key fingerprint (for teammates to confirm), then exit'

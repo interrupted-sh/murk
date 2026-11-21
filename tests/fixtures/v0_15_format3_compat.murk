@@ -1,0 +1,28 @@
+{
+  "version": "3.0",
+  "created": "2026-11-19T04:47:00Z",
+  "vault_name": "test.murk",
+  "vault_id": "c2e4192abb0d79402e5e40d166429adb",
+  "generation": 2,
+  "recipients": [
+    "age1v5p78kuas7ccnufrtlexg40ymqv7d00309hxdea5vtsh9kqts5kshkr9eq"
+  ],
+  "schema": {
+    "TOKEN": {
+      "description": "fixture token",
+      "created": "2026-11-19T04:47:04Z",
+      "updated": "2026-11-19T04:47:04Z"
+    }
+  },
+  "secrets": {
+    "TOKEN": {
+      "shared": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBVOTVIMWVnZ3M0bFViWnpGakFjT1hTRWtNYmJtalV2WXZ3UFJBTVZETG5RCmtWbHBVbW0xVkhuSVR1T1MxVzRqcnIwV2NSUEZJRkhQV28waDgyTnFzRFkKLT4gL3htTzFwRC1ncmVhc2UgOkpUClhsNVFGaUpPaFBTaWtJWWI2dlk5dTRTenhjclY4QkI0dk1vQnV6d2U3K0MzWWxQYlFTdlViNjVIZ3dFci9TdXgKTVVoMW00ZXRLaEtIM0xxRlVMMGR5T3JvQVZ1VWtWcUJzakhZVG9mVVFnY3VpNjJlZ2I1YTVDSm5Gd3dWL3cKLS0tIHEvSEdSeFVEMUpUdW4rMWFjbnNmSDRGbDVLK2tSNVhJZ1dHVUNTL1dDbVkKon4tyE+TsO36lOJVObulLAJ6eP3hqx42lfck7Cy3xpaeU55mcO2GOMjqqeX5YD3gAIDsdXbNZSg="
+    }
+  },
+  "meta": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB6RnFyRC9ERDZLRklEblJFeHBhdnRPTUJnNmlYcFNaeG1rTE82MEVKVFQwCkd3WFd1T2xyMDd1QnM4TFhJZmtyZmcyY3o0ZER2aCtaQnhyQzhSTkdkdmsKLT4gKFFDUHUtZ3JlYXNlIC5kO3RtW0kgKC5GdFdVNiIgeFcgc048ZUhxXwpxU0VNcGU4YXR5eDM2OStralp6NUJEdTRSd2NPZXNVY2M4VnNNNkZ3Myt4ckUxRERKYlBlZzZveWI4ZHEKLS0tIHdUQnhpYzQ2eGhlUkdFWXBhMnFzTVNscUtwUTVCZm03OXFxcFNLRlBIUWMK0EmTjvdeefrGiGyo/6Myn6UtFaVscxGpGz1y8tkoHXpolltVqvjNxHLxrT2VFUzSlz5iGW7bTSOIrbtdwRK87+sLhE6XwPGp7GEcCLEqBKhJhpth4Y2kTV8wzOttNkRLAkM9t4odSBTVOrBXjLSS3SA2DgmA0vudqguarzZjy4m2d6/21Z0PDZjx9zB07KJ9mTdcyxrdCuYHqJnO/fznOYundRQKEN58vRbTg1vtm+LdIYjCicFS+jb18KjveXrA89LhTMD9hYS0lrQLx0cI9Ah96+72eAab/qu23XXrcuiLW6oYj516qKojUjQiBMUozv65XfpZcBaEgPjZDQup22XTF1j4H1Hdfpkbo/QT4C0fDE5KUDI6V3Zy3KjVW6uAkn15IDqM8w17FnA3HBk/0A/iKWPNhB7SReI/f1Tjzc/i9Zd+oeX+xEqXJe151Y5SSn4NEH0daXrXy7O8H1bUY6LCqp/896rUT+koOJt8WaDkCx4nwreSmd+gJfTedpxFuBB8PSh3j4QX/GxUQE1BZlCI0hA=",
+  "sig": {
+    "signer": "age1v5p78kuas7ccnufrtlexg40ymqv7d00309hxdea5vtsh9kqts5kshkr9eq",
+    "v": 2,
+    "sig": "YgL5o8cMSA/K5i2IDuTNWulM+v3qkf26Bd3CujAmTviI+NsmVyvC3VXvdL22Cs3XdkaTac8XQpC1j3RvfpSwDA=="
+  }
+}

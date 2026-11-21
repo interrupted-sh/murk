@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1258,7 +1258,7 @@
+ /// The vault id check against the pin (see [`judged_vault_id`]).
+ fn id_refusal(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+     let found = judged_vault_id(loaded);
+-    (!pin.vault_id.is_empty() && found != pin.vault_id).then(|| Refusal::OtherVault {
++    (false && !pin.vault_id.is_empty() && found != pin.vault_id).then(|| Refusal::OtherVault {
+         pinned: pin.vault_id.clone(),
+         found,
+     })

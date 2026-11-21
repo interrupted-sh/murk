@@ -15,7 +15,10 @@ pub(crate) fn cmd_completion_generate(shell: clap_complete::Shell) {
 pub(crate) fn cmd_completion_install(shell: clap_complete::Shell) {
     use clap_complete::Shell;
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| die(&"HOME not set", 1));
+    let home = murk_cli::home_dir()
+        .unwrap_or_else(|| die(&"HOME is unset, empty or not an absolute path", 1))
+        .display()
+        .to_string();
 
     let (dir, filename) = match shell {
         Shell::Zsh => {

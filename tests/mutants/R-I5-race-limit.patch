@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -957,7 +957,7 @@
+ /// worktrees share one pin, and each save there rewrites it, so with
+ /// several worktrees saving at once an attempt often loses the race; the
+ /// wait before the next one ([`backoff`]) spreads the attempts out.
+-pub const PUBLISH_ATTEMPTS: u32 = 16;
++pub const PUBLISH_ATTEMPTS: u32 = u32::MAX;
+ 
+ /// Wait before publish attempt `next` (2 to [`PUBLISH_ATTEMPTS`]) after the
+ /// trust state changed: a random time up to 25 ms × 2^(next − 2), at most

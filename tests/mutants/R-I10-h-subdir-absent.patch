@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1652,7 +1652,7 @@
+     fn missing(&mut self, commit: &str) -> Listing {
+         let mut path = self.prefix.clone();
+         path.push(self.name.to_string());
+-        for depth in (0..path.len()).rev() {
++        for depth in (path.len() - 1..path.len()).rev() {
+             let spec = if depth == 0 {
+                 format!("{commit}^{{tree}}")
+             } else {

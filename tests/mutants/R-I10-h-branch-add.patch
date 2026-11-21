@@ -1,0 +1,13 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -2452,7 +2452,9 @@
+         .iter()
+         .map(|r| canonical_recipient(r).into_owned())
+         .collect();
+-    members
++    let _ = members;
++    prior
++        .trusted
+         .iter()
+         .filter(|k| prior.trusted.contains(*k) && !prior.grants.contains(*k))
+         .filter(|k| !listed.contains(*k))

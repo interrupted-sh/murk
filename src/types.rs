@@ -250,6 +250,22 @@ pub struct Meta {
     /// tamper-evident.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub grants: BTreeMap<String, GrantEntry>,
+    /// Revoked agent grants: canonical grant key → its revocation ids (16
+    /// random bytes in lowercase hex). A grant key enters it when its grant
+    /// record leaves the vault (`agent revoke`, expiry, `--renew`, a merge
+    /// that drops it), and murk refuses that key as a recipient, a grant
+    /// record or an `agents` entry from then on, until `murk trust --re-add`
+    /// re-admits the ids it shows. See [`crate::trust::tombstoned`].
+    ///
+    /// The signature covers it (signed view 2 signs the meta ciphertext); the
+    /// MAC does not, and the format stays `3.x` with `blake3v8:`. So murk 0.15
+    /// reads such a vault: it ignores the field on read and drops it on save.
+    /// A machine on this release still refuses the key through its trust pin
+    /// and sidecar (`revoked_grants_seen`, `pin.grants`) and writes the set
+    /// back on its next save. A runner with no pin reads a vault a 0.15
+    /// component saved without the check.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub revoked_grants: RevokedGrants,
 }
 
 /// Manual `Debug`: identical to the derived output except `mac_key`, which
@@ -267,9 +283,14 @@ impl std::fmt::Debug for Meta {
             .field("github_pins", &self.github_pins)
             .field("groups", &self.groups)
             .field("grants", &self.grants)
+            .field("revoked_grants", &self.revoked_grants)
             .finish()
     }
 }
+
+/// Revoked agent grants: canonical grant key → its revocation ids (see
+/// [`Meta::revoked_grants`]).
+pub type RevokedGrants = BTreeMap<String, std::collections::BTreeSet<String>>;
 
 /// Outcome of verifying the vault's Ed25519 signature at load time.
 ///
@@ -308,6 +329,11 @@ pub struct Murk {
     pub groups: BTreeMap<String, Vec<String>>,
     /// Agent grants (carried from meta): grant name → metadata.
     pub grants: BTreeMap<String, GrantEntry>,
+    /// Revoked agent grants (see [`Meta::revoked_grants`]), carried from meta.
+    /// After a load this machine accepted, the ids this machine re-admitted
+    /// with `murk trust --re-add` are left out (see
+    /// [`crate::trust::without_readmitted`]).
+    pub revoked_grants: RevokedGrants,
     /// True if the vault uses a legacy unkeyed MAC (sha256/sha256v2).
     pub legacy_mac: bool,
     /// Pinned GitHub key fingerprints (carried from meta).
@@ -349,6 +375,7 @@ impl std::fmt::Debug for Murk {
             .field("grouped", &redacted_nested_keys(&self.grouped))
             .field("groups", &self.groups)
             .field("grants", &self.grants)
+            .field("revoked_grants", &self.revoked_grants)
             .field("legacy_mac", &self.legacy_mac)
             .field("github_pins", &self.github_pins)
             .field("signers", &self.signers)

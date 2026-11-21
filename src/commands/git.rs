@@ -38,6 +38,12 @@ pub(crate) fn cmd_merge_driver(
     // `.murk.*`) merge as text, as git does without a driver. Everything else
     // is refused with both sides between conflict markers, so a routine
     // `git add` cannot commit one side as the resolution.
+    //
+    // This is the one refused input that does not leave ours as it was. An
+    // input that parses but fails authentication (see `run_merge_driver`)
+    // leaves the working file equal to ours, byte for byte. An input that
+    // cannot be parsed leaves conflict markers, which never load as a vault.
+    // In both cases nothing is signed and the trust pin is unchanged.
     let parses = sides.each_ref().map(|side| parses_as_vault(side));
     if parses != [true; 3] {
         // Both branches created the vault (`murk init --vault .murk.staging`
@@ -72,15 +78,26 @@ pub(crate) fn cmd_merge_driver(
     let keep_ours_or_theirs = format!(
         "to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg})"
     );
-    let output = murk_cli::run_merge_driver(
+    // The merge and its write of %A run under the trust pin lock (see
+    // `run_merge_driver_into`): %A is written only if the trust state and %A
+    // are as the merge read them, and a failure leaves %A as it was.
+    let (output, _) = murk_cli::run_merge_driver_into(
         &base_contents,
         &ours_contents,
         &theirs_contents,
         &vault_path,
+        Path::new(ours_path),
     )
     .unwrap_or_else(|e| {
         let mut lines = vec![e];
-        lines.extend(ours_unchanged.iter().cloned());
+        if fs::read(ours_path).is_ok_and(|now| now == ours_bytes) {
+            lines.extend(ours_unchanged.iter().cloned());
+        } else {
+            lines.push(format!(
+                "the working file {shown} is no longer ours as git gave it, and theirs was NOT merged"
+            ));
+            lines.push("do not commit it as it is".into());
+        }
         lines.push(keep_ours_or_theirs.clone());
         die(&lines.join("\n"), 1)
     });
@@ -108,22 +125,34 @@ pub(crate) fn cmd_merge_driver(
         process::exit(1);
     }
 
-    // A merge numbered past the save counter's limit, or one with a murk 0.13
-    // side this machine hasn't accepted, is refused outright: write nothing,
-    // so git keeps ours as the working file.
+    // A merge that refuses an input (the common ancestor, ours or theirs
+    // failed its authenticity check, or the sides are different vaults), one
+    // numbered past the save counter's limit, one with a murk 0.13 side this
+    // machine hasn't accepted, or one whose signed result this machine would
+    // refuse, writes nothing: git keeps ours as the working file, byte for
+    // byte, and nothing of a refused input reaches it.
     if let Some(refused) = output.result.conflicts.iter().find(|c| c.writes_nothing()) {
-        eprintln!(
-            "{} {} — {}",
-            "✕".red(),
-            refused.field.bold(),
-            refused.reason
-        );
+        // `first_write` is a refused result with its own advice below; show
+        // it as the result, not by its internal name.
+        let label = match refused.field.as_str() {
+            "first_write" => "result",
+            field => field,
+        };
+        eprintln!("{} {} — {}", "✕".red(), label.bold(), refused.reason);
         for line in &ours_unchanged {
             eprintln!("  {line}");
         }
-        eprintln!(
-            "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
-        );
+        match refused.field.as_str() {
+            "base" | "theirs" | "vault_id" => eprintln!(
+                "  to finish: keep ours (git checkout --ours -- {arg}), then make the intended change with murk. Do not take the refused input"
+            ),
+            "first_write" => eprintln!(
+                "  to finish: this machine has not confirmed your own signing key yet; your first save of this vault here confirms it. Abort the merge (git merge --abort), make one ordinary save (for example `murk describe KEY \"...\"`), commit it, then merge again"
+            ),
+            _ => eprintln!(
+                "  to finish: keep ours (git checkout --ours -- {arg}) and redo their changes with murk, or take theirs (git checkout --theirs -- {arg}) and redo ours"
+            ),
+        }
         process::exit(1);
     }
 
@@ -134,23 +163,8 @@ pub(crate) fn cmd_merge_driver(
         );
     }
 
-    // Write merged result to ours path (%A). The write replaces the file
-    // atomically, so a failed write normally leaves ours as it was; say what
-    // the working file holds either way.
-    if let Err(e) = vault::write(Path::new(ours_path), &output.result.vault) {
-        let mut lines = vec![format!("writing merged vault: {e}")];
-        if fs::read(ours_path).is_ok_and(|now| now == ours_bytes) {
-            lines.extend(ours_unchanged.iter().cloned());
-        } else {
-            lines.push(format!(
-                "the working file {shown} may hold part of the merge, and theirs was NOT merged"
-            ));
-            lines.push("do not commit it as it is".into());
-        }
-        lines.push(keep_ours_or_theirs);
-        die(&lines.join("\n"), 1);
-    }
-
+    // The merged result is in %A now (see above). The rename is atomic, so
+    // %A holds either ours or the whole merged vault.
     if output.result.conflicts.is_empty() {
         // Final guard: exit 0 only with a file murk reads as a vault.
         if !reads_back_as_vault(Path::new(ours_path)) {

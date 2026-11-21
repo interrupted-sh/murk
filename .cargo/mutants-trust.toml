@@ -1,0 +1,49 @@
+# cargo-mutants trust profile — https://mutants.rs/
+#
+# The trust and merge core: the load verdict and pin reassessment (trust), the
+# pin files (pins), the save path that signs and records an own save (save),
+# the merge driver (merge), load, the MAC and signature schemes (mac,
+# signature, signing), and git (whole here; the weekly run scopes it to the
+# history walks and git_command, see mutants.yaml). Many of these guards are
+# held only by the integration harness, so each mutant runs the lib tests and
+# the trust suites, not `--lib` alone (a `--lib` run scored most of them as
+# missed when integration tests kill them).
+#
+# Run locally: cargo mutants --config .cargo/mutants-trust.toml
+examine_globs = [
+    "src/trust.rs",
+    "src/pins.rs",
+    "src/save.rs",
+    "src/merge.rs",
+    "src/load.rs",
+    "src/mac.rs",
+    "src/signature.rs",
+    "src/signing.rs",
+    "src/git.rs",
+]
+
+test_tool = "nextest"
+
+# The lib tests plus the suites that hold the trust invariants. The random
+# trust soak runs at its default case count (MURK_TRUST_CASES, 8); the stored
+# sequences and invariant rows inside it are what kill most mutants.
+additional_cargo_test_args = [
+    "--lib",
+    "--test", "authenticity",
+    "--test", "trust_invariants",
+    "--test", "auth_matrix",
+    "--test", "adversarial",
+    "--test", "cli_diagnostics",
+    "--test", "env_anchor",
+    "--test", "no_signer_pin",
+    "--test", "format4",
+]
+
+# The baseline takes a few minutes; a mutant that slows a path down (without
+# hanging) still finishes within twice that.
+timeout_multiplier = 2.0
+
+exclude_re = [
+    "impl std::fmt::Debug",
+    "impl std::fmt::Display",
+]

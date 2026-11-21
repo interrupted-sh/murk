@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1896,7 +1896,7 @@
+         Err(undecided) => return undecided,
+     };
+     let range = format!("{bound}..HEAD");
+-    let Some((revisions, more)) = vault_revisions(dir, name, &["--full-history", &range]) else {
++    let Some((revisions, more)) = vault_revisions(dir, name, &["--first-parent", &range]) else {
+         return HistoryCheck::Unreadable;
+     };
+     let Some(with_parents) = parents_of(dir, &revisions) else {

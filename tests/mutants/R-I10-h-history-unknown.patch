@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -636,7 +636,7 @@
+     /// per key.
+     fn reached(&self, pin: &TrustPin, key: &str) -> bool {
+         self.history(pin, key)
+-            .is_some_and(|h| h != crate::git::HistoryCheck::NotFound)
++            .is_some_and(|h| h == crate::git::HistoryCheck::Found)
+     }
+ 
+     /// What git showed about `key`'s removal here, when the question applies

@@ -1,0 +1,21 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1480,7 +1480,8 @@
+             reason,
+         });
+     }
+-    orphan_conflict(merged, meta)
++    let _ = orphan_conflict;
++    None
+ }
+ 
+ /// The conflict for a merge result that holds a grant key this machine
+@@ -2091,7 +2092,7 @@
+     for (key, entry) in &merged.secrets {
+         for (group, ciphertext) in &entry.grouped {
+             let members = groups.get(group);
+-            if members.is_none() {
++            if false && members.is_none() {
+                 conflicts.push(MergeConflict {
+                     field: format!("secrets.{key}"),
+                     reason: format!("group {group} no longer exists after the merge"),

@@ -1,0 +1,12 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1480,7 +1480,8 @@
+             reason,
+         });
+     }
+-    orphan_conflict(merged, meta)
++    let _ = orphan_conflict;
++    None
+ }
+ 
+ /// The conflict for a merge result that holds a grant key this machine

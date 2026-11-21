@@ -1,0 +1,22 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -510,10 +510,7 @@
+             .publish(prepared.staged, Some(record))
+             .map_err(MurkError::Trust)?
+         {
+-            Publish::Published => {
+-                announce_new_group_members(original, current);
+-                return Ok(());
+-            }
++            Publish::Published => return Ok(()),
+             Publish::TrustChanged => {}
+             Publish::TargetChanged => {
+                 *vault = loaded;
+@@ -759,6 +756,7 @@
+     refuse_revoked_grants(vault_path, vault, original, current, pin)?;
+     check_against_pin(vault_path, vault, on_disk.as_ref(), current, &saver, pin)?;
+     let revoked = revoked_grants_for_save(vault_path, original, current, pin);
++    announce_new_group_members(original, current);
+ 
+     // Agent grant pubkeys are deliberately excluded from the shared "everyone"
+     // layer: a granted agent must read only the scoped values granted to it, not

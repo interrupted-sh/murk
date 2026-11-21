@@ -1,0 +1,15 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -698,10 +698,12 @@
+     vault: &mut types::Vault,
+     saver: &crypto::MurkIdentity,
+ ) -> Result<vault::Staged, MurkError> {
++    let held = crate::pins::lock(vault_path).map_err(|e| MurkError::Trust(e.into()))?;
+     #[cfg(test)]
+     crate::pins::test_hooks::run(&crate::pins::test_hooks::BEFORE_SIGN);
+     vault.sig = None;
+     vault.sig = sign_vault(vault, saver);
++    drop(held);
+     Ok(vault::stage(Path::new(vault_path), vault)?)
+ }
+ 

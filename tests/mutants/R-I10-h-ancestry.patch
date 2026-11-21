@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -784,7 +784,6 @@
+             pin.removed_on
+                 .get(key)
+                 .is_none_or(|branches| branches.contains(b))
+-                || checkout.reached(pin, key)
+         }
+         HeadState::Branch(_) => !checkout.before.contains(key),
+         HeadState::Detached | HeadState::NotARepo => true,

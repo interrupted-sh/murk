@@ -1,0 +1,10 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -431,7 +431,6 @@
+     let (Some(mut pin), Some((pin_file, _))) = (parse_raw(vault_path, &raw)?, &raw.file) else {
+         return Ok(());
+     };
+-    pin.overlay_removals(&first.removal_records());
+     if pin.copy_due() {
+         write_sidecar(vault_path, pin_file, &pin)?;
+     }

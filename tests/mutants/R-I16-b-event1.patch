@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -627,7 +627,7 @@
+         }
+         _ => BTreeSet::new(),
+     };
+-    let dropped = keys(original).into_iter().filter(|k| !saved.contains(k));
++    let dropped = keys(original).into_iter().filter(|_| false);
+     let mut minted = types::RevokedGrants::new();
+     for key in dropped.chain(sighted.iter().cloned()) {
+         if !held.contains_key(&key) && !minted.contains_key(&key) {

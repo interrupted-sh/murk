@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1923,7 +1923,7 @@
+     }
+     if more {
+         HistoryCheck::TooLong
+-    } else if boundary_between(dir, &boundary, &bound, "HEAD") {
++    } else if !boundary.is_empty() {
+         HistoryCheck::Shallow
+     } else if missing {
+         missing_object(dir)

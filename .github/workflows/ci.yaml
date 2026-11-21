@@ -219,7 +219,29 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
+      # Tests must never touch the real HOME: every murk spawn and every lib
+      # test that loads or saves sets its own. HOME points at an empty
+      # sentinel during the run (cargo and rustup keep their real homes), and
+      # any murk state that appears there fails the job. Windows reads
+      # USERPROFILE, so the sentinel runs on the Unix runners.
+      - name: Point HOME at an empty sentinel
+        if: runner.os != 'Windows'
+        run: |
+          {
+            echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            echo "HOME=$RUNNER_TEMP/home-sentinel"
+          } >>"$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/home-sentinel"
       - run: cargo nextest run --all-features --profile ci
+      - name: No test wrote murk state into HOME
+        if: runner.os != 'Windows' && !cancelled()
+        run: |
+          if [ -e "$HOME/.config/murk" ]; then
+            find "$HOME/.config/murk"
+            echo "::error title=Test wrote into HOME::a test wrote murk state into HOME; give it crate::testutil::temp_home() or a murk_bin(home) spawn"
+            exit 1
+          fi
       - uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1
         if: always()
         with:
@@ -237,6 +259,46 @@ jobs:
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test matrix failed"
             exit 1
+          fi
+
+  # Invariant rows in state `pending` (tests/invariant_rows.tsv) assert
+  # behaviour that is not built yet: format 4, lineage, the grant tombstone.
+  # The test job skips them. Here only they run (MURK_ROWS=pending), each
+  # reporting whether it reached its decisive step and whether its target
+  # holds. A pending row never fails CI; one whose target now holds raises a
+  # warning asking for it to be flipped to `enforced`.
+  pending:
+    name: Pending invariant rows
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Run the pending rows
+        env:
+          MURK_ROWS: pending
+        run: |
+          set -o pipefail
+          cargo test --all-features --tests -- row_ --nocapture 2>&1 | tee pending.log
+      - name: Summarize
+        if: always()
+        run: |
+          # A row that never reached its decisive step proves nothing yet, so
+          # it is listed apart from the rows whose scenario really ran.
+          reached=$(grep '^ROW .* pending (' pending.log | grep -cv 'did not reach' || true)
+          unreached=$(grep -c '^ROW .*did not reach' pending.log || true)
+          {
+            echo "## Pending invariant rows"
+            echo
+            echo "Reached their decisive step: $reached. Did not reach it: $unreached."
+            echo
+            echo '```'
+            grep '^ROW ' pending.log || echo "no pending row ran"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ "$unreached" -gt 0 ]; then
+            echo "::notice title=Pending rows not reached::$unreached pending row(s) did not reach their decisive step; see the step summary"
           fi
 
   coverage:

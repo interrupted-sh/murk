@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1121,7 +1121,7 @@
+         .generation
+         .max(theirs.generation)
+         .max(pin.map_or(0, |p| p.generation));
+-    crate::trust::next_generation(highest).ok_or_else(|| MergeConflict {
++    Some(highest.saturating_add(1)).ok_or_else(|| MergeConflict {
+         field: "generation".into(),
+         reason: format!(
+             "the save counter is at its limit — the merged vault would be numbered above {}, the largest murk accepts, so every machine would refuse it. Abort the merge; {}",

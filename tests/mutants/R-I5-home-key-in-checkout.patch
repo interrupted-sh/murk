@@ -1,0 +1,11 @@
+--- a/src/env.rs
++++ b/src/env.rs
+@@ -640,7 +640,7 @@
+     let home = home_dir()
+         .ok_or("cannot determine home directory: HOME is unset, empty or not an absolute path")?;
+     let dir = home.join(".config").join("murk").join(name);
+-    if crate::pins::committed_dir(
++    if false && crate::pins::committed_dir(
+         &dir,
+         &format!("the {what}"),
+         "murk reads and stores no key there. Set MURK_KEY or MURK_KEY_FILE",

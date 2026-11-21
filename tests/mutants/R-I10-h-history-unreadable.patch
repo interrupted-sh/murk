@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1905,7 +1905,7 @@
+     let (mut missing, mut unreadable) = (false, false);
+     let mut note = |l: Listing| match l {
+         Listing::Missing => missing = true,
+-        Listing::Unreadable => unreadable = true,
++        Listing::Unreadable => {}
+         Listing::Lists(_) | Listing::Absent => {}
+     };
+     for (commit, parents) in &with_parents {

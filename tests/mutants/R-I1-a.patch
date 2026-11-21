@@ -1,0 +1,17 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1089,12 +1089,12 @@
+             });
+         }
+     };
+-    if !is_trusted {
++    if false && !is_trusted {
+         return Some(Refusal::UntrustedSigner {
+             signer: signer.to_string(),
+         });
+     }
+-    signer_key_refusal(loaded, signer, external_signers, trusted_pin)
++    signer_key_refusal(loaded, signer, external_signers, trusted_pin).filter(|_| false)
+ }
+ 
+ /// The vault id `loaded` is judged by. A v1 vault, and an unsigned murk 0.13

@@ -182,6 +182,8 @@ pub(crate) fn cmd_add(
     ));
     let needs_desc_hint = write.needs_desc_hint;
 
+    save_vault(vault_path, &mut vault, &original, &current);
+
     report_move(key, &write);
     eprintln!(
         "{} added {}{}",
@@ -196,8 +198,6 @@ pub(crate) fn cmd_add(
             format!("run: murk describe {key} \"your description\"").dimmed()
         );
     }
-
-    save_vault(vault_path, &mut vault, &original, &current);
 }
 
 pub(crate) fn cmd_import(
@@ -287,6 +287,7 @@ pub(crate) fn cmd_import(
         imported.push((key, write));
     }
 
+    save_vault(vault_path, &mut vault, &original, &current);
     for (key, write) in &imported {
         report_move(key, write);
         eprintln!(
@@ -296,8 +297,6 @@ pub(crate) fn cmd_import(
             tiers_label(&write.tiers)
         );
     }
-
-    save_vault(vault_path, &mut vault, &original, &current);
     let count = imported.len();
     let label = match &tier {
         Some(SecretTier::Group(name)) => format!(" into group {name}"),
@@ -352,6 +351,7 @@ pub(crate) fn cmd_generate(
         &pubkey,
     ));
 
+    save_vault(vault_path, &mut vault, &original, &current);
     report_move(key, &write);
     eprintln!(
         "{} generated {}{}",
@@ -359,8 +359,6 @@ pub(crate) fn cmd_generate(
         key.bold(),
         tiers_label(&write.tiers)
     );
-
-    save_vault(vault_path, &mut vault, &original, &current);
 }
 
 pub(crate) fn cmd_rotate(
@@ -500,8 +498,10 @@ fn rotation_targets(tiers: &murk_cli::KeyTiers) -> Result<Vec<SecretTier>, Strin
 }
 
 /// List keys needing rotation — the same signals doctor reports, but scoped to
-/// rotation and machine-readable. Human mode exits 1 when anything needs
-/// rotating, so it can gate scripts; JSON mode exits 0 either way.
+/// rotation and machine-readable. With a key it also lists the values of an
+/// orphaned group ([`murk_cli::orphaned_groups`]), which no recipient can
+/// rotate. Human mode exits 1 when anything is listed, so it can gate scripts;
+/// JSON mode exits 0 either way.
 ///
 /// A gate must not be passable by editing the plaintext header, so with a key
 /// the vault is loaded and verified first ([`read_header`]); a tampered or
@@ -509,8 +509,18 @@ fn rotation_targets(tiers: &murk_cli::KeyTiers) -> Result<Vec<SecretTier>, Strin
 /// written and says so (`verified: false`, the `warn` line), and `MURK_STRICT`
 /// refuses to hand back such a result.
 pub(crate) fn cmd_rotate_list(json: bool, vault_path: &str) {
-    let (vault, verified) = read_header(vault_path);
-    let issues = murk_cli::rotation_health(&vault, chrono::Utc::now());
+    let (vault, murk) = read_header(vault_path);
+    let verified = murk.is_some();
+    // Group membership is in the encrypted meta, so only a key finds orphans.
+    let orphaned = murk
+        .as_ref()
+        .map(|m| murk_cli::orphaned_groups(&vault, m))
+        .unwrap_or_default();
+    let issues = rotatable_issues(
+        &vault,
+        &orphaned,
+        murk_cli::rotation_health(&vault, chrono::Utc::now()),
+    );
 
     if !verified {
         warn_unverified();
@@ -518,7 +528,14 @@ pub(crate) fn cmd_rotate_list(json: bool, vault_path: &str) {
     let refuse = !verified && murk_cli::hardening::strict_mode();
 
     if json {
-        let out = serde_json::json!({ "verified": verified, "issues": &issues });
+        let mut out = serde_json::json!({ "verified": verified, "issues": &issues });
+        // Present only when a group is orphaned, so the usual shape is unchanged.
+        if !orphaned.is_empty() {
+            out["orphaned"] = orphaned
+                .iter()
+                .map(|g| serde_json::json!({ "group": g.name, "keys": g.keys }))
+                .collect();
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         if refuse {
             refuse_unverified();
@@ -526,7 +543,7 @@ pub(crate) fn cmd_rotate_list(json: bool, vault_path: &str) {
         return;
     }
 
-    if issues.is_empty() {
+    if issues.is_empty() && orphaned.is_empty() {
         if refuse {
             refuse_unverified();
         }
@@ -534,7 +551,11 @@ pub(crate) fn cmd_rotate_list(json: bool, vault_path: &str) {
         return;
     }
 
-    let findings: Vec<Finding> = issues.iter().map(rotation_finding).collect();
+    let findings: Vec<Finding> = issues
+        .iter()
+        .map(rotation_finding)
+        .chain(orphaned.iter().flat_map(orphan_findings))
+        .collect();
     report_findings(&findings, "rotation");
 }
 
@@ -546,35 +567,105 @@ fn refuse_unverified() -> ! {
     )
 }
 
-pub(crate) fn cmd_rm(key: &str, vault_path: &str) {
+pub(crate) fn cmd_rm(key: &str, group: Option<&str>, vault_path: &str) {
     let (mut vault, murk, identity, _lock) = load_vault_locked(vault_path);
     let pubkey = try_or_die(identity.pubkey_string());
     let original = murk.clone();
     let mut current = murk;
 
+    if let Some(group) = group {
+        rm_orphaned_value(&mut vault, &mut current, key, group);
+        save_vault(vault_path, &mut vault, &original, &current);
+        eprintln!(
+            "{} removed the value of {} in group {group}",
+            "◆".magenta(),
+            key.bold()
+        );
+        return;
+    }
+
     // Removing a key drops only what the operator can read; anything else
-    // would stay on disk while `ls` stops listing it. Refuse instead.
-    try_or_die(murk_cli::require_group_access(
-        &vault, &current, key, &pubkey,
-    ));
+    // would stay on disk while `ls` stops listing it. Refuse instead. The one
+    // exception is the value of an orphaned group: no recipient can read it,
+    // so any recipient may drop its ciphertext (see `murk_cli::orphaned_groups`).
+    let orphaned: Vec<String> = murk_cli::orphaned_groups(&vault, &current)
+        .into_iter()
+        .filter(|g| g.keys.iter().any(|k| k == key))
+        .map(|g| g.name)
+        .collect();
     let tiers = murk_cli::key_tiers(&vault, &current, key, &pubkey);
+    if let Some(group) = tiers.foreign_groups.iter().find(|g| !orphaned.contains(g)) {
+        die(
+            &format_args!(
+                "{key} is held by group {group}, which you are not a member of — only a member can change it"
+            ),
+            1,
+        );
+    }
     let holds_unreadable = vault
         .secrets
         .get(key)
         .is_some_and(|e| !e.private.is_empty());
     if holds_unreadable && !tiers.shared && tiers.groups.is_empty() && !tiers.own_override {
+        let hint = match orphaned.first() {
+            Some(g) => format!(
+                "\nto remove only the value of orphaned group {g}, run `murk rm {key} --group {g}`"
+            ),
+            None => String::new(),
+        };
         die(
             &format_args!(
-                "{key} holds only other recipients' personal overrides, which only they can remove"
+                "{key} holds other recipients' personal overrides, which only they can remove{hint}"
             ),
             1,
         );
     }
 
     murk_cli::remove_secret(&mut vault, &mut current, key);
+    // The save keeps ciphertext the operator could not read at load, so drop
+    // the orphaned values here.
+    if let Some(entry) = vault.secrets.get_mut(key) {
+        entry.grouped.retain(|g, _| !orphaned.contains(g));
+        if entry.shared.is_empty() && entry.private.is_empty() && entry.grouped.is_empty() {
+            vault.secrets.remove(key);
+        }
+    }
 
     save_vault(vault_path, &mut vault, &original, &current);
     eprintln!("{} removed {}", "◆".magenta(), key.bold());
+}
+
+/// `murk rm KEY --group GROUP`: drop only the value of `key` held by `group`,
+/// which must be orphaned ([`murk_cli::orphaned_groups`]). Every other value of
+/// the key, including other recipients' personal overrides, stays. When no
+/// value is left, the key goes with it.
+fn rm_orphaned_value(vault: &mut types::Vault, current: &mut types::Murk, key: &str, group: &str) {
+    let orphaned = murk_cli::orphaned_groups(vault, current)
+        .into_iter()
+        .any(|g| g.name == group && g.keys.iter().any(|k| k == key));
+    if !orphaned {
+        die(
+            &format_args!(
+                "{key} has no value in an orphaned group {group}\n`--group` removes only the value of a group with no member who is a recipient. To remove the key, run `murk rm {key}`"
+            ),
+            1,
+        );
+    }
+    let entry = vault
+        .secrets
+        .get_mut(key)
+        .expect("an orphaned group's key has a vault entry");
+    entry.grouped.remove(group);
+    if entry.shared.is_empty() && entry.private.is_empty() && entry.grouped.is_empty() {
+        murk_cli::remove_secret(vault, current, key);
+        vault.secrets.remove(key);
+    } else if entry.shared.is_empty() && entry.grouped.is_empty() {
+        // Only personal overrides are left. A revoked key never read those, so
+        // the rotation the marker asked for is gone with the group value.
+        if let Some(schema) = vault.schema.get_mut(key) {
+            schema.revoked_at = None;
+        }
+    }
 }
 
 /// In strict mode, refuse to write plaintext secret values to a regular file on

@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -1068,7 +1068,7 @@
+             }
+             Err(e) => return Err(e.into()),
+         };
+-        if read_target(&self.target)? != self.token.target {
++        if false {
+             return Ok(Publish::TargetChanged);
+         }
+         let raw = read_raw(&self.vault_path)?;

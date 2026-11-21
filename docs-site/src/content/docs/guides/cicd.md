@@ -179,12 +179,14 @@ the step.
 
 :::caution
 Set `MURK_TRUSTED_SIGNERS` only from a CI secret or the real process
-environment. Never set it from a file in the repository, or from a `.env`
-file that an app's dotenv loader reads. The variable decides which signers
-this machine trusts. The murk CLI never reads `.env`, but the Python and
-Node bindings read the process environment. So an app that calls
-`load_dotenv()` or `dotenv.config()` before `murk.load()` lets a `.env` in
-the repository choose the signers.
+environment. Never write its value into a file in the repository, such as a
+workflow file, `.envrc` or a `.env` file that an app's dotenv loader reads.
+Whoever can push to the repository can change such a file, and the variable
+decides which signers this machine trusts. murk can't tell where a variable
+came from, so it can't check this for you. The murk CLI never reads `.env`,
+but the Python and Node bindings read the process environment. So an app that
+calls `load_dotenv()` or `dotenv.config()` before `murk.load()` lets a `.env`
+in the repository choose the signers.
 :::
 
 ### The entry format
@@ -214,9 +216,23 @@ keys in the list never count.
 
 murk does not write the trust from the variable into the pin. So a
 self-hosted runner that keeps its home directory does not carry the signers
-into later jobs that do not set the variable. When the runner cannot write
-to its home directory, murk prints only a warning that it cannot save the
-pin.
+into later jobs that do not set the variable.
+
+When the runner cannot write to its home directory (a read-only `HOME` or
+file system):
+
+- A load prints a warning that murk cannot save the pin, and goes on.
+- A save or a keyed merge on a runner with no trust pin for the vault writes
+  the vault and prints a warning. A fresh runner that loads only with
+  `MURK_TRUSTED_SIGNERS` is in this case.
+- A save or a keyed merge on a runner that has a trust pin for the vault
+  fails and writes nothing. The error says so. `MURK_NO_SIGNER_PIN` does not
+  help, because the existing pin still applies. Give the job a writable
+  `HOME`.
+
+An empty or relative `HOME` (for example `docker run -e HOME=`) counts as no
+home directory. murk warns, keeps no pin and reads no stored key, so the job
+needs `MURK_KEY` or `MURK_KEY_FILE` and `MURK_TRUSTED_SIGNERS`.
 
 ### Later steps that run murk
 
@@ -243,11 +259,90 @@ A signer that you add after you mint the grant is not in its key file. The
 grant then refuses the vault. Mint it again with `--renew`, or list that
 signer in `MURK_TRUSTED_SIGNERS`.
 
+### Name the expected vault and a minimum counter
+
+:::note[Needs a newer murk]
+This section describes `MURK_EXPECTED_VAULT`, which needs the murk release
+that adds it. Older murk ignores the variable, so on an older runner it checks
+nothing.
+:::
+
+A runner without a pin checks only the signer. So it loads any vault that a
+trusted signer signed: another vault's file, or an older revision of this
+one. `MURK_EXPECTED_VAULT` narrows that. Its value is
+`<vault id>:<minimum generation>`. When it's set, murk refuses a vault:
+
+- whose `vault_id` is different, or
+- whose save counter (`generation`) is below the minimum.
+
+The check applies to a full key, to a scoped grant and to each side of a
+merge, with or without a pin. A value that murk can't parse is an error. So
+is a value with a third part: this release doesn't check a revision. So is a
+value that is set but empty, which usually means the CI secret is missing. To
+turn the check off, don't set the variable at all.
+
+To make the value:
+
+1. On a machine that trusts the vault, check out the branch that the job
+   deploys from, and pull.
+2. Run `murk verify`. Continue only when it reports no problem.
+3. Copy the line that `murk verify` prints on standard output, after
+   `expected vault`. It is `<vault id>:<generation>` for the vault it checked.
+4. Store that line as a CI secret named `MURK_EXPECTED_VAULT`.
+
+Give it to every step that runs murk, as you do `MURK_TRUSTED_SIGNERS`:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: interrupted-sh/murk-action@v1
+    with:
+      murk-key: ${{ secrets.MURK_KEY }}
+      trusted-signers: ${{ secrets.MURK_TRUSTED_SIGNERS }}
+    env:
+      MURK_EXPECTED_VAULT: ${{ secrets.MURK_EXPECTED_VAULT }}
+```
+
+Make the value again after each revoke and each rotation, from the vault that
+made the change. Until you do, the runner still loads the revision from
+before the change.
+
+Store the value only in the settings of your CI system, never in a file in
+the repository. Someone who can edit the workflow file can still delete the
+line that passes the variable, and the runner then checks nothing. Require
+review for changes to workflow files, for example with a `CODEOWNERS` entry
+for `.github/workflows/`.
+
 ### Limits
 
-A runner with no pin cannot detect a rollback. An older revision with a
-valid signature on the checked-out branch loads. Protect the branch that the
+A runner with no pin can't detect a rollback by itself. An older revision
+with a valid signature on the checked-out branch loads, unless
+`MURK_EXPECTED_VAULT` sets a minimum above it. Protect the branch that the
 job deploys from.
+
+Neither the pin nor `MURK_EXPECTED_VAULT` catches a genuine revision from a
+stale fork. A branch that split off before a revoke or rotation and kept
+saving can have a higher counter than the vault that made the change. When
+someone with repo write commits such a revision, every machine that trusts
+its signer loads it, a runner with a pin included, and the rotated values go
+back. A runner without a pin never checks group changes either. See the [threat
+model](/security/threat-model/#vault-signatures) (what it doesn't prevent,
+item 10).
+
+A runner whose trust pin recorded a removal refuses such a revision when it
+lists the removed member. A runner that loads only with
+`MURK_TRUSTED_SIGNERS` never records a removal, so it gets no such refusal.
+This is deliberate. The runner trusts only the signers in the variable, so it
+already refuses a vault that a removed member signed. If such loads recorded
+removals, any signer named in the variable could lock a member out on that
+runner. So:
+
+- A job that only reads the vault can load with `MURK_TRUSTED_SIGNERS` and
+  rely on the minimum in `MURK_EXPECTED_VAULT`. Raise the minimum after each
+  rotation and each revoke.
+- A job that saves to the vault should keep a trust pin (a runner that keeps
+  its home directory, after one `murk trust`) and load without
+  `MURK_TRUSTED_SIGNERS`, or rely on that minimum.
 
 A teammate with a hardware or `ssh-rsa` key writes the vault unsigned. CI
 refuses that vault until a signing teammate runs `murk trust` and commits the
@@ -309,11 +404,20 @@ The check has these limits:
   `murk verify` with a key, as a step that has `MURK_KEY` in its `env:`.
 - It checks the parsed vault, not the bytes of the file. A reformatted
   `.murk`, or one with an extra unknown field, still passes.
-- It trusts each signer in `trusted-signers` and nothing else. It does not
-  apply the removed-key or group-membership rules of a load. When someone
+- It trusts each signer in `trusted-signers` and nothing else. It reads no
+  trust pin, and it skips these checks of a load: the stripped-signature
+  check, agent grants, the vault id, two files with one vault id, rollback,
+  group membership, removed keys, the counter bounds and revoked agent
+  grants (trust rules 2 and 5 to 10 in
+  [SPEC.md](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules)).
+  So an older revision that a listed signer signed passes. When someone
   leaves the team, remove their entry from `MURK_TRUSTED_SIGNERS` (the
   repository variable, or the workflow file). Until you do, the check
   accepts a vault that they sign.
+- It ignores `MURK_EXPECTED_VAULT`, even when the variable is set but empty.
+  To check the vault id and a minimum counter, run a step with a key and
+  `MURK_EXPECTED_VAULT` (see
+  [Name the expected vault](#name-the-expected-vault-and-a-minimum-counter)).
 - A merge that keeps one whole side of the vault, such as `git checkout
   --ours .murk`, still passes. It drops the changes of the other side.
 

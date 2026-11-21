@@ -1,0 +1,12 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -362,6 +362,9 @@
+ /// so a vault that was created before `git init`, or pinned by an older
+ /// release, keeps its pin; writes always go to the first.
+ fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
++    if pin_writes_off() {
++        return Vec::new();
++    }
+     let Some(dir) = pin_dir() else {
+         return Vec::new();
+     };

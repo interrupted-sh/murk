@@ -1,0 +1,108 @@
+name: Watchdog
+
+# The scheduled deep runs (mutation testing, the invariant soaks, fuzzing) are
+# only useful if someone sees them go red. A scheduled run notifies nobody but
+# whoever last edited its cron, and a cancelled or timed-out run used to look
+# like no news. This workflow keeps one tracking issue per watched workflow
+# (fixed title) and comments on it each time a scheduled run:
+# - finishes as failure, cancelled or timed_out, or finishes with no jobs;
+# - has not finished by the time it should have (checked daily).
+# Close the issue once the workflow is green again.
+on:
+  workflow_run:
+    workflows: [Mutants, Invariants, Fuzz]
+    types: [completed]
+  schedule:
+    - cron: "0 12 * * *" # daily 12:00 UTC, after every watched nightly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-finished:
+    name: Judge a finished scheduled run
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=1" --jq .total_count)
+          case "$CONCLUSION" in
+            failure|cancelled|timed_out) why="finished as $CONCLUSION" ;;
+            *)
+              if [ "$jobs" -eq 0 ]; then
+                why="finished with no jobs"
+              else
+                echo "$WORKFLOW run $RUN_ID: $CONCLUSION with $jobs job(s)"
+                exit 0
+              fi
+              ;;
+          esac
+          title="Scheduled $WORKFLOW run is failing"
+          body="The scheduled $WORKFLOW run at ${HEAD_SHA} $why: ${RUN_URL}
+
+          Its job logs and artifacts name what failed (for Mutants, each MISSED or TIMEOUT mutant and any invariant row that passed with its guard disabled). Close this issue once the run is green."
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --limit 100 \
+            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+  overdue:
+    name: Find scheduled runs that never finished
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Open or update the tracking issue for an overdue workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # workflow file, display name, hours within which a scheduled run
+          # must have completed (its period plus its longest expected run).
+          while read -r file name hours; do
+            since=$(date -u -d "-$hours hours" +%Y-%m-%dT%H:%M:%SZ)
+            done_runs=$(gh run list --workflow "$file" --event schedule --status completed \
+              --limit 20 --json updatedAt \
+              | jq --arg s "$since" '[.[] | select(.updatedAt >= $s)] | length')
+            if [ "$done_runs" -gt 0 ]; then
+              echo "$name: a scheduled run completed in the last $hours hours"
+              continue
+            fi
+            title="Scheduled $name run is failing"
+            body="No scheduled $name run has completed in the last $hours hours: it is stuck, was never queued, or its schedule is disabled. Recent runs: ${GITHUB_SERVER_URL}/${GH_REPO}/actions/workflows/${file}
+
+          Close this issue once the run is green."
+            number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --limit 100 \
+              | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+          done <<'EOF'
+          mutants.yaml Mutants 36
+          invariants.yaml Invariants 36
+          fuzz.yaml Fuzz 36
+          EOF

@@ -56,6 +56,17 @@ pub fn strip_v1(vault: &mut Vault, identity: &MurkIdentity) {
 /// Recompute the MAC (in the meta) and the signature of `vault` as
 /// `identity`, which must read the meta and be able to sign.
 pub fn reseal(vault: &mut Vault, identity: &MurkIdentity) {
+    reseal_unchecked(vault, identity);
+    assert!(
+        murk_cli::decrypt_vault(vault, identity).is_ok(),
+        "the resealed vault verifies"
+    );
+}
+
+/// [`reseal`] for a vault `identity` no longer reads once resealed (its key
+/// left the recipients): the meta is read before it is re-encrypted, and
+/// the result is not checked with `identity`.
+pub fn reseal_unchecked(vault: &mut Vault, identity: &MurkIdentity) {
     let mut meta = murk_cli::decrypt_meta(vault, identity)
         .unwrap()
         .expect("the key reads the vault meta");
@@ -73,10 +84,18 @@ pub fn reseal(vault: &mut Vault, identity: &MurkIdentity) {
         v: 2,
         sig: identity.signing_key().unwrap().sign(&message),
     });
-    assert!(
-        murk_cli::decrypt_vault(vault, identity).is_ok(),
-        "the resealed vault verifies"
-    );
+}
+
+/// Change the meta of `vault` with `edit` and reseal it as `identity`
+/// (see [`reseal`]). A test uses it to write what an older murk, or a
+/// modified one, would sign.
+pub fn rewrite_meta(vault: &mut Vault, identity: &MurkIdentity, edit: impl FnOnce(&mut Meta)) {
+    let mut meta = murk_cli::decrypt_meta(vault, identity)
+        .unwrap()
+        .expect("the key reads the vault meta");
+    edit(&mut meta);
+    write_meta(vault, &meta);
+    reseal(vault, identity);
 }
 
 /// Rewrite `vault` as murk 0.13 wrote it: header version `2.0`, no vault id

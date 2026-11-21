@@ -115,11 +115,11 @@ Reports the keys that need rotating: the same overdue/expiry/post-revoke signals
 
 The result is verified whenever a key can verify it. [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads) in SPEC.md states what happens with and without a key, and under `MURK_STRICT`.
 
-`--json` prints an object, `{"verified": bool, "issues": [...]}`. `issues` is the `reason`-tagged array (`overdue`, `no_baseline`, `expired`, `expiring_soon`, `revoke_pending`). `verified` is `true` when a key verified the vault and `false` otherwise. Before 0.14 the array was printed alone ([B12](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#b12-rotate---list---json-before-014) in SPEC.md).
+`--json` prints an object, `{"verified": bool, "issues": [...]}`. `issues` is the `reason`-tagged array (`overdue`, `no_baseline`, `expired`, `expiring_soon`, `revoke_pending`). When a group is orphaned (see [`murk circle revoke`](#murk-circle-revoke)), the object also has `orphaned`, with one `{"group": NAME, "keys": [...]}` entry for each orphaned group. Group membership is encrypted, so murk finds orphaned groups only when a key verified the vault. `verified` is `true` when a key verified the vault and `false` otherwise. Before 0.14 the array was printed alone ([B12](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#b12-rotate---list---json-before-014) in SPEC.md).
 
 ## `murk rm`
 
-Removes a key from the vault (shared value, schema entry, and all private entries). No confirmation prompt: git is your safety net. Refused when the key has a value in a group you are not a member of, or holds only other recipients' personal overrides. Those values would stay in the vault, so only their owners can remove them.
+Removes a key from the vault (shared value, schema entry, and all private entries). No confirmation prompt: git is your safety net. Refused when the key has a value in a group you are not a member of, or holds only other recipients' personal overrides. Those values would stay in the vault, so only their owners can remove them. The exception is a value in an orphaned group: no recipient can read it, so any recipient can remove it. `--group GROUP` removes only the key's value in GROUP, which must be orphaned, and leaves every other value, including other recipients' personal overrides.
 
 ## `murk get`
 
@@ -222,6 +222,8 @@ Lists active grants: name, truncated pubkey, scope, and TTL status (time remaini
 
 Removes the grant and its ephemeral recipient (clearing the agent's private ciphertexts).
 
+The save also writes a revocation id for the grant key into the vault's encrypted record of revoked grants. Every machine on this release that accepts that vault refuses the key afterwards: as a recipient, as a grant record and in `circle authorize`. Expiry pruning and `agent grant --renew` (for the old key) do the same. Only `murk trust --re-add KEY` re-admits it (see [`murk trust`](#murk-trust)). Rule 10 under [Trust](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules) in SPEC.md has the details.
+
 The handed-off key can still decrypt old `.murk` versions from git history. So murk marks every key it could read as owing a rotation (`revoked_at`), as `circle revoke` does. Those keys are its scope, any key holding a private copy for it, and keys in groups it belonged to. A key is marked if it still has a shared value or a value in one of those groups. `agent grant --renew` marks the previous key's keys the same way.
 
 Rotation is the real close. `--rotate` (or the interactive prompt) re-prompts for a new value for each of those keys, in its own tier. The revoke and the rotated values are written together in one save. So a refused, short, or aborted batch writes nothing, and the grant is not revoked either. The error says how to revoke now and rotate afterwards. Nothing is saved either if the vault file changed on disk while murk waited for the values (see [`murk rotate`](#murk-rotate)). `--values-from FILE` supplies the values by name, as for `murk rotate`.
@@ -272,7 +274,11 @@ Adds a new recipient. Re-encrypts all shared secrets to include the new public k
 
 Removes a recipient by pubkey, display name or `github:username`. Re-encrypts all shared secrets without their key. Removes their private entries. murk refuses to revoke your own key, whether you name it directly or through your display name, before it prompts or writes anything. Another recipient has to revoke you. When the name covers several keys (a GitHub user with more than one key), murk lists them and asks before it revokes them all. Without a terminal it refuses unless you pass `--force`.
 
+A group whose values no current recipient can read is orphaned. Its values stay readable only by revoked keys, and no recipient can rotate them. murk refuses a revoke that orphans a group, names the group and its keys, and writes nothing. To keep the values, ask a member of the group to add another member first. To revoke anyway, pass `--allow-orphan`. murk then names the orphaned group and its keys. `murk rotate --list` and `murk doctor` continue to list them. Any recipient can clear an orphaned group: run `murk rm KEY --group GROUP` for each of its keys, then `murk group rm GROUP`.
+
 Revoking a recipient also revokes the agent grants whose key files trust it. [Revoking a recipient revokes the grants that trust it](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#revoking-a-recipient-revokes-the-grants-that-trust-it) in SPEC.md lists which grants, what murk deletes, and what it prints.
+
+When this machine saves the revoke, it records the removal in its trust pin. Every other machine records it when it accepts the vault. From then on, that machine refuses a vault that lists the revoked key, at any counter, wherever the removal applies. Only this machine's own `circle authorize` of the key, or `murk trust --re-add KEY` after review, brings the key back there (see [`murk trust`](#murk-trust)).
 
 Lists the secrets the revoked recipient had access to.
 
@@ -304,6 +310,12 @@ With `--member`, removes a recipient from the group and re-encrypts its secrets 
 
 Verifies vault integrity (MAC and signature), reports whether this machine trusts the signer and why not (the same reasons a load refuses with), checks who signed the last git commit that touched the vault, and runs safety checks without exporting secrets. Exits 1 on any finding.
 
+**Expected vault.** When verify does not refuse the vault and the vault has a vault id, it prints `ok expected vault  the value for MURK_EXPECTED_VAULT is:` on stderr and `<vault id>:<generation>` on stdout. The generation is the vault's current save counter. Store that line as the CI variable `MURK_EXPECTED_VAULT` (see [CI/CD](/guides/cicd/#name-the-expected-vault-and-a-minimum-counter)). `murk verify 2>/dev/null` prints only the value.
+
+**Shared vault ids.** verify and `murk doctor` report, under `identity`, another vault file in the checkout that has the same vault id, and say whether this machine refuses this path or the other one (see `--shares-identity-with` under [`murk trust`](#murk-trust)).
+
+**Removal records.** verify reads this machine's trust pin, so it also copies the pin's removal records into the pin's sidecar file, which murk 0.15.2 and earlier do not write. After you upgrade, run `murk verify` once in each checkout before an older murk component runs again (see the [threat model](/security/threat-model/#vault-signatures), limit 10).
+
 **Commit check.** Only when the vault has git history. A signed commit proves nothing about who the signer is: git vouches for any key it is told about, an attacker's throwaway key included.
 
 So verify reports the commit as ok only when git verified the signature and the signing key is a trusted signer of this vault. The key must be an ssh-ed25519 key in the set the Trust rules used (`MURK_TRUSTED_SIGNERS` and a grant key file's anchor when either is given, otherwise the pin's trusted set, and grant keys never count), matched by its `ssh-keygen -l` fingerprint. Only an ssh-ed25519 key can match, because it is the only key type that both signs git commits and is a murk signer. The line then reads `ok commit  last .murk commit signed by <name> with key <fingerprint>, a trusted signer of this vault`. Every other outcome is a finding, and exits 1:
@@ -330,9 +342,21 @@ It exits 0 and prints `ok signature verified by trusted signer <key>` only when 
 - **Signer not trusted.** The signer is not in `MURK_TRUSTED_SIGNERS`.
 - **Signature does not verify.** The vault's content changed after it was signed, or an age signer's entry has a different verifying key. The hint names the merge cause and the local merge.
 
-It does not decrypt, so it does not check the MAC over the values, grant expiry, rollback against earlier saves, the last commit's signature, or the safety checks above. `murk verify` with a key checks those. All lines go to stderr.
+It checks only this: the file parses as a vault, `MURK_TRUSTED_SIGNERS` is set and valid, the vault has a top-level signature, its signer is in the variable, and the signature verifies under the key the variable gives for that signer. These are trust rules 1, 3 and 4 in [SPEC.md](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules), with the variable in place of the trust pin.
 
-It also does not read the trust pin, so it does not apply the [removal and group rules](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules). A vault signed by a teammate you removed passes while their entry is in `MURK_TRUSTED_SIGNERS`. A group membership change signed by someone outside the group also passes. When someone leaves, remove their entry from `MURK_TRUSTED_SIGNERS` too. See [offboarding](/guides/offboarding/#what-stops-a-revoked-teammate-coming-back).
+It does not decrypt, so it does not check the MAC over the values, grant expiry, the last commit's signature, or the safety checks above. It reads no trust pin and no sidecar, so it skips trust rules 2 and 5 to 10:
+
+- a stripped signature (rule 2),
+- agent grants (rule 5),
+- the vault id, two files with one vault id, rollback against earlier saves, and `MURK_EXPECTED_VAULT` (rule 6),
+- group membership changes (rule 7),
+- removed keys (rule 8),
+- the counter bounds (rule 9),
+- revoked agent grants (rule 10).
+
+It ignores `MURK_EXPECTED_VAULT` completely, even when the variable is set but empty or does not parse. `murk verify` with a key checks all of these. All lines go to stderr.
+
+So an older revision signed by a trusted signer passes, and so does a vault from another repository that a trusted signer signed. A vault signed by a teammate you removed passes while their entry is in `MURK_TRUSTED_SIGNERS`. A group membership change signed by someone outside the group also passes. When someone leaves, remove their entry from `MURK_TRUSTED_SIGNERS` too. See [offboarding](/guides/offboarding/#what-stops-a-revoked-teammate-coming-back).
 
 ## `murk trust`
 
@@ -342,9 +366,21 @@ Shows who signed the vault, then asks before it records the vault in the local t
 
 `--print-key` prints your own trusted-signer entry to stdout (`age1…:<verifying key>`, or the ssh-ed25519 key line) and your fingerprint to stderr, then exits.
 
+`--re-add KEY` (repeatable) trusts again a key this machine holds as removed or as a revoked agent grant. KEY is a public key, or the name of a recipient that the vault lists. For a key the vault no longer lists, give its public key: the refusal prints it.
+
+- **A removed key.** A vault signed by or listing a key this machine recorded as removed is refused until you name it. murk then asks "trust this vault and re-add the named keys on this machine?" and takes the key out of the removal record. When the vault does not list the key, murk says so, asks, clears the record and writes nothing: "KEY can be listed again in .murk on this machine. The vault file is unchanged". Run it on each machine that recorded the removal, after a member re-adds the key with `murk circle authorize`, or before.
+- **A revoked agent grant.** murk shows the key, the vault's signer, and each revocation id this machine holds for the key, marked "in the vault's revoked grant set" or "seen on this machine". After you confirm, it re-admits exactly those ids. A later revocation of the same key gets a new id, which counts again. When the vault lists the key and its own revoked grant set holds an id for it, murk signs the vault again without those ids, so commit the result. A key that cannot sign is refused there.
+- A name that is neither is an error: "KEY is not a key this machine recorded as removed or as a revoked agent grant".
+
+A re-add of a removed key made with murk 0.15.2 or earlier does not count for this release. Run `--re-add` again with this release.
+
+`--shares-identity-with OTHER` settles two vault files in one checkout with the same vault id, which murk refuses because it cannot tell them apart. OTHER must be a vault file in the same checkout with that vault id. Review both files first. murk then trusts the vault at `--vault` only, refuses OTHER on this machine from then on, and prints "this machine trusts the vault at .murk only, and refuses OTHER from now on". When OTHER has its own trust pin for that vault id, murk deletes that pin and its sidecar. The removal records they hold are lost, and murk does not warn about it. It does not delete the file OTHER.
+
+`murk trust` never accepts a vault that `MURK_EXPECTED_VAULT` refuses, two files with one vault id (use `--shares-identity-with`), or a revoked agent grant (use `--re-add`). For these it prints "refusing to trust it".
+
 ## `murk doctor`
 
-Checks the surrounding repo for hygiene issues: inline keys in `.env`, key files sitting next to the vault, state that would be bad to commit. If a vault is present it also reads the plaintext schema and reports keys overdue for rotation or past/near their `expires_at`. That read is never integrity-checked. With no key `doctor` says so on stderr (see [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads)), and with one it still does not load the vault, so use `murk rotate --list` or `murk verify` where the result must be trusted. Exits 1 on findings.
+Checks the surrounding repo for hygiene issues: inline keys in `.env`, key files sitting next to the vault, state that would be bad to commit. If a vault is present it also reads the plaintext schema and reports keys overdue for rotation or past/near their `expires_at`. That read is never integrity-checked. With no key `doctor` says so on stderr (see [Header reads](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#header-reads)). Use `murk rotate --list` or `murk verify` where the result must be trusted. When a key loads the vault, `doctor` also reports the keys of each orphaned group (see [`murk circle revoke`](#murk-circle-revoke)) and the commands that clear them. Exits 1 on findings.
 
 ## `murk scan`
 
@@ -403,7 +439,9 @@ How `diff` verifies the working vault and the revision at the ref, and when it r
 
 ## `murk merge-driver`
 
-Git merge driver for vault files, called by git (the command is hidden from help). Its rules are in [Merge](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#merge) in SPEC.md.
+Git merge driver for vault files, called by git (the command is hidden from help). Its rules are in [Merge](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#merge) in SPEC.md, and the [merge guide](/guides/git-merge-ssh/) explains them with examples.
+
+With a key, the driver authenticates the common ancestor, ours and theirs first. When one of them fails, it writes nothing: the working file stays ours byte for byte, and the driver exits 1 and names the input. Before it signs a result, it checks that this machine would accept it. Otherwise it writes nothing and says "this machine would refuse the merged vault, so murk does not sign it". A member's first write therefore cannot be a merge while this machine has not confirmed their own signing key. Make one ordinary save first. The driver writes no trust pin. The next load records the result.
 
 ## `murk setup-merge-driver`
 

@@ -142,7 +142,11 @@ fn run() {
                 );
             }
         }
-        Command::Rm { key, vault } => cmd_rm(&key, &murk_cli::resolve_vault_path(&vault)),
+        Command::Rm { key, group, vault } => cmd_rm(
+            &key,
+            group.as_deref(),
+            &murk_cli::resolve_vault_path(&vault),
+        ),
         Command::Get { key, vault } => cmd_get(&key, &murk_cli::resolve_vault_path(&vault)),
         Command::Ls { tag, json, vault } => {
             cmd_ls(&tag, json, &murk_cli::resolve_vault_path(&vault));
@@ -229,6 +233,7 @@ fn run() {
             rotate,
             values_from,
             force,
+            allow_orphan,
             vault,
         } => {
             cmd_revoke(
@@ -236,6 +241,7 @@ fn run() {
                 rotate,
                 values_from.as_deref(),
                 force,
+                allow_orphan,
                 &murk_cli::resolve_vault_path(&vault),
             );
         }
@@ -270,6 +276,7 @@ fn run() {
                     rotate,
                     values_from,
                     force,
+                    allow_orphan,
                     vault,
                 }),
             ..
@@ -278,6 +285,7 @@ fn run() {
             rotate,
             values_from.as_deref(),
             force,
+            allow_orphan,
             &murk_cli::resolve_vault_path(&vault),
         ),
         Command::Group { sub } => cmd_group(sub),
@@ -310,13 +318,14 @@ fn run() {
             yes,
             print_key,
             re_add,
+            shares_identity_with,
             vault,
         } => {
             let vault = murk_cli::resolve_vault_path(&vault);
             if print_key {
                 cmd_trust_print_key(&vault);
             } else {
-                cmd_trust(yes, &re_add, &vault);
+                cmd_trust(yes, &re_add, shares_identity_with.as_deref(), &vault);
             }
         }
         Command::Doctor { vault } => cmd_doctor(&murk_cli::resolve_vault_path(&vault)),

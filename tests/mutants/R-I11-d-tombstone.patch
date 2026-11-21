@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1926,7 +1926,7 @@
+         signers: ours.signers.clone(),
+         // Revocations only narrow, so a two-way merge takes the union too:
+         // a user who later takes this file keeps every id.
+-        revoked_grants: union_revoked(ours, theirs),
++        revoked_grants: ours.revoked_grants.clone(),
+         ..Meta::default()
+     }
+ }

@@ -147,6 +147,14 @@ murk agent revoke codex --rotate                                   # remove the 
 - **The key is a bearer credential.** Whoever holds the key file has the access. Protect it like the secrets it unlocks.
 - **An agent that runs as you can get past the grant.** It can read `~/.config/murk/keys` directly. It can also unset `MURK_AGENT`, `MURK_STRICT`, `MURK_KEY` and `MURK_KEY_FILE` in its own shell: its next `murk` command then finds your stored key from the vault's path, and the grant no longer limits it. A change to this lookup is planned for 0.16. Until then, the boundary is a separate user, a container, or a hardware key that needs a touch for each decrypt.
 
+### A revoked grant stays revoked
+
+When `agent revoke`, an expiry or `agent grant --renew` removes a grant record, the save writes a revocation id for the grant key into the vault. The vault, not the key file, carries this record. Every machine on this release that accepts the vault then refuses the key: as a recipient on every load, and as a grant on the current vault, in every save and merge, and in `murk circle authorize`. So no machine on this release writes a vault that lets the key read again, whatever its key file says.
+
+- An old revision that still holds the grant, read on a detached HEAD or a branch this machine hasn't accepted (`git bisect`, a tag), loads with a warning. murk refuses to save or merge it, and `murk trust` doesn't accept it.
+- To re-admit a grant revoked by mistake, review the vault and run `murk trust --re-add KEY`. It shows each revocation id it re-admits and covers only those. A later revocation gets a new id.
+- A grant load reads no trust pin and can't read the record, so the holder of a revoked key can still read a vault that an older murk (0.15.2 or earlier) or a modified murk re-granted it in. An older murk also drops the record when it saves. A runner without a trust pin then reads that vault without the check. Upgrade every murk component that writes the vault. The [threat model](/security/threat-model/#vault-signatures) lists every case.
+
 ## Isolating the agent
 
 A grant's scope is a real boundary only when the grant key is the only murk key the agent can reach. That is true in CI, in a container and under a separate OS user. It is not true for an agent that runs as you on your laptop.

@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1337,7 +1337,7 @@
+         base_meta.map(|m| &m.grants),
+         &ours_meta.grants,
+         &theirs_meta.grants,
+-        (str::to_string, OnConflict::Drop),
++        (str::to_string, OnConflict::KeepOurs),
+         conflicts,
+     );
+     grants.retain(|_, grant| merged.recipients.contains(&grant.pubkey));

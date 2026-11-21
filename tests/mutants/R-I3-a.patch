@@ -1,0 +1,18 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -2153,7 +2153,14 @@
+     // the vault outside git) is current (see `is_current`): history only
+     // narrows the pin.
+     let current = match how {
+-        Acceptance::Load => is_current(loaded.vault, prior_v2, head),
++        Acceptance::Load => is_current(
++            loaded.vault,
++            prior_v2,
++            match head {
++                HeadState::Branch(_) => &HeadState::NotARepo,
++                h => h,
++            },
++        ),
+         Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
+     };
+     let dropped_on_branch = match how {

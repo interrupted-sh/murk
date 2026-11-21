@@ -553,14 +553,44 @@ pub fn agent_key_file_path(vault_path: &str, name: &str) -> Result<std::path::Pa
     Ok(agent_keys_dir()?.join(format!("{short_hash}-{name}")))
 }
 
+/// The home directory: `HOME`, else `USERPROFILE`. `None` when neither is
+/// set, or when the one set is empty or a relative path: such a path would
+/// resolve against the working directory, often inside a checkout, so a
+/// file a repository commits there would pass for this machine's trust pin,
+/// stored key or config. murk then warns once and uses no home directory.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let (name, home) = [
+        ("HOME", std::env::var_os("HOME")),
+        ("USERPROFILE", std::env::var_os("USERPROFILE")),
+    ]
+    .into_iter()
+    .find_map(|(name, value)| Some((name, value?)))?;
+    let home = std::path::PathBuf::from(home);
+    if home.is_absolute() {
+        return Some(home);
+    }
+    WARNED.call_once(|| {
+        let shown = if home.as_os_str().is_empty() {
+            "empty".to_string()
+        } else {
+            format!("\"{}\"", home.display())
+        };
+        eprintln!(
+            "warn {name} is {shown}, not an absolute path, so murk uses no home directory: it keeps no trust pin (every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer) and reads no stored key (set MURK_KEY or MURK_KEY_FILE). Set {name} to your home directory"
+        );
+    });
+    None
+}
+
 /// Collapse a leading `$HOME` in `path` to `~` for display. Grant key paths live
 /// under `~/.config/murk/agent-keys/`, so the absolute form eats 30+ columns of
 /// every line that prints one — and a shell expands `~` back, so a printed
 /// command stays copy-pasteable.
 pub fn home_short(path: &str) -> String {
-    match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        Ok(home) => shorten_home(path, &home),
-        Err(_) => path.to_string(),
+    match home_dir() {
+        Some(home) => shorten_home(path, &home.to_string_lossy()),
+        None => path.to_string(),
     }
 }
 
@@ -581,11 +611,14 @@ fn shorten_home(path: &str, home: &str) -> String {
 }
 
 /// Return `~/.config/murk/agent-keys/`, creating it if needed (dir `0700`).
+/// An error when a git repository tracks a file in it (see
+/// [`config_subdir`]).
 pub fn agent_keys_dir() -> Result<std::path::PathBuf, String> {
     config_subdir("agent-keys", "agent key directory")
 }
 
-/// Return `~/.config/murk/keys/`, creating it if needed (dir `0700`).
+/// Return `~/.config/murk/keys/`, creating it if needed (dir `0700`). An
+/// error when a git repository tracks a file in it (see [`config_subdir`]).
 fn dirs_path() -> Result<std::path::PathBuf, String> {
     config_subdir("keys", "key directory")
 }
@@ -594,22 +627,29 @@ fn dirs_path() -> Result<std::path::PathBuf, String> {
 /// only ask "is a key stored?" check this first, so asking never leaves an
 /// empty key store behind.
 pub(crate) fn has_key_store() -> bool {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .is_ok_and(|home| Path::new(&home).join(".config/murk/keys").is_dir())
+    home_dir().is_some_and(|home| home.join(".config/murk/keys").is_dir())
 }
 
 /// Return `~/.config/murk/<name>/`, creating it if needed. On Unix both it and
 /// `~/.config/murk` are set to `0700`. `what` names the directory in the
-/// creation error.
+/// errors. An error, before anything is created, when a git repository
+/// tracks a file in it, or murk cannot ask git (see
+/// [`crate::pins::committed_dir`]): a key file that a repository commits is
+/// never read or replaced.
 fn config_subdir(name: &str, what: &str) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "cannot determine home directory")?;
-    let dir = std::path::Path::new(&home)
-        .join(".config")
-        .join("murk")
-        .join(name);
+    let home = home_dir()
+        .ok_or("cannot determine home directory: HOME is unset, empty or not an absolute path")?;
+    let dir = home.join(".config").join("murk").join(name);
+    if crate::pins::committed_dir(
+        &dir,
+        &format!("the {what}"),
+        "murk reads and stores no key there. Set MURK_KEY or MURK_KEY_FILE",
+    ) {
+        return Err(format!(
+            "murk does not use the {what} {}: a git repository tracks a file in it, or murk cannot ask git (see the warning above). Set MURK_KEY or MURK_KEY_FILE, or set HOME to a directory outside the repository",
+            dir.display()
+        ));
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {what}: {e}"))?;
 
     #[cfg(unix)]
@@ -980,6 +1020,7 @@ mod tests {
     #[test]
     fn resolve_key_neither_set() {
         let (_env, _cwd, tmp, prev) = resolve_key_sandbox("neither_set");
+        let _home = crate::testutil::temp_home();
         unsafe { env::remove_var("MURK_KEY") };
         unsafe { env::remove_var("MURK_KEY_FILE") };
         let result = resolve_key();
@@ -992,6 +1033,7 @@ mod tests {
     #[test]
     fn resolve_key_empty_string_treated_as_unset() {
         let (_env, _cwd, tmp, prev) = resolve_key_sandbox("empty_string");
+        let _home = crate::testutil::temp_home();
         unsafe { env::set_var("MURK_KEY", "") };
         unsafe { env::remove_var("MURK_KEY_FILE") };
         let result = resolve_key();
@@ -1147,6 +1189,7 @@ mod tests {
         let _cwd = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = crate::testutil::temp_home();
         let dir = std::env::temp_dir().join("murk_test_resolve_ignores_dotenv");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1990,9 +2033,16 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/home/mickey") };
+        // A platform-absolute HOME: on Windows a drive-less path counts as
+        // no home directory (see `home_dir`).
+        let home = if cfg!(windows) {
+            "C:/Users/mickey"
+        } else {
+            "/home/mickey"
+        };
+        unsafe { std::env::set_var("HOME", home) };
 
-        let inside = home_short("/home/mickey/.config/murk/agent-keys/ab-codex");
+        let inside = home_short(&format!("{home}/.config/murk/agent-keys/ab-codex"));
         let outside = home_short("/etc/murk/k");
 
         unsafe {

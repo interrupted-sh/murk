@@ -199,6 +199,9 @@ pub enum Command {
     Rm {
         /// Name of the secret
         key: String,
+        /// Remove only the value held by this group, which must have no member who is a recipient
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
@@ -440,6 +443,9 @@ pub enum Command {
         /// Revoke every key of a multi-key GitHub user without confirmation
         #[arg(long)]
         force: bool,
+        /// Revoke even if a group that holds values is left with no member who is a recipient
+        #[arg(long)]
+        allow_orphan: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
@@ -461,10 +467,12 @@ pub enum Command {
         /// itself, so a text merge of two changed vaults fails this check: use
         /// it as a pull-request check in CI with no secret. It covers the
         /// parsed content, not the file's bytes: a reformatted file still
-        /// passes. murk reads no key and decrypts nothing. So it does not check
-        /// the MAC over the values, grant expiry, rollback against earlier
-        /// saves, removed keys, group membership changes or the last commit's
-        /// signature. `murk verify` with a key checks those
+        /// passes. murk reads no key, no trust pin and no sidecar, and
+        /// decrypts nothing. So it does not check the MAC over the values,
+        /// grant expiry, the vault id, rollback against earlier saves, removed
+        /// keys, revoked agent grants, group membership changes or the last
+        /// commit's signature, and it ignores MURK_EXPECTED_VAULT. `murk
+        /// verify` with a key checks those
         #[arg(long)]
         signature_only: bool,
         /// Vault filename
@@ -488,12 +496,20 @@ pub enum Command {
         /// signing-key fingerprint (for teammates to confirm), then exit
         #[arg(long, conflicts_with = "yes")]
         print_key: bool,
-        /// Trust a key this machine recorded as removed from the vault again
-        /// (its public key, or its name in the vault). Repeat for each key.
-        /// A vault signed by or listing a removed key is never trusted
-        /// without it
+        /// Trust a key this machine recorded as removed from the vault, or
+        /// holds as a revoked agent grant, again (its public key, or its name
+        /// in the vault). Repeat for each key. A vault signed by or listing a
+        /// removed key, or holding a revoked grant, is never trusted without
+        /// it
         #[arg(long = "re-add", value_name = "KEY", conflicts_with = "print_key")]
         re_add: Vec<String>,
+        /// Another vault file in this checkout with the same vault id. murk
+        /// cannot tell two files with one vault id apart, and refuses such a
+        /// vault. Review both files, then name the other file here: this
+        /// machine trusts the vault at --vault and refuses the other path
+        /// from then on
+        #[arg(long, value_name = "PATH", conflicts_with = "print_key")]
+        shares_identity_with: Option<String>,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,
@@ -812,6 +828,9 @@ pub enum CircleCommand {
         /// Revoke every key of a multi-key GitHub user without confirmation
         #[arg(long)]
         force: bool,
+        /// Revoke even if a group that holds values is left with no member who is a recipient
+        #[arg(long)]
+        allow_orphan: bool,
         /// Vault filename
         #[arg(long, env = "MURK_VAULT", default_value = ".murk")]
         vault: String,

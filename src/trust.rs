@@ -34,10 +34,11 @@
 //! 7. A group membership change must be signed by a member of that group as
 //!    pinned (removing a member who left the vault entirely is exempt).
 //! 8. A key an accepted vault removed stays removed: a vault signed by it is
-//!    refused everywhere, and a vault listing it at the generation it was
-//!    removed at or below is refused where the removal applies (see
-//!    [`removal_applies`]). A newer vault from a trusted signer that lists it
-//!    again there, or `murk trust --re-add`, brings it back.
+//!    refused everywhere, and a vault listing it, at any generation, is
+//!    refused where the removal applies (see [`removal_applies`]). Only this
+//!    machine's own save that adds it (`circle authorize`) or `murk trust
+//!    --re-add` brings it back. The pin's sidecar keeps a copy of each
+//!    record, so a murk 0.15 component that clears it does not undo it.
 //! 9. The generation may rise at most [`MAX_GENERATION_STEP`] above the mark
 //!    and never past [`MAX_GENERATION`]; a different vault with the counter
 //!    this machine accepted on the branch is a fork.
@@ -64,6 +65,66 @@ use crate::types;
 /// other machines without a pin). Grant keys listed here still never count.
 /// See [`parse_trusted_signer`] for the entry format.
 pub const TRUSTED_SIGNERS_VAR: &str = "MURK_TRUSTED_SIGNERS";
+
+/// Environment variable naming the vault a process expects and the oldest
+/// revision of it the process may load: `<vault id>:<minimum generation>`.
+/// A runner with no pin (CI) sets it from a protected variable to get an id
+/// and a rollback check. When set, every keyed load, grant load and merge
+/// side checks it, with or without a pin. See [`env_expected_vault`].
+pub const EXPECTED_VAULT_VAR: &str = "MURK_EXPECTED_VAULT";
+
+/// The value of [`EXPECTED_VAULT_VAR`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedVault {
+    pub vault_id: String,
+    pub min_generation: u64,
+}
+
+impl ExpectedVault {
+    /// Why a vault whose id is `found_id` (the id a load judges it by)
+    /// and whose counter is `found_generation` is not the one expected: the
+    /// id first, then the minimum.
+    pub fn mismatch(&self, found_id: &str, found_generation: u64) -> Option<ExpectedMismatch> {
+        if found_id != self.vault_id {
+            return Some(ExpectedMismatch::OtherVault {
+                expected: self.vault_id.clone(),
+                found: found_id.to_string(),
+            });
+        }
+        (found_generation < self.min_generation).then_some(ExpectedMismatch::BelowMinimum {
+            minimum: self.min_generation,
+            found: found_generation,
+        })
+    }
+}
+
+/// How a vault differs from what [`EXPECTED_VAULT_VAR`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedMismatch {
+    /// The vault id differs from the expected one.
+    OtherVault { expected: String, found: String },
+    /// The generation is below the expected minimum.
+    BelowMinimum { minimum: u64, found: u64 },
+}
+
+impl ExpectedMismatch {
+    /// The refusal message for the vault at `vault_path`.
+    pub fn message(&self, vault_path: &str) -> String {
+        match self {
+            ExpectedMismatch::OtherVault { expected, found } => format!(
+                "vault {vault_path} is not the vault that {EXPECTED_VAULT_VAR} names: its vault id is {}, and {EXPECTED_VAULT_VAR} expects {expected} — another vault's file may have been copied over it\ncheck out the correct vault file, or set {EXPECTED_VAULT_VAR} again from the correct vault",
+                if found.is_empty() {
+                    "empty".to_string()
+                } else {
+                    crate::validate::show(found)
+                }
+            ),
+            ExpectedMismatch::BelowMinimum { minimum, found } => format!(
+                "vault {vault_path} is older than {EXPECTED_VAULT_VAR} allows: its generation is {found}, and the minimum is {minimum} — an older revision may have been replayed\ncheck out the current vault, or set {EXPECTED_VAULT_VAR} again from the current vault"
+            ),
+        }
+    }
+}
 
 /// The largest generation accepted: 2^53 − 1, the largest integer every JSON
 /// reader holds exactly. A vault above it is refused as tampering, so no
@@ -129,6 +190,9 @@ pub struct Loaded<'a> {
     pub names: &'a std::collections::HashMap<String, String>,
     pub groups: &'a BTreeMap<String, Vec<String>>,
     pub grants: &'a BTreeMap<String, types::GrantEntry>,
+    /// The vault's own revoked grant set (see
+    /// [`types::Meta::revoked_grants`]): canonical grant key → revocation ids.
+    pub revoked: &'a types::RevokedGrants,
     /// Whether the loading identity can sign (age or ssh-ed25519).
     pub loader_can_sign: bool,
     /// The loading key, when it is known to be an operator and so can never be
@@ -151,6 +215,15 @@ pub enum Refusal {
     Unsigned,
     /// No signature, but a signed version was accepted here before.
     Downgraded,
+    /// No signature, and this machine has no trust decision for the vault.
+    UnsignedNotYetTrusted,
+    /// No signature, and it lists a recipient that is not in the pin's
+    /// trusted set (nor a recorded grant whose record it carries).
+    UnsignedRecipient { key: String },
+    /// No signature, and it carries a grant this machine has not recorded.
+    UnsignedGrant { key: String },
+    /// No signature, and a group's membership differs from the pinned one.
+    UnsignedGroupChange { group: String },
     /// The save counter is below the highest accepted here.
     RolledBack { pinned: u64, found: u64 },
     /// A vault with a murk 0.13 (view 1) signature where this machine has
@@ -174,15 +247,18 @@ pub enum Refusal {
     /// entry. Grants get freshly minted keys, so this is tampering — and
     /// recording it would mark the operator as a grant here.
     GrantBindsOperator { grant: String, key: String },
-    /// The vault is signed by, or lists, a key an accepted vault removed
-    /// (`removed_at`), and is not a newer revision re-adding it: `found` is at
-    /// or below `removed_at`, or the removed key signed it. `murk trust`
-    /// accepts it only with `--re-add` naming the key.
+    /// The vault is signed by, or lists, a key this machine recorded as
+    /// removed (`removed_at`), whatever its generation `found`. Only this
+    /// machine's own save that adds the key or `murk trust --re-add` naming
+    /// the key brings it back. `unchecked` says why git could not show
+    /// whether this branch's history holds the removal, when that is why it
+    /// applies (see [`Checkout::history_unchecked`]).
     RemovedKey {
         key: String,
         removed_at: u64,
         found: u64,
         signer: bool,
+        unchecked: Option<crate::git::HistoryCheck>,
     },
     /// A different vault with the generation this machine accepted on the
     /// branch (or outside git): the branch was rewritten, or another save
@@ -192,6 +268,27 @@ pub enum Refusal {
     GenerationJump { pinned: u64, found: u64 },
     /// The generation is above [`MAX_GENERATION`].
     GenerationOutOfRange { found: u64 },
+    /// The vault is not the one `MURK_EXPECTED_VAULT` names, or is older
+    /// than its minimum.
+    NotExpected(ExpectedMismatch),
+    /// Another vault file tracked in this checkout, or another path's pin on
+    /// this machine, carries the same vault id, and this path is not the one
+    /// this machine trusts for it (see [`shared_identity`]). `others` are
+    /// those paths. `retired_by` is the path whose pin names this one in its
+    /// `identity_siblings`. Plain `murk trust` never accepts it: only `murk
+    /// trust --shares-identity-with` after review.
+    SharedVaultId {
+        others: Vec<String>,
+        retired_by: Option<String>,
+    },
+    /// The vault lists `key` as a recipient without a grant record for it,
+    /// and this machine holds `key` as a revoked agent grant (`ids`, see
+    /// [`tombstoned`]). Refused on every load.
+    RevokedGrantRecipient { key: String, ids: Vec<String> },
+    /// The vault holds a grant record or an `agents` entry for `key`, which
+    /// this machine holds as a revoked agent grant (`ids`). Refused on a load
+    /// accepted as current (see [`is_current`]); a history load warns.
+    RevokedGrant { key: String, ids: Vec<String> },
 }
 
 impl Refusal {
@@ -200,8 +297,12 @@ impl Refusal {
     /// key: an age key's verifying key is derived from its secret, so a
     /// different one for the same recipient is a forgery. Nor a grant bound
     /// to an operator key, which is tampering, nor a generation past
-    /// [`MAX_GENERATION`]. A removed key is accepted only when named (see
-    /// [`Refusal::RemovedKey`]).
+    /// [`MAX_GENERATION`], nor a vault `MURK_EXPECTED_VAULT` refuses (the
+    /// variable, not this machine, decides it), nor a vault that shares its
+    /// id with another path (only `murk trust --shares-identity-with`
+    /// accepts it). A removed key is accepted only when named (see
+    /// [`Refusal::RemovedKey`]). A revoked agent grant is accepted only
+    /// after `murk trust --re-add` re-admits its revocation ids.
     pub fn acceptable(&self) -> bool {
         !matches!(
             self,
@@ -210,6 +311,10 @@ impl Refusal {
                 | Refusal::SignerKeyChanged { .. }
                 | Refusal::GrantBindsOperator { .. }
                 | Refusal::GenerationOutOfRange { .. }
+                | Refusal::NotExpected(_)
+                | Refusal::SharedVaultId { .. }
+                | Refusal::RevokedGrantRecipient { .. }
+                | Refusal::RevokedGrant { .. }
         )
     }
 }
@@ -235,6 +340,13 @@ pub struct Assessment {
     /// The signer set the verdict used in place of the pin's (environment
     /// and anchor together), when either was given.
     pub external: Option<TrustedSigners>,
+    /// `MURK_EXPECTED_VAULT`, when set: the verdict refuses another vault
+    /// and a revision below its minimum.
+    pub expected: Option<ExpectedVault>,
+    /// Other tracked vault files with the same vault id as this one, which
+    /// this machine trusts at this path: a load warns about each (see
+    /// [`shared_identity_warning`]).
+    pub shared_with: Vec<String>,
 }
 
 impl Assessment {
@@ -330,6 +442,67 @@ pub fn env_trusted_signers() -> Result<Option<TrustedSigners>, String> {
     Ok((!out.is_empty()).then_some(out))
 }
 
+/// Parse a value of [`EXPECTED_VAULT_VAR`]: `<vault id>:<minimum generation>`,
+/// the id as 32 lowercase hex characters and the generation as a decimal
+/// number no larger than [`MAX_GENERATION`]. A third part (a revision) is an
+/// error: this release does not check revisions, and a value that names one
+/// must not seem to give that check. An empty value is an error too: it
+/// usually comes from a CI secret that is missing, and must not turn the
+/// check off.
+pub fn parse_expected_vault(value: &str) -> Result<ExpectedVault, String> {
+    let usage = "set it to <vault id>:<minimum generation>";
+    if value.trim().is_empty() {
+        return Err(format!(
+            "{EXPECTED_VAULT_VAR} is set but empty — a CI secret or variable is usually missing\n{usage}, or unset {EXPECTED_VAULT_VAR} to turn the check off"
+        ));
+    }
+    let parts: Vec<&str> = value.trim().split(':').collect();
+    let (id, generation) = match parts.as_slice() {
+        [id, generation] => (*id, *generation),
+        [_, _, _] => {
+            return Err(format!(
+                "{EXPECTED_VAULT_VAR} has three parts, but this release of murk does not check a revision — {usage}"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "{EXPECTED_VAULT_VAR} is not <vault id>:<minimum generation> — {usage}"
+            ));
+        }
+    };
+    if id.len() != 32 || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(format!(
+            "{EXPECTED_VAULT_VAR}: the vault id is not 32 lowercase hex characters — {usage}"
+        ));
+    }
+    let min_generation = generation
+        .parse::<u64>()
+        .ok()
+        .filter(|g| *g <= MAX_GENERATION && generation.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| {
+            format!(
+                "{EXPECTED_VAULT_VAR}: the minimum generation is not a whole number from 0 to {MAX_GENERATION} — {usage}"
+            )
+        })?;
+    Ok(ExpectedVault {
+        vault_id: id.to_string(),
+        min_generation,
+    })
+}
+
+/// Parse `MURK_EXPECTED_VAULT`. `Ok(None)` only when unset. A value that does
+/// not parse, an empty one included, is an error (fail closed rather than
+/// check less than the operator meant).
+pub fn env_expected_vault() -> Result<Option<ExpectedVault>, String> {
+    match std::env::var(EXPECTED_VAULT_VAR) {
+        Ok(raw) => parse_expected_vault(&raw).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{EXPECTED_VAULT_VAR} is not valid UTF-8 — set it to <vault id>:<minimum generation>"
+        )),
+    }
+}
+
 /// Canonical keys of the grants in `grants`.
 fn grant_keys(grants: &BTreeMap<String, types::GrantEntry>) -> BTreeSet<String> {
     grants
@@ -387,66 +560,219 @@ pub fn vault_fingerprint(vault: &types::Vault) -> String {
         })
 }
 
-/// Where a load happens, as the removal rule sees it: the git HEAD state, and
+/// Where a load happens, as the removal rule sees it: the git HEAD state;
 /// the removed keys whose recorded removal commit (see
 /// [`TrustPin::removed_at_commit`]) is the commit checked out or a descendant
 /// of it, with the vault file as committed there — the vault is from before
-/// those removals.
+/// those removals; and, asked per key and remembered, whether a removal is
+/// in the history of the commit checked out (see [`Checkout::reached`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub head: HeadState,
     before: BTreeSet<String>,
+    /// The vault file, absolute, when git history may be asked: on a branch,
+    /// with a pin.
+    vault: Option<std::path::PathBuf>,
+    /// Removed key (canonical) → what git showed about its removal in the
+    /// history of the commit checked out, for each key asked so far.
+    reached: std::cell::RefCell<BTreeMap<String, crate::git::HistoryCheck>>,
 }
 
 impl Checkout {
     /// `head` with no history information: no vault counts as from before a
-    /// removal.
+    /// removal, and no removal as reached by history alone.
     pub fn at(head: HeadState) -> Self {
         Self {
             head,
             before: BTreeSet::new(),
+            vault: None,
+            reached: std::cell::RefCell::default(),
         }
     }
 
     /// The checkout holding `vault_path`, judged against `pin`. Asks git only
-    /// on a branch, and once per recorded removal commit.
+    /// on a branch: once per recorded removal commit here, and later, for a
+    /// removal that does not apply on this branch by name and a vault that
+    /// lists its key, whether the removal is in HEAD's history.
     pub fn of(vault_path: &str, pin: Option<&TrustPin>) -> Self {
+        Self::judged(vault_path, pin, true)
+    }
+
+    /// The checkout holding `vault_path` for a save's check against `pin`:
+    /// as [`Checkout::of`], except that no vault counts as from before a
+    /// removal (a save writes a vault numbered past it).
+    pub fn for_save(vault_path: &str, pin: &TrustPin) -> Self {
+        Self::judged(vault_path, Some(pin), false)
+    }
+
+    fn judged(vault_path: &str, pin: Option<&TrustPin>, with_before: bool) -> Self {
         let head = head_of(vault_path);
-        let before = match (&head, pin) {
-            (HeadState::Branch(_), Some(pin)) => {
-                let abs = absolute(vault_path);
-                let mut by_commit: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-                for (key, commit) in &pin.removed_at_commit {
-                    by_commit.entry(commit).or_default().push(key);
-                }
-                by_commit
-                    .into_iter()
-                    .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
-                    .flat_map(|(_, keys)| keys.into_iter().cloned())
-                    .collect()
-            }
-            _ => BTreeSet::new(),
+        let (HeadState::Branch(_), Some(pin)) = (&head, pin) else {
+            return Self::at(head);
         };
-        Self { head, before }
+        let abs = absolute(vault_path);
+        let mut by_commit: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for (key, commit) in pin.removed_at_commit.iter().filter(|_| with_before) {
+            by_commit.entry(commit).or_default().push(key);
+        }
+        let before = by_commit
+            .into_iter()
+            .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
+            .flat_map(|(_, keys)| keys.into_iter().cloned())
+            .collect();
+        Self {
+            head,
+            before,
+            vault: Some(abs),
+            reached: std::cell::RefCell::default(),
+        }
+    }
+
+    /// Whether the removal of `key` (canonical) that `pin` records holds at
+    /// this checkout through git history (see [`removal_in_history`]), on a
+    /// branch `pin` has a mark for whose name the removal is not recorded
+    /// on: yes when the history holds it, and yes when git cannot tell (fail
+    /// closed; [`Checkout::history_unchecked`] then says why). Asks git once
+    /// per key.
+    fn reached(&self, pin: &TrustPin, key: &str) -> bool {
+        self.history(pin, key)
+            .is_some_and(|h| h != crate::git::HistoryCheck::NotFound)
+    }
+
+    /// What git showed about `key`'s removal here, when the question applies
+    /// (see [`Checkout::reached`]).
+    fn history(&self, pin: &TrustPin, key: &str) -> Option<crate::git::HistoryCheck> {
+        let (HeadState::Branch(branch), Some(vault)) = (&self.head, &self.vault) else {
+            return None;
+        };
+        let on = pin.removed_on.get(key)?;
+        if !pin.branches.contains_key(branch)
+            || !pin.removed.contains_key(key)
+            || on.contains(branch)
+        {
+            return None;
+        }
+        if let Some(known) = self.reached.borrow().get(key) {
+            return Some(known.clone());
+        }
+        let found = removal_in_history(vault, pin, key, on);
+        self.reached
+            .borrow_mut()
+            .insert(key.to_string(), found.clone());
+        Some(found)
+    }
+
+    /// Why git could not show whether `key`'s removal is in this branch's
+    /// history, when that is why the removal applies here (see
+    /// [`crate::git::HistoryCheck`]). `None` when the removal applies by name
+    /// or by history, or not at all.
+    pub fn history_unchecked(&self, pin: &TrustPin, key: &str) -> Option<crate::git::HistoryCheck> {
+        self.history(pin, key).filter(|h| {
+            !matches!(
+                h,
+                crate::git::HistoryCheck::Found | crate::git::HistoryCheck::NotFound
+            )
+        })
     }
 }
 
+/// Whether the removal of `key` (canonical) is in the history of the commit
+/// checked out in the checkout holding `abs_vault`. Three arms, cheapest
+/// first, each keyed on the recorded removal commit `C` (see
+/// [`TrustPin::removed_at_commit`]):
+///
+/// 1. `C` is HEAD or an ancestor of it and the vault at `C` does not list the
+///    key: a removal accepted from another signer's committed vault.
+/// 2. The vault at `C` still lists the key: `C` is the parent of this
+///    machine's own save that removed it, so `C` being in HEAD's history says
+///    nothing (every branch cut before the removal has it). Then the tips of
+///    the local branches the removal is recorded on (`on`) are tried: a tip
+///    that is HEAD or an ancestor of it, has `C` as an ancestor, and whose
+///    vault does not list the key holds the removal.
+/// 3. By content, for every other way the removal can reach HEAD (a squash
+///    or rebase merge, a branch deleted, renamed or moved on since, a merge
+///    that makes another branch its first parent, a teammate's removal
+///    accepted on a merge or squash commit of another branch): HEAD's
+///    history of the vault file, on every path, back to a commit whose vault
+///    still lists the key (`C`, or for an accepted removal the newest such
+///    revision on `C`'s own first-parent path), at most
+///    [`crate::git::VAULT_HISTORY_CAP`] revisions, holds a commit whose
+///    vault does not list the key (or is gone) while a parent's does (see
+///    [`crate::git::vault_history_drops`]). Only the key's presence in the
+///    recipient list counts: what else the revision changes (values, other
+///    recipients, the vault id) does not matter. A key added on a branch that
+///    never listed it is not a removal, and a drop already in the bound's
+///    history (one undone before this removal) does not count. Recipients
+///    are read without verifying any signature: the arm only ever applies to
+///    a key this machine already recorded as removed, so a forged revision
+///    can at most keep out a key this machine itself saw removed; it cannot
+///    lock anyone new out. A re-add later on the branch by another machine
+///    does not undo it (only this machine's own `circle authorize` or `murk
+///    trust --re-add` does).
+///
+/// When git cannot tell (see [`crate::git::vault_history_drops`]; also no
+/// recorded commit, [`crate::git::HistoryCheck::Gone`]), the answer is one of
+/// the undecided kinds and the removal applies: a repo writer who pads the
+/// history or commits junk gets a refusal, never a load.
+fn removal_in_history(
+    abs_vault: &std::path::Path,
+    pin: &TrustPin,
+    key: &str,
+    on: &BTreeSet<String>,
+) -> crate::git::HistoryCheck {
+    use crate::git::HistoryCheck;
+    let (Some(commit), Some(dir)) = (pin.removed_at_commit.get(key), abs_vault.parent()) else {
+        return HistoryCheck::Gone;
+    };
+    let lists = |bytes: &[u8]| {
+        let vault = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let recipients = vault.get("recipients")?.as_array()?;
+        Some(
+            recipients
+                .iter()
+                .any(|r| r.as_str().is_some_and(|r| canonical_recipient(r) == key)),
+        )
+    };
+    let lists_key =
+        |at: &str| crate::git::vault_at_commit(abs_vault, at).and_then(|bytes| lists(&bytes));
+    let by_ancestry = crate::git::is_ancestor(dir, commit, "HEAD")
+        && match lists_key(commit) {
+            Some(false) => true,
+            None => false,
+            Some(true) => on.iter().any(|branch| {
+                crate::git::branch_tip(dir, branch).is_some_and(|tip| {
+                    tip != *commit
+                        && crate::git::is_ancestor(dir, &tip, "HEAD")
+                        && crate::git::is_ancestor(dir, commit, &tip)
+                        && lists_key(&tip) == Some(false)
+                })
+            }),
+        };
+    if by_ancestry {
+        return HistoryCheck::Found;
+    }
+    crate::git::vault_history_drops(abs_vault, commit, lists)
+}
+
 /// Whether the listing part of the removal rule applies to `key` (canonical)
-/// at `checkout`: whether a vault listing the key at or below the generation
-/// it was removed at is refused there. It applies on a branch whose accepted
-/// history contains the removal (see [`TrustPin::removed_on`]), on a detached
-/// HEAD, outside git, and on a branch this machine has no mark for (its
-/// history is unknown, so it may be a replay) unless its vault is from before
-/// the removal: committed at the commit this machine made or accepted the
+/// at `checkout`: whether a vault listing the key, at any generation, is
+/// refused there. It applies on a branch whose accepted history contains the
+/// removal (see [`TrustPin::removed_on`]), on a branch whose git history
+/// holds the removal (see [`removal_in_history`]), on a detached HEAD,
+/// outside git, and on a branch this machine has no mark for (its history is
+/// unknown, so it may be a replay) unless its vault is from before the
+/// removal: committed at the commit this machine made or accepted the
 /// removal at, or an ancestor of it. On a branch this machine accepted before
 /// the removal reached it, the vault may still list the key. A vault signed
 /// by a removed key is judged by [`signed_before_removal`] instead.
 pub fn removal_applies(pin: &TrustPin, key: &str, checkout: &Checkout) -> bool {
     match &checkout.head {
-        HeadState::Branch(b) if pin.branches.contains_key(b) => pin
-            .removed_on
-            .get(key)
-            .is_none_or(|branches| branches.contains(b)),
+        HeadState::Branch(b) if pin.branches.contains_key(b) => {
+            pin.removed_on
+                .get(key)
+                .is_none_or(|branches| branches.contains(b))
+                || checkout.reached(pin, key)
+        }
         HeadState::Branch(_) => !checkout.before.contains(key),
         HeadState::Detached | HeadState::NotARepo => true,
     }
@@ -473,6 +799,7 @@ pub fn signed_before_removal(
     pin.removed.get(key).is_some_and(|&at| generation <= at)
         && checkout.before.contains(key)
         && pin.removed_on.get(key).is_none_or(|on| !on.contains(b))
+        && !checkout.reached(pin, key)
 }
 
 /// The removed keys (canonical, with the generation each was removed at)
@@ -510,10 +837,10 @@ pub fn removed_keys_in(
 
 /// Rule 8 for a load: the vault is signed by a removed key (refused on every
 /// branch, unless it is that key's own history from before the removal, see
-/// [`signed_before_removal`]), or lists one at or below the generation it was
-/// removed at where the removal applies (see [`removal_applies`]). A newer
-/// vault listing it again is how a trusted signer re-adds someone, so it
-/// passes (its signer is checked like any other).
+/// [`signed_before_removal`]), or lists one where the removal applies (see
+/// [`removal_applies`]), at any generation. A newer revision that lists the
+/// key may re-add them on purpose, or be a stale fork that still lists them:
+/// this machine cannot tell, so only `murk trust --re-add` here accepts it.
 fn removal_refusal(
     loaded: &Loaded<'_>,
     pin: Option<&TrustPin>,
@@ -531,16 +858,18 @@ fn removal_refusal(
             removed_at,
             found,
             signer: true,
+            unchecked: None,
         });
     }
     loaded.vault.recipients.iter().find_map(|r| {
         let key = canonical_recipient(r);
         let removed_at = *pin.removed.get(key.as_ref())?;
-        (found <= removed_at && removal_applies(pin, &key, checkout)).then(|| Refusal::RemovedKey {
+        removal_applies(pin, &key, checkout).then(|| Refusal::RemovedKey {
             key: r.clone(),
             removed_at,
             found,
             signer: false,
+            unchecked: checkout.history_unchecked(pin, &key),
         })
     })
 }
@@ -573,15 +902,171 @@ fn counter_refusal(
     forked.then_some(Refusal::Forked { generation: found })
 }
 
+/// The revocation ids this machine holds for each agent grant key of a vault
+/// whose own revoked grant set is `own` (see [`types::Meta::revoked_grants`]):
+/// canonical key → ids. They are the vault's own ids and, with a pin, the
+/// ids its sidecar saw (`revoked_grants_seen`), less the ids the user
+/// re-admitted with `murk trust --re-add` (`readmitted_grants`). A key with
+/// at least one id is tombstoned here: murk refuses it as a recipient, a
+/// grant record or an `agents` entry. Without a pin only the vault's own set
+/// counts.
+pub fn tombstoned(own: &types::RevokedGrants, pin: Option<&TrustPin>) -> types::RevokedGrants {
+    let seen = pin
+        .filter(|p| p.v >= pins::PIN_VERSION)
+        .map(|p| &p.sidecar.revoked_grants_seen);
+    let mut out = types::RevokedGrants::new();
+    for (key, ids) in own.iter().chain(seen.into_iter().flatten()) {
+        out.entry(canonical_recipient(key).into_owned())
+            .or_default()
+            .extend(ids.iter().cloned());
+    }
+    without_readmitted(out, pin)
+}
+
+/// `set` (canonical keys) less the revocation ids `pin` records as
+/// re-admitted (`readmitted_grants`), with every key left without an id
+/// taken out.
+pub fn without_readmitted(
+    mut set: types::RevokedGrants,
+    pin: Option<&TrustPin>,
+) -> types::RevokedGrants {
+    if let Some(readmitted) = pin
+        .filter(|p| p.v >= pins::PIN_VERSION)
+        .map(|p| &p.sidecar.readmitted_grants)
+    {
+        for (key, ids) in &mut set {
+            if let Some(consented) = readmitted.get(key) {
+                ids.retain(|id| !consented.contains(id));
+            }
+        }
+    }
+    set.retain(|_, ids| !ids.is_empty());
+    set
+}
+
+/// The canonical keys `loaded` holds a grant for: a grant record in the
+/// meta, or an `agents` entry.
+fn granted_keys(loaded: &Loaded<'_>) -> BTreeSet<String> {
+    grant_keys(loaded.grants)
+        .into_iter()
+        .chain(
+            loaded
+                .vault
+                .agents
+                .keys()
+                .map(|k| canonical_recipient(k).into_owned()),
+        )
+        .collect()
+}
+
+/// The tombstone rule (see [`tombstoned`]). A tombstoned key that `loaded`
+/// lists as a recipient without a grant for it is refused on every load. A
+/// tombstoned key that `loaded` holds a grant for (a grant record, which
+/// comes with the key's recipient entry, or an `agents` entry) is refused
+/// when `current` (a load accepted as the vault's next state, a save, a
+/// keyed merge result); a history load only warns (see
+/// [`history_grant_warnings`]).
+pub fn tombstone_refusal(
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+    current: bool,
+) -> Option<Refusal> {
+    let tombstones = tombstoned(loaded.revoked, pin);
+    if tombstones.is_empty() {
+        return None;
+    }
+    let granted = granted_keys(loaded);
+    let ids = |key: &str| tombstones.get(key).map(|ids| ids.iter().cloned().collect());
+    let plain = loaded.vault.recipients.iter().find_map(|r| {
+        let key = canonical_recipient(r).into_owned();
+        let ids = (!granted.contains(&key)).then(|| ids(&key)).flatten()?;
+        Some(Refusal::RevokedGrantRecipient { key, ids })
+    });
+    plain.or_else(|| {
+        current.then(|| {
+            granted.iter().find_map(|key| {
+                Some(Refusal::RevokedGrant {
+                    key: key.clone(),
+                    ids: ids(key)?,
+                })
+            })
+        })?
+    })
+}
+
+/// The warnings for a history load (see [`is_current`]) of `loaded`, one for
+/// each tombstoned key it holds a grant for (see [`tombstone_refusal`]).
+/// Such a load succeeds: `git bisect`, tags and release branches from before
+/// a revocation stay readable.
+pub fn history_grant_warnings(
+    vault_path: &str,
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+) -> Vec<String> {
+    let tombstones = tombstoned(loaded.revoked, pin);
+    granted_keys(loaded)
+        .into_iter()
+        .filter_map(|key| {
+            let ids = tombstones.get(&key)?;
+            Some(format!(
+                "{vault_path} holds a grant for {}, which this machine holds as revoked (revocation ids {}). It was read as history. A save, a merge or `murk trust` that keeps this grant is refused. To re-admit it after review, run `murk trust --vault {vault_path} --re-add {key}`",
+                label(loaded.names, &key),
+                show_ids(ids.iter())
+            ))
+        })
+        .collect()
+}
+
+/// Revocation ids for a message, each escaped (an id is vault content).
+pub fn show_ids<'a>(ids: impl Iterator<Item = &'a String>) -> String {
+    ids.map(|id| crate::validate::show(id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether an accepted load of `vault` is its current state on this machine,
+/// and not history: the next state of a branch this machine accepted before,
+/// or of the vault outside git, with a counter above every counter this
+/// machine accepted (`prior`). A load with no trust decision (no pin) is
+/// current. A branch this machine has never accepted (an unmerged pull
+/// request), a detached HEAD, a branch behind the mark, the vault already
+/// accepted, or a different vault with that counter is history. Generation
+/// 0 is murk ≤ 0.13: no order, so every such load is current until this
+/// machine has seen the vault written by murk 0.14 (a counter or an id);
+/// after that a 0.13 vault that still loads (on a branch not upgraded here)
+/// is history.
+pub fn is_current(vault: &types::Vault, prior: Option<&TrustPin>, head: &HeadState) -> bool {
+    let found = vault.generation;
+    prior
+        .filter(|p| p.v >= pins::PIN_VERSION && p.has_trust())
+        .is_none_or(|p| {
+            let newer =
+                found > p.generation || (found == 0 && p.generation == 0 && p.vault_id.is_empty());
+            newer
+                && match head {
+                    HeadState::NotARepo => true,
+                    HeadState::Branch(b) => p.branches.contains_key(b),
+                    HeadState::Detached => false,
+                }
+        })
+}
+
 /// The verdict for a load of the working vault: the core rules, then the
-/// removal and counter rules. A refusal `murk trust` can never accept comes
-/// first; a removed key next, so a vault that is also refused for another
-/// reason still needs the key named.
+/// tombstone rule, the removal rule, `MURK_EXPECTED_VAULT` (`expected`) and
+/// the counter rule. A refusal `murk trust` can never accept comes first; a
+/// revoked grant or a removed key next, so a vault that is also refused for
+/// another reason still needs the key named. A refusal by the pin comes
+/// before one by `expected`, so a machine with a pin names what its pin
+/// recorded. `grant_rule` says whether the tombstone rule refuses a grant
+/// (not only a plain recipient): `None` when the load is current (see
+/// [`is_current`]).
 fn load_verdict(
     loaded: &Loaded<'_>,
     pin: Option<&TrustPin>,
     external_signers: Option<&TrustedSigners>,
+    expected: Option<&ExpectedVault>,
     checkout: &Checkout,
+    grant_rule: Option<bool>,
 ) -> Verdict {
     let head = &checkout.head;
     // A vault a removed key signed before its removal (see
@@ -606,11 +1091,20 @@ fn load_verdict(
     {
         return core;
     }
+    let current = grant_rule.unwrap_or_else(|| is_current(loaded.vault, pin, head));
+    if let Some(refusal) = tombstone_refusal(loaded, pin, current) {
+        return Verdict::Refused(refusal);
+    }
     if let Some(refusal) = removal_refusal(loaded, pin, checkout) {
         return Verdict::Refused(refusal);
     }
     if matches!(core, Verdict::Refused(_)) {
         return core;
+    }
+    if let Some(mismatch) =
+        expected.and_then(|e| e.mismatch(&judged_vault_id(loaded), loaded.vault.generation))
+    {
+        return Verdict::Refused(Refusal::NotExpected(mismatch));
     }
     match counter_refusal(loaded, pin, head) {
         Some(refusal) => Verdict::Refused(refusal),
@@ -695,14 +1189,21 @@ pub fn canonical_groups(groups: &Groups) -> BTreeMap<String, BTreeSet<String>> {
 ///
 /// `readmit` names removed keys (canonical) the user is re-adding with
 /// `murk trust --re-add`: they are judged as if never removed.
+///
+/// The vault is then checked against the other vault files in its checkout
+/// and the other paths' pins on this machine (see [`shared_identity`]).
+/// `shares_with` is the path the user named with `murk trust
+/// --shares-identity-with`, which does not refuse the vault.
 pub fn assess(
     vault_path: &str,
     loaded: &Loaded<'_>,
     anchor: Option<&TrustedSigners>,
     readmit: &BTreeSet<String>,
+    shares_with: Option<&str>,
 ) -> Result<Assessment, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
+    let expected = env_expected_vault()?;
     let external: Option<TrustedSigners> = match (anchor, &env_signers) {
         (None, None) => None,
         (a, e) => Some(
@@ -718,19 +1219,186 @@ pub fn assess(
         p.removed.retain(|k, _| !readmit.contains(k));
         p
     });
-    let verdict = load_verdict(loaded, judged.as_ref(), external.as_ref(), &checkout);
+    let mut verdict = load_verdict(
+        loaded,
+        judged.as_ref(),
+        external.as_ref(),
+        expected.as_ref(),
+        &checkout,
+        None,
+    );
+    let shared = shared_identity(
+        vault_path,
+        &judged_vault_id(loaded),
+        pin.as_ref(),
+        shares_with,
+    );
+    let mut shared_with = Vec::new();
+    let final_refusal = matches!(&verdict, Verdict::Refused(r) if !r.acceptable());
+    if shared.refuses() {
+        if !final_refusal {
+            verdict = Verdict::Refused(Refusal::SharedVaultId {
+                others: shared.refused,
+                retired_by: shared.retired_by,
+            });
+        }
+    } else {
+        shared_with = shared.warned;
+    }
     Ok(Assessment {
         verdict,
         pin,
         env_signers,
         external,
+        expected,
+        shared_with,
     })
 }
 
+/// What other vault files and pins say about the vault id of `vault_path`
+/// (see [`shared_identity`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharedIdentity {
+    /// Other paths that make murk refuse this one: a tracked vault file with
+    /// the same id while this machine does not trust the vault at this path,
+    /// or another path's pin for the same id while its file is tracked.
+    pub refused: Vec<String>,
+    /// Other tracked vault files with the same id, while this machine trusts
+    /// the vault at this path: a warning only.
+    pub warned: Vec<String>,
+    /// The path whose pin names this one as sharing its vault id (`murk
+    /// trust --shares-identity-with`): this path is refused.
+    pub retired_by: Option<String>,
+}
+
+impl SharedIdentity {
+    /// Whether murk refuses the vault at this path.
+    pub fn refuses(&self) -> bool {
+        !self.refused.is_empty() || self.retired_by.is_some()
+    }
+}
+
+/// Two files of one vault id in one checkout. murk cannot tell such files
+/// apart (a copy of a vault keeps its id), so it loads at most one path per
+/// id here. Paths are `/`-separated paths in the checkout. For the vault id
+/// `id` at `vault_path`, with its pin `pin`:
+///
+/// - Another git-tracked vault file (`.murk`, `.murk.*`, `*.murk`) with the
+///   same id warns when the pin records `id` at this path, and refuses
+///   otherwise.
+/// - Another path's sidecar on this machine that records `id` in the same
+///   repository refuses, while that path is a tracked vault file with `id`.
+///   An untracked one (after `git mv`, or on a branch without it) does not.
+/// - A path that another path's sidecar names in `identity_siblings` is
+///   refused.
+///
+/// `shares_with` (`murk trust --shares-identity-with`) refuses nothing.
+/// Outside git, and for a vault with no id, nothing applies.
+pub fn shared_identity(
+    vault_path: &str,
+    id: &str,
+    pin: Option<&TrustPin>,
+    shares_with: Option<&str>,
+) -> SharedIdentity {
+    let mut out = SharedIdentity::default();
+    if id.is_empty() {
+        return out;
+    }
+    let Some((repo_dir, path)) = pins::vault_location(vault_path) else {
+        return out;
+    };
+    let tracked: Vec<String> = tracked_vault_files(vault_path)
+        .into_iter()
+        .filter(|(other, other_id)| *other != path && other_id == id)
+        .map(|(other, _)| other)
+        .collect();
+    let pinned_here = pin.is_some_and(|p| p.v >= pins::PIN_VERSION && p.vault_id == id);
+    for other in &tracked {
+        if pinned_here || shares_with == Some(other.as_str()) {
+            out.warned.push(other.clone());
+        } else {
+            out.refused.push(other.clone());
+        }
+    }
+    for (_, sidecar) in pins::peek_sidecars() {
+        if sidecar.repo_dir != repo_dir
+            || sidecar.vault_id != id
+            || sidecar.path == path
+            || shares_with == Some(sidecar.path.as_str())
+        {
+            continue;
+        }
+        if sidecar.identity_siblings.contains(&path) {
+            out.retired_by = Some(sidecar.path.clone());
+        }
+        if tracked.contains(&sidecar.path) && !out.refused.contains(&sidecar.path) {
+            out.warned.retain(|w| *w != sidecar.path);
+            out.refused.push(sidecar.path);
+        }
+    }
+    out
+}
+
+/// The vault id a vault file's header stands for: its `vault_id`, or for a
+/// murk 0.13 file the id its first 0.14 save takes.
+pub fn header_vault_id(vault: &types::Vault) -> String {
+    if vault.vault_id.is_empty() && written_by_0_13(vault) {
+        crate::save::derived_vault_id(vault)
+    } else {
+        vault.vault_id.clone()
+    }
+}
+
+/// The git-tracked vault files (`.murk`, `.murk.*`, `*.murk`) in the
+/// checkout that holds `vault_path`, as `/`-separated paths in the checkout,
+/// each with the vault id its file in the working tree carries. A file that
+/// does not parse is left out.
+fn tracked_vault_files(vault_path: &str) -> Vec<(String, String)> {
+    let abs = absolute(vault_path);
+    let resolved = crate::git::real_parent(&abs);
+    let Some(root) = resolved.parent().and_then(crate::git::worktree_root) else {
+        return Vec::new();
+    };
+    let Ok(out) = crate::git::git_command()
+        .args([
+            "ls-files",
+            "-z",
+            "--",
+            ":(glob)**/.murk",
+            ":(glob)**/.murk.*",
+            ":(glob)**/*.murk",
+        ])
+        .current_dir(&root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let vault = crate::vault::read(&root.join(p)).ok()?;
+            Some((p.to_string(), header_vault_id(&vault)))
+        })
+        .collect()
+}
+
+/// The warning for a load of `vault_path`, which this machine trusts, while
+/// the tracked file `other` carries the same vault id.
+pub fn shared_identity_warning(vault_path: &str, other: &str) -> String {
+    format!(
+        "{other} has the same vault id as {vault_path}. This machine trusts this vault at {vault_path} only. Remove {other} if it is a copy"
+    )
+}
+
 /// The verdict for `loaded` against `pin` as it is now (re-read under the
-/// pin lock), with the external signers `assessment` was computed with. Used
-/// to confirm an acceptance just before it is recorded: another process may
-/// have raised the rollback mark or learned keys since the first read.
+/// pin lock), with the external signers and expected vault `assessment` was
+/// computed with. Used to confirm an acceptance just before it is recorded:
+/// another process may have raised the rollback mark or learned keys since
+/// the first read.
 pub fn reassess(
     vault_path: &str,
     loaded: &Loaded<'_>,
@@ -741,7 +1409,9 @@ pub fn reassess(
         loaded,
         pin,
         assessment.external.as_ref(),
+        assessment.expected.as_ref(),
         &Checkout::of(vault_path, pin),
+        None,
     )
 }
 
@@ -1003,117 +1673,199 @@ fn verdict(
     if let Some(refusal) = grant_binding_refusal(loaded, pin, external_signers) {
         return Verdict::Refused(refusal);
     }
-    let types::SignatureState::Signed { signer, v } = loaded.signature else {
-        // An unsigned murk 0.13 file is still judged by the id its first 0.14
-        // save takes, so another vault's file never reads as unsigned or
-        // stripped (which `murk trust` would re-sign under this vault's id).
-        if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION && !p.vault_id.is_empty())
-            && written_by_0_13(loaded.vault)
-        {
-            let found = crate::save::derived_vault_id(loaded.vault);
-            if found != p.vault_id {
-                return Verdict::Refused(Refusal::OtherVault {
-                    pinned: p.vault_id.clone(),
-                    found,
-                });
+    let refusal = match loaded.signature {
+        types::SignatureState::Unsigned => {
+            match unsigned_verdict(loaded, pin, external_signers, head) {
+                None => return Verdict::UnsignedAllowed,
+                refusal => refusal,
             }
         }
-        if pin.is_some_and(|p| p.was_signed) {
-            return Verdict::Refused(Refusal::Downgraded);
+        types::SignatureState::Signed { signer, .. } => {
+            signer_verdict(loaded, pin, external_signers, signer).or_else(|| {
+                pin.filter(|p| p.v >= pins::PIN_VERSION)
+                    .and_then(|p| pinned_state_verdict(loaded, p, head, Some(signer.as_str())))
+            })
         }
-        // A key that cannot sign loads an unsigned vault with a warning —
-        // unless the operator named the signers they require.
-        if loaded.loader_can_sign || external_signers.is_some() {
-            return Verdict::Refused(Refusal::Unsigned);
-        }
-        return Verdict::UnsignedAllowed;
     };
-    let signer_c = canonical_recipient(signer).into_owned();
-    let refuse = Verdict::Refused;
+    refusal.map_or(Verdict::Trusted, Verdict::Refused)
+}
 
-    if let Some(refusal) = grant_signer_refusal(loaded, pin, signer) {
-        return refuse(refusal);
+/// The rules for an unsigned vault. Nothing in it shows who wrote it, so it
+/// loads only for a key that cannot sign, with no `MURK_TRUSTED_SIGNERS`, on
+/// a machine that holds a trust decision for the vault (an accepted load,
+/// `murk trust`, `murk init` or an own save). It then meets the same id and
+/// rollback checks as a signed vault, and it may not widen what this machine
+/// encrypts to: every recipient, grant and group membership must be one the
+/// pin already holds. A change there needs `murk trust` after review.
+fn unsigned_verdict(
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+    external_signers: Option<&TrustedSigners>,
+    head: &HeadState,
+) -> Option<Refusal> {
+    // An unsigned murk 0.13 file is still judged by the id its first 0.14
+    // save takes, so another vault's file never reads as unsigned or
+    // stripped (which `murk trust` would re-sign under this vault's id).
+    if written_by_0_13(loaded.vault)
+        && let Some(refusal) = pin
+            .filter(|p| p.v >= pins::PIN_VERSION)
+            .and_then(|p| id_refusal(loaded, p))
+    {
+        return Some(refusal);
     }
+    if pin.is_some_and(|p| p.was_signed) {
+        return Some(Refusal::Downgraded);
+    }
+    // A key that can sign, or an operator who named the signers they
+    // require, never loads an unsigned vault.
+    if loaded.loader_can_sign || external_signers.is_some() {
+        return Some(Refusal::Unsigned);
+    }
+    let Some(p) = pin.filter(|p| p.has_trust()) else {
+        return Some(Refusal::UnsignedNotYetTrusted);
+    };
+    pinned_state_verdict(loaded, p, head, None).or_else(|| unsigned_widening(loaded, p))
+}
 
+/// The signer rules for a signed vault: not a grant key, in the trusted set
+/// (the environment's or anchor's when given, else the pin's), and signed
+/// under the verifying key pinned or given for it.
+fn signer_verdict(
+    loaded: &Loaded<'_>,
+    pin: Option<&TrustPin>,
+    external_signers: Option<&TrustedSigners>,
+    signer: &str,
+) -> Option<Refusal> {
+    if let Some(refusal) = grant_signer_refusal(loaded, pin, signer) {
+        return Some(refusal);
+    }
+    let signer_c = canonical_recipient(signer).into_owned();
     let trusted_pin = pin.filter(|p| p.has_trust());
     let is_trusted = match (external_signers, trusted_pin) {
         (Some(external), _) => external.contains_key(&signer_c),
         (None, Some(p)) => p.trusted.contains(&signer_c),
         (None, None) => {
-            return refuse(Refusal::NotYetTrusted {
-                signer: signer.clone(),
+            return Some(Refusal::NotYetTrusted {
+                signer: signer.to_string(),
             });
         }
     };
     if !is_trusted {
-        return refuse(Refusal::UntrustedSigner {
-            signer: signer.clone(),
+        return Some(Refusal::UntrustedSigner {
+            signer: signer.to_string(),
         });
     }
+    signer_key_refusal(loaded, signer, external_signers, trusted_pin)
+}
 
-    if let Some(refusal) = signer_key_refusal(loaded, signer, external_signers, trusted_pin) {
-        return refuse(refusal);
+/// The vault id `loaded` is judged by. A v1 vault, and an unsigned murk 0.13
+/// file, has no id of its own: it is judged by the id its first 0.14 save
+/// takes (`save::derived_vault_id`, from `created` and `vault_name`), which
+/// is how a vault upgraded from 0.13 got the id pinned here. Those two fields
+/// are not covered by the v1 signature or the MAC, so a check by this id
+/// catches another vault's file, not one whose header was edited to match.
+/// Such a file is read-only where it loads (see `pre_upgrade_read_only`).
+fn judged_vault_id(loaded: &Loaded<'_>) -> String {
+    let derived = signed_v1(loaded)
+        || (matches!(loaded.signature, types::SignatureState::Unsigned)
+            && written_by_0_13(loaded.vault));
+    if derived {
+        crate::save::derived_vault_id(loaded.vault)
+    } else {
+        loaded.vault.vault_id.clone()
     }
+}
 
-    if let Some(p) = pin.filter(|p| p.v >= pins::PIN_VERSION) {
-        // A v1 vault has no id of its own; it is judged by the id its first
-        // 0.14 save takes (`save::derived_vault_id`, from `created` and
-        // `vault_name`), which is how a vault upgraded from 0.13 got the id
-        // pinned here. Those two fields are not covered by the v1 signature
-        // or the MAC, so this check catches another vault's file, not one
-        // whose header was edited to match; such a file is read-only where
-        // it loads (see `pre_upgrade_read_only`). It comes first, so `murk
-        // trust` never re-signs another vault's file under this vault's id.
-        let legacy = *v == crate::signature::LEGACY_SIGNED_VIEW_VERSION;
-        let found = if legacy {
-            crate::save::derived_vault_id(loaded.vault)
-        } else {
-            loaded.vault.vault_id.clone()
-        };
-        if !p.vault_id.is_empty() && found != p.vault_id {
-            return refuse(Refusal::OtherVault {
-                pinned: p.vault_id.clone(),
-                found,
-            });
-        }
-        // A v1 signature covers neither the vault id nor the counter. Where
-        // this machine has seen the vault written by murk 0.14 (see
-        // `upgraded_at`), such a vault can only be an older revision. Anywhere
-        // else — a branch not upgraded here yet, a detached HEAD — it is
-        // pre-0.14 history: every other rule still applies, and its load only
-        // narrows the pin (see `accepted_pin`).
-        if legacy && upgraded_at(p, head) {
-            return refuse(Refusal::PreUpgrade {
-                on_branch: matches!(head, HeadState::Branch(_)),
-            });
-        }
-        // Rollback is judged per branch: checking out an older branch is
-        // normal, a branch going backwards is not. A detached HEAD (rebase,
-        // bisect, CI checkout of a commit) and a branch never seen here have
-        // no high-water mark to compare with.
-        let high = match head {
-            HeadState::NotARepo => Some(p.generation),
-            HeadState::Branch(b) => p.branches.get(b).copied(),
-            HeadState::Detached => None,
-        };
-        if let Some(high) = high
-            && loaded.vault.generation < high
-        {
-            return refuse(Refusal::RolledBack {
-                pinned: high,
-                found: loaded.vault.generation,
-            });
-        }
-        if p.has_trust()
-            && let Some(group) = unauthorised_group_change(loaded, p, &signer_c)
-        {
-            return refuse(Refusal::GroupChange {
-                group,
-                signer: signer.clone(),
-            });
-        }
+/// The vault id check against the pin (see [`judged_vault_id`]).
+fn id_refusal(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+    let found = judged_vault_id(loaded);
+    (!pin.vault_id.is_empty() && found != pin.vault_id).then(|| Refusal::OtherVault {
+        pinned: pin.vault_id.clone(),
+        found,
+    })
+}
+
+/// The checks against what this machine accepted before, for a signed vault
+/// (`signer`) and an unsigned one alike: the vault id, the 0.13 format where
+/// the vault was upgraded, rollback, and (for a signed vault) who may change
+/// a group. An unsigned vault may not change a group at all (see
+/// [`unsigned_widening`]).
+fn pinned_state_verdict(
+    loaded: &Loaded<'_>,
+    p: &TrustPin,
+    head: &HeadState,
+    signer: Option<&str>,
+) -> Option<Refusal> {
+    // The id comes first, so `murk trust` never re-signs another vault's
+    // file under this vault's id.
+    if let Some(refusal) = id_refusal(loaded, p) {
+        return Some(refusal);
     }
-    Verdict::Trusted
+    // A v1 signature covers neither the vault id nor the counter. Where
+    // this machine has seen the vault written by murk 0.14 (see
+    // `upgraded_at`), such a vault can only be an older revision. Anywhere
+    // else — a branch not upgraded here yet, a detached HEAD — it is
+    // pre-0.14 history: every other rule still applies, and its load only
+    // narrows the pin (see `accepted_pin`).
+    if signed_v1(loaded) && upgraded_at(p, head) {
+        return Some(Refusal::PreUpgrade {
+            on_branch: matches!(head, HeadState::Branch(_)),
+        });
+    }
+    // Rollback is judged per branch: checking out an older branch is
+    // normal, a branch going backwards is not. A detached HEAD (rebase,
+    // bisect, CI checkout of a commit) and a branch never seen here have
+    // no high-water mark to compare with.
+    let high = match head {
+        HeadState::NotARepo => Some(p.generation),
+        HeadState::Branch(b) => p.branches.get(b).copied(),
+        HeadState::Detached => None,
+    };
+    if let Some(high) = high
+        && loaded.vault.generation < high
+    {
+        return Some(Refusal::RolledBack {
+            pinned: high,
+            found: loaded.vault.generation,
+        });
+    }
+    let signer = signer?;
+    if p.has_trust()
+        && let Some(group) = unauthorised_group_change(loaded, p, signer)
+    {
+        return Some(Refusal::GroupChange {
+            group,
+            signer: signer.to_string(),
+        });
+    }
+    None
+}
+
+/// Rule R3 for an unsigned vault: the first recipient, grant or group
+/// membership in `loaded` that `pin` has not accepted. A recipient must be a
+/// trusted signer in the pin, or a grant key the pin recorded whose record
+/// this vault still carries. Every grant must be one the pin recorded. Every
+/// group must have the pinned membership. Removing a recipient or a grant
+/// only narrows, so it passes.
+fn unsigned_widening(loaded: &Loaded<'_>, pin: &TrustPin) -> Option<Refusal> {
+    let grants = grant_keys(loaded.grants);
+    if let Some(key) = grants.iter().find(|k| !pin.grants.contains(*k)) {
+        return Some(Refusal::UnsignedGrant { key: key.clone() });
+    }
+    if let Some(key) = loaded.vault.recipients.iter().find(|r| {
+        let key = canonical_recipient(r);
+        !pin.trusted.contains(key.as_ref()) && !grants.contains(key.as_ref())
+    }) {
+        return Some(Refusal::UnsignedRecipient { key: key.clone() });
+    }
+    let groups = canonical_groups(loaded.groups);
+    groups
+        .keys()
+        .chain(pin.groups.keys())
+        .find(|g| groups.get(*g) != pin.groups.get(*g))
+        .map(|group| Refusal::UnsignedGroupChange {
+            group: group.clone(),
+        })
 }
 
 /// Check one side of a merge (ours or theirs) before its content is merged
@@ -1133,7 +1885,8 @@ fn verdict(
 /// shares with the ancestor: if it changed anything it is refused, rather
 /// than letting an old signed revision (or another 0.13 vault of the team)
 /// override newer content. A side with only one of the two fields is judged
-/// against any 0.14 state in the pin. Returns the reason a side is refused.
+/// against any 0.14 state in the pin. `MURK_EXPECTED_VAULT`, when set, is
+/// checked last, as for a load. Returns the reason a side is refused.
 pub fn check_merge_side(
     vault_path: &str,
     side: &Loaded<'_>,
@@ -1171,7 +1924,26 @@ pub fn check_merge_side(
             crate::validate::show(&side.vault.vault_id)
         ));
     }
-    if let Some(refusal) = merge_side_counter_or_removal(side, base.map(|(b, _)| b), pin.as_ref()) {
+    // Two files of one vault id in this checkout: judged as for a load.
+    let shared = shared_identity(vault_path, &judged_vault_id(side), pin.as_ref(), None);
+    if shared.refuses() {
+        let refusal = Refusal::SharedVaultId {
+            others: shared.refused,
+            retired_by: shared.retired_by,
+        };
+        let msg = refusal_message(vault_path, &refusal, side, pin.as_ref());
+        return Err(msg.lines().next().unwrap_or_default().to_string());
+    }
+    // Only an authority ancestor says that a side kept a key rather than
+    // added it (see `merge_side_counter_or_removal`).
+    let authority = base.filter(|(_, groups)| groups.is_some()).map(|(b, _)| b);
+    if let Some(refusal) = merge_side_counter_or_removal(
+        vault_path,
+        side,
+        base.map(|(b, _)| b),
+        authority,
+        pin.as_ref(),
+    ) {
         return Err(refusal);
     }
     let env_signers = env_trusted_signers()?;
@@ -1213,26 +1985,39 @@ pub fn check_merge_side(
             side.vault.generation, base.generation
         ));
     }
+    // As for a load, the checks against this machine's pin speak first.
+    if let Some(mismatch) = env_expected_vault()?
+        .and_then(|e| e.mismatch(&judged_vault_id(side), side.vault.generation))
+    {
+        let msg = mismatch.message(vault_path);
+        return Err(msg.lines().next().unwrap_or_default().to_string());
+    }
     Ok(())
 }
 
 /// Rules 8 and 9 for a merge side. A side signed by a removed key is refused.
-/// A side that lists a removed key the ancestor did not, numbered at or below
-/// the removal, is an older revision re-adding them: refused as a rollback. A
-/// side that merely still lists such a key (a branch forked before the
-/// removal) passes here: the merge takes the removal from the other side, and
-/// [`removed_key_kept_by_merge`] refuses a result that keeps the key. The
-/// counter may be at most [`MAX_GENERATION_STEP`] above both the mark and the
-/// ancestor; unlike a load it may be below the mark, since a merged branch is
+/// A side that lists a removed key that `authority`, the ancestor when it is
+/// an authority for this merge, does not list is refused at any generation:
+/// it may re-add them on purpose, or be a stale fork, and only `murk trust
+/// --re-add` on this machine accepts that. Without an authority ancestor no
+/// side may list such a key, so a forged ancestor that lists it exempts
+/// nothing. A side that lists the key because the authority ancestor did (a
+/// branch forked before the removal) passes here: the recipient merge stops
+/// on the one-sided removal, and [`removed_key_kept_by_merge`] refuses a
+/// result that keeps the key. The counter may be at most
+/// [`MAX_GENERATION_STEP`] above both the mark and `base`, the ancestor;
+/// unlike a load it may be below the mark, since a merged branch is
 /// legitimately older.
 fn merge_side_counter_or_removal(
+    vault_path: &str,
     side: &Loaded<'_>,
     base: Option<&types::Vault>,
+    authority: Option<&types::Vault>,
     pin: Option<&TrustPin>,
 ) -> Option<String> {
     let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
     let found = side.vault.generation;
-    let in_base: BTreeSet<String> = base
+    let in_base: BTreeSet<String> = authority
         .map(|b| {
             b.recipients
                 .iter()
@@ -1251,11 +2036,16 @@ fn merge_side_counter_or_removal(
     for r in &side.vault.recipients {
         let canonical = canonical_recipient(r).into_owned();
         if let Some(&at) = pin.removed.get(&canonical)
-            && found <= at
             && !in_base.contains(&canonical)
         {
+            if found <= at {
+                return Some(format!(
+                    "rolled back: it adds {} again, who was removed from this vault at generation {at} on this machine, in a revision numbered {found}, not newer",
+                    label(side.names, r)
+                ));
+            }
             return Some(format!(
-                "rolled back: it adds {} again, who was removed from this vault at generation {at} on this machine, in a revision numbered {found}, not newer",
+                "it lists {}, who was removed from this vault at generation {at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them. To accept a deliberate re-add, abort the merge (`git merge --abort`) and review the change with `murk diff`. Then do one of these: merge again, keep this side (`git checkout --theirs -- {vault_path}`), run `murk trust --vault {vault_path} --re-add {canonical}` ({READD_SCOPE}), and make the other side's vault changes again with murk. Or run `murk circle authorize` for them on this branch, commit, and merge again",
                 label(side.names, r)
             ));
         }
@@ -1268,27 +2058,30 @@ fn merge_side_counter_or_removal(
     })
 }
 
-/// Rule 8 for a merge result: a removed key the merged recipients still list
-/// must be re-added by a side numbered above the removal (one that passed
-/// [`check_merge_side`], so its signer is trusted). Otherwise the result would
-/// bring them back from older revisions alone. Returns the key and the
-/// generation it was removed at.
+/// Rule 8 for a merge result at `checkout`: where the removal of a key the
+/// merged recipients list applies (see [`removal_applies`]), the result is
+/// refused, whatever the sides' generations. Elsewhere (a branch this
+/// machine accepted before the removal reached it) a side numbered above the
+/// removal must list the key, so the result never brings it back from older
+/// revisions alone. Returns the key and the generation it was removed at.
 pub fn removed_key_kept_by_merge(
     pin: Option<&TrustPin>,
     merged: &types::Vault,
     sides: &[&types::Vault],
+    checkout: &Checkout,
 ) -> Option<(String, u64)> {
     let pin = pin.filter(|p| p.v >= pins::PIN_VERSION)?;
     merged.recipients.iter().find_map(|r| {
         let canonical = canonical_recipient(r).into_owned();
         let at = *pin.removed.get(&canonical)?;
-        let readded = sides.iter().any(|side| {
-            side.generation > at
-                && side
-                    .recipients
-                    .iter()
-                    .any(|s| canonical_recipient(s) == canonical)
-        });
+        let readded = !removal_applies(pin, &canonical, checkout)
+            && sides.iter().any(|side| {
+                side.generation > at
+                    && side
+                        .recipients
+                        .iter()
+                        .any(|s| canonical_recipient(s) == canonical)
+            });
         (!readded).then(|| (r.clone(), at))
     })
 }
@@ -1296,7 +2089,13 @@ pub fn removed_key_kept_by_merge(
 /// The first group whose membership changed relative to the pin without the
 /// signer being entitled to change it, if any.
 fn unauthorised_group_change(loaded: &Loaded<'_>, pin: &TrustPin, signer: &str) -> Option<String> {
-    group_change_violation(&loaded.vault.recipients, loaded.groups, &pin.groups, signer)
+    group_change_violation(
+        &loaded.vault.recipients,
+        loaded.groups,
+        &pin.groups,
+        &pin.sidecar.deleted_groups,
+        signer,
+    )
 }
 
 /// The first group in `after` (membership with `recipients` as the vault's
@@ -1305,10 +2104,16 @@ fn unauthorised_group_change(loaded: &Loaded<'_>, pin: &TrustPin, signer: &str) 
 /// they are not in, or deleting a group with members left that they are not
 /// in. Removing a member who left the vault entirely is allowed, because
 /// `circle revoke` does that and any recipient may revoke.
+///
+/// `deleted` holds groups this machine saw deleted, with their members at
+/// deletion. A group absent from `before` and present in `deleted` is
+/// judged as a change from those members: only one of them may create it
+/// again, unless none of them is still a recipient.
 pub fn group_change_violation(
     recipients: &[String],
     after: &Groups,
     before: &BTreeMap<String, BTreeSet<String>>,
+    deleted: &BTreeMap<String, BTreeSet<String>>,
     signer: &str,
 ) -> Option<String> {
     let signer = canonical_recipient(signer).into_owned();
@@ -1318,12 +2123,16 @@ pub fn group_change_violation(
         .collect();
     let current = canonical_groups(after);
     for (group, members) in &current {
-        let Some(was) = before.get(group) else {
-            // A new group: its creator must be in it (the CLI requires that).
-            if !members.contains(&signer) {
-                return Some(group.clone());
+        let was = match (before.get(group), deleted.get(group)) {
+            (Some(was), _) => was,
+            (None, Some(was)) if was.intersection(&recipients).next().is_some() => was,
+            _ => {
+                // A new group: its creator must be in it (the CLI requires that).
+                if !members.contains(&signer) {
+                    return Some(group.clone());
+                }
+                continue;
             }
-            continue;
         };
         let added = members.difference(was).next().is_some();
         let removed = was.difference(members).any(|m| recipients.contains(m));
@@ -1381,8 +2190,13 @@ pub enum Acceptance<'a> {
 /// A key the trusted set loses is recorded in `removed` with the vault's
 /// generation — when the vault is this branch's next accepted state (a
 /// branch seen here before, or outside git), the user's decision, or this
-/// machine's own save — and `commit` in `removed_at_commit`; it leaves them
-/// only when a newer accepted vault lists it again, or the user re-adds it.
+/// machine's own save — and `commit` in `removed_at_commit`. A load that is
+/// its branch's next state but not above every counter this machine
+/// accepted (another branch saved here more) records the removals the vault
+/// holds against the branch's previous mark (see [`branch_removals`]). A
+/// load never takes a record out, whatever the vault's generation: only the
+/// user re-adding the key (`murk trust --re-add`) or this machine's own save
+/// adding it does.
 /// A registry entry for a recipient with no pinned key is pinned on the
 /// signer's word and recorded in `added_by`; when that signer leaves the
 /// trusted set the entry is dropped (see SPEC, Trust: "independently
@@ -1404,45 +2218,17 @@ pub fn accepted_pin(
         }
     );
     let found = loaded.vault.generation;
-    let branch_seen = match head {
-        HeadState::Branch(b) => prior_v2.is_some_and(|p| p.branches.contains_key(b)),
-        _ => false,
-    };
     // Only the next state of a branch this machine accepted before (or of
-    // the vault outside git) is current: a branch it has never accepted —
-    // an unmerged pull request, say — is read as history and only narrows
-    // the pin, like a detached HEAD. Generation 0 is murk ≤ 0.13: no order,
-    // so every such load is current until this machine has seen the vault
-    // written by murk 0.14 (a counter or an id); after that a 0.13 vault that
-    // still loads (on a branch not upgraded here) is history.
+    // the vault outside git) is current (see `is_current`): history only
+    // narrows the pin.
     let current = match how {
-        Acceptance::Load => prior_v2.filter(|p| p.has_trust()).is_none_or(|p| {
-            let newer =
-                found > p.generation || (found == 0 && p.generation == 0 && p.vault_id.is_empty());
-            newer
-                && match head {
-                    HeadState::NotARepo => true,
-                    HeadState::Branch(_) => branch_seen,
-                    HeadState::Detached => false,
-                }
-        }),
+        Acceptance::Load => is_current(loaded.vault, prior_v2, head),
         Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
     };
-    // Removals whose listing rule does not apply on this branch (see
-    // `removal_applies`): a vault here listing the key again is not a re-add,
-    // so it never drops the recorded removal. A branch with no mark is judged
-    // without its git history, so nothing is set aside there.
-    let checkout = Checkout::at(head.clone());
-    let set_aside: BTreeSet<String> = prior_v2
-        .map(|p| {
-            p.removed
-                .keys()
-                .filter(|k| !removal_applies(p, k, &checkout))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-
+    let dropped_on_branch = match how {
+        Acceptance::Load if !current => branch_removals(loaded.vault, prior_v2, head),
+        _ => BTreeSet::new(),
+    };
     let mut pin = prior_v2.cloned().unwrap_or_default();
     pin.v = pins::PIN_VERSION;
     // A key this machine trusts (or trusted) as a signer is never recorded as
@@ -1451,18 +2237,23 @@ pub fn accepted_pin(
         .into_iter()
         .filter(|k| !pin.trusted.contains(k) && !pin.ever_trusted.contains(k))
         .collect();
-    pin.grants.extend(new_grants);
+    pin.grants.extend(new_grants.iter().cloned());
     advance_marks(&mut pin, loaded.vault, current, reset_counter, head);
     record_pre_upgrade_acceptance(&mut pin, loaded.vault, how, current, head);
 
     let prior_id = std::mem::take(&mut pin.vault_id);
     pin.vault_id = accepted_vault_id(loaded, &prior_id);
     // Removals belong to one vault: another vault's counters do not compare.
+    // So do the sidecar's records.
     let other_vault = !prior_id.is_empty() && prior_id != pin.vault_id;
     if other_vault {
         pin.removed.clear();
         pin.removed_on.clear();
         pin.removed_at_commit.clear();
+        pin.sidecar = pins::Sidecar::default();
+        // Grants belong to one vault too: the old vault's grant keys would
+        // refuse members of this one.
+        pin.grants = new_grants.into_iter().collect();
     }
 
     let mut dropped = replace_trusted(&mut pin, loaded.vault, how, had_trust, current);
@@ -1472,12 +2263,9 @@ pub fn accepted_pin(
     if older_copy {
         pin.trusted.extend(std::mem::take(&mut dropped));
     }
-    let record_removals = !other_vault
-        && match how {
-            Acceptance::Load => current,
-            Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
-        };
-    if record_removals {
+    dropped.extend(dropped_on_branch);
+    // Another vault's acceptance records nothing about this one.
+    if !other_vault {
         for k in dropped {
             let at = pin.removed.entry(k.clone()).or_insert(found);
             *at = (*at).max(found);
@@ -1488,15 +2276,10 @@ pub fn accepted_pin(
             pin.removed_on.entry(k).or_default();
         }
     }
-    // Who comes back: a newer accepted vault listing the key where the
-    // removal applies (its signer was trusted, or this load is history and
-    // changes nothing), the user naming it, or this machine's own save adding
-    // it.
+    // Who comes back: the user naming the key, or this machine's own save
+    // adding it. A load never re-trusts a removed key.
     let trusted = std::mem::take(&mut pin.trusted);
     match how {
-        Acceptance::Load if current => pin
-            .removed
-            .retain(|k, at| !(trusted.contains(k) && found > *at && !set_aside.contains(k))),
         Acceptance::Load => {}
         Acceptance::Trust { readmit, .. } => pin.removed.retain(|k, _| !readmit.contains(k)),
         Acceptance::OwnSave { before } => pin
@@ -1510,13 +2293,71 @@ pub fn accepted_pin(
 
     pin_signing_keys(&mut pin, loaded, current);
     if current && !older_copy {
-        pin.groups = canonical_groups(loaded.groups);
+        replace_groups(&mut pin, canonical_groups(loaded.groups), other_vault);
     }
     let trusted = pin.trusted.clone();
     pin.ever_trusted.extend(trusted);
     pin.was_signed = matches!(loaded.signature, types::SignatureState::Signed { .. })
         || prior.is_some_and(|p| p.was_signed);
+    if current {
+        record_grant_state(&mut pin, loaded, head, commit);
+    }
     pin
+}
+
+/// Record what a current acceptance of `loaded` (a current load, `murk
+/// trust`, an own save) shows about agent grants, at `head` and `commit`:
+/// its revoked grant set joins `revoked_grants_seen`, and each key it holds
+/// a grant record for is seen live on the branch (`""` outside git) at
+/// `commit` (`""` when there is none). A detached HEAD records no
+/// sighting: it is no branch.
+fn record_grant_state(
+    pin: &mut TrustPin,
+    loaded: &Loaded<'_>,
+    head: &HeadState,
+    commit: Option<&str>,
+) {
+    for (key, ids) in loaded.revoked {
+        pin.sidecar
+            .revoked_grants_seen
+            .entry(canonical_recipient(key).into_owned())
+            .or_default()
+            .extend(ids.iter().cloned());
+    }
+    let branch = match head {
+        HeadState::Branch(b) => b.clone(),
+        HeadState::NotARepo => String::new(),
+        HeadState::Detached => return,
+    };
+    for key in grant_keys(loaded.grants) {
+        pin.sidecar
+            .grants_live_on
+            .entry(key)
+            .or_default()
+            .insert(branch.clone(), commit.unwrap_or_default().to_string());
+    }
+}
+
+/// Set the pinned groups to `groups`, those of a vault accepted as current.
+/// Each pinned group that `groups` no longer holds is recorded in the
+/// sidecar with its members as pinned, unless `groups` belongs to another
+/// vault (`other_vault`). A group that `groups` holds again leaves the
+/// record.
+fn replace_groups(
+    pin: &mut TrustPin,
+    groups: BTreeMap<String, BTreeSet<String>>,
+    other_vault: bool,
+) {
+    let deleted = &mut pin.sidecar.deleted_groups;
+    if !other_vault {
+        for (name, members) in &pin.groups {
+            if !groups.contains_key(name) {
+                deleted.insert(name.clone(), members.clone());
+            }
+        }
+    }
+    deleted.retain(|name, _| !groups.contains_key(name));
+    pin.groups = groups;
 }
 
 /// Whether `how` is `murk trust` of an older murk 0.13 copy of this vault
@@ -1608,7 +2449,9 @@ fn record_pre_upgrade_acceptance(
 
 /// Raise the counters for an accepted `vault`: the overall mark (and the
 /// fingerprint of the vault at it) only for a current acceptance, the
-/// branch's mark for any. `reset_counter` lowers them to the vault's.
+/// branch's mark for any. `reset_counter` lowers them to the vault's. Where
+/// a branch's mark moves to this vault, its recipients are kept as the
+/// members at that mark (see [`pins::Sidecar::members_at_mark`]).
 fn advance_marks(
     pin: &mut TrustPin,
     vault: &types::Vault,
@@ -1639,8 +2482,51 @@ fn advance_marks(
         pin.branches.insert(b.clone(), mark);
         if reset_counter || old.is_none_or(|m| found > m) {
             pin.branch_heads.insert(b.clone(), fingerprint);
+            let members = vault
+                .recipients
+                .iter()
+                .map(|r| canonical_recipient(r).into_owned())
+                .collect();
+            pin.sidecar.members_at_mark.insert(b.clone(), members);
         }
     }
+}
+
+/// The removals a load of `vault` on branch `head` holds when it is that
+/// branch's next state (above the branch's mark) but not current (see
+/// [`is_current`]: another branch has a higher counter here): the keys
+/// `prior` trusts that the vault accepted at the branch's previous mark
+/// listed (see [`pins::Sidecar::members_at_mark`]) and `vault` no longer
+/// lists. A key added on another branch that has not reached this one is
+/// not among them. With no members recorded for the branch (a mark set by
+/// an older murk), nothing is recorded, as before.
+fn branch_removals(
+    vault: &types::Vault,
+    prior: Option<&TrustPin>,
+    head: &HeadState,
+) -> BTreeSet<String> {
+    let (HeadState::Branch(b), Some(prior)) = (head, prior.filter(|p| p.has_trust())) else {
+        return BTreeSet::new();
+    };
+    let (Some(&mark), Some(members)) =
+        (prior.branches.get(b), prior.sidecar.members_at_mark.get(b))
+    else {
+        return BTreeSet::new();
+    };
+    if vault.generation <= mark {
+        return BTreeSet::new();
+    }
+    let listed: BTreeSet<String> = vault
+        .recipients
+        .iter()
+        .map(|r| canonical_recipient(r).into_owned())
+        .collect();
+    members
+        .iter()
+        .filter(|k| prior.trusted.contains(*k) && !prior.grants.contains(*k))
+        .filter(|k| !listed.contains(*k))
+        .cloned()
+        .collect()
 }
 
 /// Set the pin's trusted set for an accepted `vault` and return the keys it
@@ -1765,17 +2651,18 @@ fn pin_signing_keys(pin: &mut TrustPin, loaded: &Loaded<'_>, current: bool) {
     }
 }
 
-/// Check a historical revision of the vault (`murk diff` against a git ref,
-/// the merge driver's common ancestor) without writing anything. Unlike a
-/// load there is no rollback or group-change check — an older revision is
-/// expected — and the signer must be one this machine *ever* trusted, so a
-/// teammate revoked since still verifies for the revisions they signed. The
-/// signer's key must still be the pinned one, and a grant key or a signer
-/// never trusted is refused. The vault id must match, except that a revision
-/// with none is pre-0.14 history: it predates the id (and the counter), so
-/// neither its missing id nor its 0.13 signature makes it a rollback. A
-/// view-1 revision is compared by the id its first 0.14 save takes (see
-/// `verdict`), so another vault's 0.13 file is still another vault.
+/// Check a historical revision of the vault (`murk diff` against a git ref)
+/// without writing anything. Unlike a load there is no rollback or
+/// group-change check — an older revision is expected — and the signer must
+/// be one this machine *ever* trusted, so a teammate revoked since still
+/// verifies for the revisions they signed. The signer's key must still be the
+/// pinned one, and a grant key or a signer never trusted is refused. The
+/// vault id must match, except that a revision with none is pre-0.14
+/// history: it predates the id (and the counter), so neither its missing id
+/// nor its 0.13 signature makes it a rollback. A view-1 revision is compared
+/// by the id its first 0.14 save takes (see `verdict`), so another vault's
+/// 0.13 file is still another vault. The merge driver judges its common
+/// ancestor by the stricter [`ancestor_verdict`].
 pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdict, String> {
     let pin = pins::read(vault_path)?;
     let env_signers = env_trusted_signers()?;
@@ -1800,10 +2687,134 @@ pub fn assess_revision(vault_path: &str, revision: &Loaded<'_>) -> Result<Verdic
     );
     // Groups were cleared above, so a pinned group would read as "new" for
     // every revision; group authority is a property of the working vault.
-    if let Verdict::Refused(Refusal::GroupChange { .. }) = verdict {
-        verdict = Verdict::Trusted;
-    }
+    // So is the rule that an unsigned vault never widens the pin: a revision
+    // read as history changes nothing here, and differs from the pin by
+    // nature.
+    verdict = match verdict {
+        Verdict::Refused(Refusal::GroupChange { .. }) => Verdict::Trusted,
+        Verdict::Refused(
+            Refusal::UnsignedRecipient { .. }
+            | Refusal::UnsignedGrant { .. }
+            | Refusal::UnsignedGroupChange { .. },
+        ) => Verdict::UnsignedAllowed,
+        other => other,
+    };
     Ok(verdict)
+}
+
+/// Whether the common ancestor of a merge is an authority on what changed:
+/// `Trusted` only when it is signed by a key in the current anchor (the
+/// pin's trusted set, or `MURK_TRUSTED_SIGNERS` when set) under the verifying
+/// key pinned or given for it, by a key this machine has not recorded as
+/// removed, and when it is the vault the pin and both `sides` name. A key
+/// this machine only ever trusted does not count, and nor does a removed
+/// key's own history from before its removal: a revision a removed member
+/// signed never decides a merge. Its counter is not judged, since an
+/// ancestor is older than the sides by nature, and nor are its groups, since
+/// group authority is a property of the working vault. An unsigned ancestor
+/// never gets `Trusted`.
+pub fn ancestor_verdict(
+    vault_path: &str,
+    ancestor: &Loaded<'_>,
+    sides: [&types::Vault; 2],
+) -> Result<Verdict, String> {
+    let pin = pins::read(vault_path)?;
+    let env_signers = env_trusted_signers()?;
+    let found = ancestor.vault.generation;
+    if let types::SignatureState::Signed { signer, .. } = ancestor.signature
+        && let Some(&removed_at) = pin
+            .as_ref()
+            .filter(|p| p.v >= pins::PIN_VERSION)
+            .and_then(|p| p.removed.get(canonical_recipient(signer).as_ref()))
+    {
+        return Ok(Verdict::Refused(Refusal::RemovedKey {
+            key: signer.clone(),
+            removed_at,
+            found,
+            signer: true,
+            unchecked: None,
+        }));
+    }
+    let id = judged_vault_id(ancestor);
+    if let Some(side) = sides
+        .iter()
+        .find(|s| !s.vault_id.is_empty() && s.vault_id != id)
+    {
+        return Ok(Verdict::Refused(Refusal::OtherVault {
+            pinned: side.vault_id.clone(),
+            found: id,
+        }));
+    }
+    let judged = pin.map(|mut p| {
+        p.generation = 0;
+        p.branches.clear();
+        p.groups.clear();
+        p
+    });
+    Ok(
+        match verdict(
+            ancestor,
+            judged.as_ref(),
+            env_signers.as_ref(),
+            &HeadState::Detached,
+        ) {
+            Verdict::Refused(Refusal::GroupChange { .. }) => Verdict::Trusted,
+            other => other,
+        },
+    )
+}
+
+/// Why this machine would refuse a merge result (see
+/// [`merge_result_refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRefusal {
+    /// The refusal's first line.
+    pub reason: String,
+    /// The signer whose signing key this machine has not confirmed, when
+    /// that is the refusal (canonical). The merge driver compares it with
+    /// the merging key: its own key is confirmed by one ordinary save.
+    pub unconfirmed_signer: Option<String>,
+}
+
+/// The refusal a load of a merge result would get on this machine, if any:
+/// the full load verdict with the pin as it is, the environment's anchor and
+/// `MURK_EXPECTED_VAULT`, at the checkout being merged into. The merge driver
+/// signs a result only when this is `None`. A grant this machine holds as
+/// revoked is the merge's own result check (`merge.rs`), which runs before
+/// the result is signed; here the tombstone rule refuses only a plain
+/// recipient, as on any load.
+pub fn merge_result_refusal(
+    vault_path: &str,
+    merged: &Loaded<'_>,
+) -> Result<Option<ResultRefusal>, String> {
+    let pin = pins::read(vault_path)?;
+    let env_signers = env_trusted_signers()?;
+    let expected = env_expected_vault()?;
+    let checkout = Checkout::of(vault_path, pin.as_ref());
+    Ok(
+        match load_verdict(
+            merged,
+            pin.as_ref(),
+            env_signers.as_ref(),
+            expected.as_ref(),
+            &checkout,
+            Some(false),
+        ) {
+            Verdict::Refused(r) => {
+                let msg = refusal_message(vault_path, &r, merged, pin.as_ref());
+                Some(ResultRefusal {
+                    reason: msg.lines().next().unwrap_or_default().to_string(),
+                    unconfirmed_signer: match &r {
+                        Refusal::UnconfirmedSignerKey { signer, .. } => {
+                            Some(canonical_recipient(signer).into_owned())
+                        }
+                        _ => None,
+                    },
+                })
+            }
+            Verdict::Trusted | Verdict::UnsignedAllowed => None,
+        },
+    )
 }
 
 /// Recipient-set changes of `loaded` against the pinned trusted set, as
@@ -1841,6 +2852,27 @@ pub fn label(names: &std::collections::HashMap<String, String>, key: &str) -> St
     }
 }
 
+/// The lines `refusal_message` adds for the recipients `loaded` adds or
+/// removes against `pin`.
+fn recipient_change_lines(loaded: &Loaded<'_>, pin: Option<&TrustPin>) -> String {
+    use std::fmt::Write;
+    let has_pin = pin.is_some_and(TrustPin::has_trust);
+    let (added, removed) = recipient_changes(loaded, pin);
+    let mut lines = String::new();
+    for k in added {
+        let what = if has_pin {
+            "recipient added"
+        } else {
+            "recipient"
+        };
+        let _ = write!(lines, "\n{what}: {}", label(loaded.names, &k));
+    }
+    for k in removed {
+        let _ = write!(lines, "\nrecipient removed: {}", label(loaded.names, &k));
+    }
+    lines
+}
+
 /// The error a secret-handling load reports for `refusal`: what happened, what
 /// to review, and how to accept it if it is legitimate.
 pub fn refusal_message(
@@ -1852,24 +2884,7 @@ pub fn refusal_message(
     let review = format!(
         "review `git log -p -- {vault_path}` and `murk diff`, then run `murk trust --vault {vault_path}` if you accept it"
     );
-    let changes = || {
-        use std::fmt::Write;
-        let has_pin = pin.is_some_and(TrustPin::has_trust);
-        let (added, removed) = recipient_changes(loaded, pin);
-        let mut lines = String::new();
-        for k in added {
-            let what = if has_pin {
-                "recipient added"
-            } else {
-                "recipient"
-            };
-            let _ = write!(lines, "\n{what}: {}", label(loaded.names, &k));
-        }
-        for k in removed {
-            let _ = write!(lines, "\nrecipient removed: {}", label(loaded.names, &k));
-        }
-        lines
-    };
+    let changes = || recipient_change_lines(loaded, pin);
     match refusal {
         Refusal::NotYetTrusted { signer } => format!(
             "vault {vault_path} is not trusted on this machine yet — signed by {}{}\n{review}\nfor CI, set {TRUSTED_SIGNERS_VAR} to the expected signer keys",
@@ -1895,6 +2910,12 @@ pub fn refusal_message(
         Refusal::Downgraded => format!(
             "vault {vault_path} was signed when this machine last accepted it and is now unsigned — the signature was stripped, or a merge or a hardware-key write left it unsigned\nreview `git diff -- {vault_path}` and `murk diff`, then run `murk trust --vault {vault_path}` to accept and re-sign it"
         ),
+        Refusal::UnsignedNotYetTrusted
+        | Refusal::UnsignedRecipient { .. }
+        | Refusal::UnsignedGrant { .. }
+        | Refusal::UnsignedGroupChange { .. } => {
+            unsigned_refusal_message(vault_path, refusal, loaded, &changes(), &review)
+        }
         Refusal::RolledBack { pinned, found } => format!(
             "vault {vault_path} rolled back: generation {found}, but this machine accepted generation {pinned} — an older revision may have been replayed\nif you switched to an older branch, switch back; for a deliberate revert, {review}"
         ),
@@ -1931,7 +2952,11 @@ pub fn refusal_message(
             removed_at,
             found,
             signer,
-        } => removed_key_message(vault_path, loaded, key, *removed_at, *found, *signer),
+            unchecked,
+        } => match unchecked {
+            Some(why) => unchecked_removal_message(vault_path, loaded, key, *removed_at, why),
+            None => removed_key_message(vault_path, loaded, key, *removed_at, *found, *signer),
+        },
         Refusal::Forked { generation } => format!(
             "vault {vault_path} forked: generation {generation} is not the vault this machine accepted at that generation here — the branch was rewritten, or another save with the same counter replaced it\nmerge the two saves with the murk merge driver, or {review}"
         ),
@@ -1941,7 +2966,151 @@ pub fn refusal_message(
         Refusal::GenerationOutOfRange { found } => format!(
             "vault {vault_path} has generation {found}, above the largest murk accepts ({MAX_GENERATION}) — it may have been tampered with to exhaust the counter\nrestore {vault_path} from git"
         ),
+        Refusal::NotExpected(mismatch) => mismatch.message(vault_path),
+        Refusal::SharedVaultId { others, retired_by } => {
+            shared_vault_id_message(vault_path, others, retired_by.as_ref())
+        }
+        Refusal::RevokedGrantRecipient { key, ids } => format!(
+            "vault {vault_path} lists {} as a recipient. It was an agent grant in this vault and was revoked (revocation ids {}), and an agent grant key never reads this vault again\nif it was revoked by mistake, review it and run `murk trust --vault {vault_path} --re-add {key}`; otherwise restore {vault_path} from git",
+            label(loaded.names, key),
+            show_ids(ids.iter())
+        ),
+        Refusal::RevokedGrant { key, ids } => format!(
+            "vault {vault_path} holds a grant for {}, which this machine holds as revoked (revocation ids {}). An agent grant that was revoked never reads this vault again\nupdate to the vault that revoked it (pull, or merge the revocation into this branch). If it was revoked by mistake, review it and run `murk trust --vault {vault_path} --re-add {key}`",
+            label(loaded.names, key),
+            show_ids(ids.iter())
+        ),
     }
+}
+
+/// The message for [`Refusal::SharedVaultId`].
+fn shared_vault_id_message(
+    vault_path: &str,
+    others: &[String],
+    retired_by: Option<&String>,
+) -> String {
+    if let Some(by) = retired_by
+        && others.iter().all(|o| o == by)
+    {
+        return format!(
+            "vault {vault_path} has the same vault id as {by}, and this machine trusts that vault at {by} only (`murk trust --shares-identity-with`). murk cannot tell two files with one vault id apart\nuse {by}, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {by}` to trust the vault at {vault_path} instead"
+        );
+    }
+    let mut paths = others.to_vec();
+    paths.extend(retired_by.filter(|b| !others.contains(b)).cloned());
+    let first = paths.first().map_or("", String::as_str);
+    format!(
+        "vault {vault_path} has the same vault id as {}. murk cannot tell two files with one vault id apart, so this machine loads only one of them\nremove the other file, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {first}`",
+        paths.join(", ")
+    )
+}
+
+/// The message for an unsigned vault refused by rule R1 (no trust decision
+/// here yet) or R3 (it widens what this machine encrypts to).
+fn unsigned_refusal_message(
+    vault_path: &str,
+    refusal: &Refusal,
+    loaded: &Loaded<'_>,
+    changes: &str,
+    review: &str,
+) -> String {
+    let what = match refusal {
+        Refusal::UnsignedRecipient { key } => format!(
+            "lists {}, a recipient this machine has not accepted",
+            label(loaded.names, key)
+        ),
+        Refusal::UnsignedGrant { key } => format!(
+            "carries an agent grant for {}, which this machine has not accepted",
+            crate::truncate_pubkey(key)
+        ),
+        Refusal::UnsignedGroupChange { group } => {
+            format!("changes the membership of group {group}")
+        }
+        _ => {
+            return format!(
+                "vault {vault_path} is unsigned, and this machine has not accepted it yet — nothing shows who wrote it{changes}\n{review}"
+            );
+        }
+    };
+    format!(
+        "vault {vault_path} is unsigned and {what} — nothing shows who made this change{changes}\nmurk does not encrypt to it until you accept it\n{review}"
+    )
+}
+
+/// What `murk trust --re-add` does, for every message that offers it: the
+/// removal record goes for every branch on this machine, not only this one.
+pub const READD_SCOPE: &str = "it trusts them again on every branch on this machine, including branches that did merge the removal";
+
+/// How to re-add `key` (canonical) on purpose after review, with what that
+/// does on this machine.
+fn readd_way(vault_path: &str, key: &str) -> String {
+    format!(
+        "review it (`murk diff`), then run `murk trust --vault {vault_path} --re-add {key}` ({READD_SCOPE}), or `murk circle authorize {key}` to re-add them in the vault"
+    )
+}
+
+/// The message for [`Refusal::RemovedKey`] when the removal applies only
+/// because git could not show whether this branch's history holds it.
+pub fn unchecked_removal_message(
+    vault_path: &str,
+    loaded: &Loaded<'_>,
+    key: &str,
+    removed_at: u64,
+    why: &crate::git::HistoryCheck,
+) -> String {
+    unchecked_removal_text(vault_path, &label(loaded.names, key), key, removed_at, why)
+}
+
+/// The text of [`unchecked_removal_message`], for a caller with the label of
+/// `key` (canonical) already made. The way out names what helps in each
+/// case: fetching the missing history first where that can help, and only
+/// then a deliberate re-add.
+pub fn unchecked_removal_text(
+    vault_path: &str,
+    who: &str,
+    key: &str,
+    removed_at: u64,
+    why: &crate::git::HistoryCheck,
+) -> String {
+    use crate::git::HistoryCheck;
+    let key = canonical_recipient(key);
+    let readd = readd_way(vault_path, &key);
+    let after = format!(
+        "if it is still refused because this branch never merged the removal, or to re-add them on purpose, {readd}"
+    );
+    let (cause, way) = match why {
+        HistoryCheck::TooLong => (
+            format!(
+                "its history is too long to check (more than {} revisions of the vault file)",
+                crate::git::VAULT_HISTORY_CAP
+            ),
+            format!("fetching more history cannot help. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+        HistoryCheck::Shallow => (
+            "this is a shallow clone, and the history murk needs is past its boundary".to_string(),
+            format!("fetch the full history with `git fetch --unshallow`, then try again; {after}"),
+        ),
+        HistoryCheck::Partial { remote } => (
+            format!("this is a partial clone of {remote}, and vault revisions murk needs were not downloaded"),
+            format!(
+                "download them with `git fetch --refetch --no-filter {remote}`, then stop filtering later fetches with `git config --unset remote.{remote}.promisor` and `git config --unset remote.{remote}.partialclonefilter`, and try again; {after}"
+            ),
+        ),
+        HistoryCheck::Gone => (
+            "the commit this machine recorded the removal at is not in this repository (the history was rewritten and garbage-collected, or no commit was recorded)".to_string(),
+            format!("fetching cannot bring it back. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+        HistoryCheck::Unreadable | HistoryCheck::Found | HistoryCheck::NotFound => (
+            format!(
+                "a vault revision in its history cannot be read (not a vault, recipients that do not parse, over {} MiB, a missing object, or a git failure)",
+                crate::git::VAULT_BLOB_LIMIT / (1024 * 1024)
+            ),
+            format!("fetching cannot fix a revision committed that way (not a vault, or too big); a missing object in a full clone can be repaired with `git fetch --refetch`, then try again. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+    };
+    format!(
+        "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine, and murk cannot tell whether this branch merged that removal: {cause}. It may be a stale fork that brings them back, so murk refuses it\n{way}"
+    )
 }
 
 /// The message for [`Refusal::RemovedKey`].
@@ -1959,13 +3128,18 @@ fn removed_key_message(
             "it is signed by {who}, who was removed from this vault at generation {removed_at} on this machine\nif the branch that removed them is not merged here yet, merge it with the murk merge driver; when the merge stops on this vault, keep the side that removed them (`git checkout --theirs -- {vault_path}` when you merged that branch in) and `git add {vault_path}`. That drops every vault change made on this branch since the two branches split, by anyone, not only by them: run `murk trust --vault {vault_path}` (the vault you keep may read as a rollback or fork of this branch; accepting it never re-trusts them), find this branch's last vault commit not signed by them (`git log -- {vault_path}`), list what differs with `murk diff <that commit> --show-values`, and review it change by change — a later vault signed by someone else can still carry their changes — then make only the changes trusted members made again with murk, and commit. If the branch that removed them will not be merged (the removal was abandoned), `murk trust --vault {vault_path} --re-add {}` restores them on this machine. Otherwise restore {vault_path} from git",
             canonical_recipient(key)
         )
+    } else if found > removed_at {
+        return format!(
+            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). If this branch should not have them, merge the branch that holds the removal into this branch with the murk merge driver, keeping the side that removed them. To trust them again on purpose instead, run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
+            canonical_recipient(key)
+        );
     } else {
         format!(
             "it lists {who}, who was removed from this vault at generation {removed_at} on this machine, and its generation {found} is not newer — an older revision may have been replayed\nupdate to the vault that removed them (pull, or merge the removal into this branch)"
         )
     };
     format!(
-        "vault {vault_path} rolled back: {what}; to re-add them on purpose, have a trusted teammate authorize them again, or review it and run `murk trust --vault {vault_path} --re-add {}`",
+        "vault {vault_path} rolled back: {what}; to re-add them on purpose, review it and run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
         canonical_recipient(key)
     )
 }
@@ -2405,6 +3579,7 @@ mod tests {
         sig: types::SignatureState,
         groups: BTreeMap<String, Vec<String>>,
         grants: BTreeMap<String, types::GrantEntry>,
+        revoked: types::RevokedGrants,
         names: HashMap<String, String>,
         registry: BTreeMap<String, String>,
         /// The registry key the signature verified against (age signers).
@@ -2423,6 +3598,7 @@ mod tests {
                 sig: signed(by),
                 groups: BTreeMap::new(),
                 grants: BTreeMap::new(),
+                revoked: BTreeMap::new(),
                 names: HashMap::new(),
                 registry: BTreeMap::new(),
                 vk: None,
@@ -2442,6 +3618,7 @@ mod tests {
                 names: &self.names,
                 groups: &self.groups,
                 grants: &self.grants,
+                revoked: &self.revoked,
                 loader_can_sign: true,
                 operator_key: None,
             }
@@ -2512,6 +3689,7 @@ mod tests {
         let pin = pin_for(&Case::new(&[A], 1, A));
         let mut other = Case::new(&[A], 9, A);
         other.vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
+        eprintln!("ROW R-I8-a DECISIVE");
         assert!(matches!(
             verdict(&other.loaded(), Some(&pin), None),
             Verdict::Refused(Refusal::OtherVault { .. })
@@ -2544,12 +3722,74 @@ mod tests {
         );
         let mut hw = c.loaded();
         hw.loader_can_sign = false;
-        assert_eq!(verdict(&hw, None, None), Verdict::UnsignedAllowed);
+        assert_eq!(
+            verdict(&hw, None, None),
+            Verdict::Refused(Refusal::UnsignedNotYetTrusted)
+        );
         let pin = pin_for(&Case::new(&[A], 1, A));
         assert_eq!(
             verdict(&hw, Some(&pin), None),
             Verdict::Refused(Refusal::Downgraded)
         );
+    }
+
+    #[test]
+    fn an_unsigned_vault_never_widens_the_pin() {
+        // A non-signing member's machine: it accepted A and B, then its own
+        // unsigned save cleared the signed bit.
+        let mut pin = pin_for(&Case::new(&[A, B], 1, A));
+        pin.was_signed = false;
+        let judge = |c: &Case| {
+            let mut l = c.loaded();
+            l.loader_can_sign = false;
+            verdict(&l, Some(&pin), None)
+        };
+        let unsigned = |recipients: &[&str], generation| {
+            let mut c = Case::new(recipients, generation, A);
+            c.sig = types::SignatureState::Unsigned;
+            c
+        };
+        assert_eq!(judge(&unsigned(&[A, B], 2)), Verdict::UnsignedAllowed);
+        // Dropping a recipient only narrows.
+        assert_eq!(judge(&unsigned(&[A], 2)), Verdict::UnsignedAllowed);
+        assert_eq!(
+            judge(&unsigned(&[A, B, M], 2)),
+            Verdict::Refused(Refusal::UnsignedRecipient { key: M.into() })
+        );
+        let mut grouped = unsigned(&[A, B], 2);
+        grouped.groups.insert("ops".into(), vec![A.into()]);
+        assert_eq!(
+            judge(&grouped),
+            Verdict::Refused(Refusal::UnsignedGroupChange {
+                group: "ops".into()
+            })
+        );
+        let mut granted = unsigned(&[A, B, "age1grant"], 2);
+        granted.grants.insert(
+            "g".into(),
+            types::GrantEntry {
+                pubkey: "age1grant".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            judge(&granted),
+            Verdict::Refused(Refusal::UnsignedGrant {
+                key: "age1grant".into()
+            })
+        );
+        // The id and rollback checks apply as to a signed vault.
+        let mut other = unsigned(&[A, B], 2);
+        other.vault.vault_id = "other".into();
+        assert!(matches!(
+            judge(&other),
+            Verdict::Refused(Refusal::OtherVault { .. })
+        ));
+        let older = unsigned(&[A, B], 0);
+        assert!(matches!(
+            judge(&older),
+            Verdict::Refused(Refusal::RolledBack { .. })
+        ));
     }
 
     #[test]
@@ -2648,6 +3888,7 @@ mod tests {
         assert!(!pin.trusted.contains("age1agent"));
         // The grant deletes its own record and signs.
         let forged = Case::new(&[A, "age1agent"], 2, "age1agent");
+        eprintln!("ROW R-I17-a DECISIVE");
         assert!(matches!(
             verdict(&forged.loaded(), Some(&pin), None),
             Verdict::Refused(Refusal::GrantSigner { .. })
@@ -2699,11 +3940,40 @@ mod tests {
         let after = BTreeMap::from([("ops".to_string(), vec![A.to_string(), M.to_string()])]);
         let recipients = [A.to_string(), B.to_string(), M.to_string()];
         assert_eq!(
-            group_change_violation(&recipients, &after, &before, B),
+            group_change_violation(&recipients, &after, &before, &BTreeMap::new(), B),
             Some("ops".into())
         );
         assert_eq!(
-            group_change_violation(&recipients, &after, &before, A),
+            group_change_violation(&recipients, &after, &before, &BTreeMap::new(), A),
+            None
+        );
+    }
+
+    /// A group this machine saw deleted is judged, when it comes back, as a
+    /// change from its members at deletion: a non-member who re-creates it
+    /// (on load, or as the merging key) is refused, a recorded member is not,
+    /// and once every recorded member has left the vault it is a new group.
+    #[test]
+    fn a_deleted_group_comes_back_only_through_one_of_its_members() {
+        let deleted = canonical_groups(&BTreeMap::from([(
+            "ops".to_string(),
+            vec![A.to_string(), B.to_string()],
+        )]));
+        let none = BTreeMap::new();
+        let by_m = BTreeMap::from([("ops".to_string(), vec![M.to_string()])]);
+        let by_a = BTreeMap::from([("ops".to_string(), vec![A.to_string()])]);
+        let all = [A.to_string(), B.to_string(), M.to_string()];
+        assert_eq!(
+            group_change_violation(&all, &by_m, &none, &deleted, M),
+            Some("ops".into())
+        );
+        assert_eq!(group_change_violation(&all, &by_m, &none, &none, M), None);
+        assert_eq!(
+            group_change_violation(&all, &by_a, &none, &deleted, A),
+            None
+        );
+        assert_eq!(
+            group_change_violation(&[M.to_string()], &by_m, &none, &deleted, M),
             None
         );
     }
@@ -2762,6 +4032,7 @@ mod tests {
             std::env::set_var("HOME", home.path());
             std::env::remove_var("MURK_NO_SIGNER_PIN");
             std::env::remove_var("MURK_TRUSTED_SIGNERS");
+            std::env::remove_var(EXPECTED_VAULT_VAR);
         }
         pins::write(vault_path, pin).unwrap();
         let out = f();
@@ -2868,6 +4139,92 @@ mod tests {
             check_merge_side(path, &own.loaded(), Some((&base, None)), true, true)
         });
         assert_eq!(accepted, Ok(()));
+    }
+
+    #[test]
+    fn a_merge_side_meets_murk_expected_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".murk");
+        let path = path.to_str().unwrap();
+        let pin = pin_for(&Case::new(&[A], 3, A));
+        let base = Case::new(&[A], 3, A).vault;
+        let side = Case::new(&[A], 5, A);
+        let id = side.vault.vault_id.clone();
+        let check = |expected: String| {
+            with_pin(path, &pin, || {
+                unsafe { std::env::set_var(EXPECTED_VAULT_VAR, &expected) };
+                let out = check_merge_side(path, &side.loaded(), Some((&base, None)), true, true);
+                unsafe { std::env::remove_var(EXPECTED_VAULT_VAR) };
+                out
+            })
+        };
+        assert_eq!(check(format!("{id}:5")), Ok(()));
+        let other = check("ffeeddccbbaa99887766554433221100:5".into());
+        assert!(
+            other
+                .as_ref()
+                .is_err_and(|e| e.contains("not the vault that MURK_EXPECTED_VAULT names")),
+            "{other:?}"
+        );
+        let older = check(format!("{id}:6"));
+        assert!(
+            older
+                .as_ref()
+                .is_err_and(|e| e.contains("generation is 5, and the minimum is 6")),
+            "{older:?}"
+        );
+        let malformed = check(format!("{id}:5:abc"));
+        assert!(
+            malformed
+                .as_ref()
+                .is_err_and(|e| e.contains("does not check a revision")),
+            "{malformed:?}"
+        );
+    }
+
+    #[test]
+    fn murk_expected_vault_takes_an_id_and_a_minimum_only() {
+        let id = "00112233445566778899aabbccddeeff";
+        assert_eq!(
+            parse_expected_vault(&format!(" {id}:12\n")),
+            Ok(ExpectedVault {
+                vault_id: id.into(),
+                min_generation: 12,
+            })
+        );
+        // A revision part is refused, never ignored: this release does not
+        // check it, and a value that names one must not seem to.
+        let three = parse_expected_vault(&format!("{id}:12:{}", "ab".repeat(32)));
+        assert!(
+            three
+                .as_ref()
+                .is_err_and(|e| e.contains("does not check a revision")
+                    && e.contains("<vault id>:<minimum generation>")),
+            "{three:?}"
+        );
+        // Set but empty is refused, not read as unset: a missing CI secret
+        // expands to nothing and must not turn the check off.
+        for empty in ["", "  \n"] {
+            let refused = parse_expected_vault(empty);
+            assert!(
+                refused.as_ref().is_err_and(
+                    |e| e.contains("set but empty") && e.contains("unset MURK_EXPECTED_VAULT")
+                ),
+                "{empty:?}: {refused:?}"
+            );
+        }
+        for bad in [
+            id.to_string(),
+            format!("{id}:"),
+            format!("{id}:-1"),
+            format!("{id}:+1"),
+            format!("{id}:{}", MAX_GENERATION + 1),
+            format!("{}:1", id.to_uppercase()),
+            "0011:1".to_string(),
+            format!("{id}:1:2:3"),
+        ] {
+            assert!(parse_expected_vault(&bad).is_err(), "{bad:?} parsed");
+        }
     }
 
     #[test]
@@ -3047,6 +4404,8 @@ mod tests {
             pin,
             env_signers: None,
             external,
+            expected: None,
+            shared_with: Vec::new(),
         }
     }
 
@@ -3118,5 +4477,61 @@ mod tests {
             assessment(Some(legacy), None).trusted_ssh_signers(&BTreeMap::new()),
             Vec::<String>::new()
         );
+    }
+
+    /// A merge result that lists a key removed where the removal applies is
+    /// refused, even when both sides list it above the removal. Where the
+    /// removal does not apply (a branch accepted before it), a side above the
+    /// removal that lists the key still re-adds it.
+    #[test]
+    fn row_r_i10_h_merge_result() {
+        let mut pin = TrustPin {
+            v: pins::PIN_VERSION,
+            removed: BTreeMap::from([("age1bob".to_string(), 4)]),
+            removed_on: BTreeMap::from([("age1bob".to_string(), BTreeSet::from(["main".into()]))]),
+            branches: BTreeMap::from([("main".to_string(), 4), ("old".to_string(), 3)]),
+            ..TrustPin::default()
+        };
+        let mut side = crate::testutil::empty_vault();
+        side.recipients = vec!["age1alice".into(), "age1bob".into()];
+        side.generation = 9;
+        let merged = side.clone();
+        let on = |b: &str| Checkout::at(HeadState::Branch(b.into()));
+        eprintln!("ROW R-I10-h:merge-result DECISIVE");
+        assert_eq!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("main")),
+            Some(("age1bob".to_string(), 4))
+        );
+        assert_eq!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("old")),
+            None
+        );
+        pin.removed_on.clear();
+        assert!(
+            removed_key_kept_by_merge(Some(&pin), &merged, &[&side, &side], &on("old")).is_some(),
+            "with no branch entry the removal applies everywhere"
+        );
+    }
+
+    /// `murk trust` of another vault at the same path clears the agent
+    /// grant keys the pin recorded for the old vault, and its sidecar's
+    /// grant records, so the old vault's grants never refuse members of the
+    /// new one.
+    #[test]
+    fn row_r_i16_c_other_vault() {
+        let old = Case::new(&["age1alice"], 3, "age1alice");
+        let mut prior = accepted_pin(&old.loaded(), None, false);
+        prior.grants.insert("age1grant".into());
+        prior
+            .sidecar
+            .revoked_grants_seen
+            .insert("age1grant".into(), BTreeSet::from(["00".repeat(16)]));
+        let mut other = Case::new(&["age1alice", "age1grant"], 1, "age1alice");
+        other.vault.vault_id = "ffeeddccbbaa99887766554433221100".into();
+        let pin = accepted_pin(&other.loaded(), Some(&prior), true);
+        assert_eq!(pin.vault_id, other.vault.vault_id);
+        eprintln!("ROW R-I16-c:other-vault DECISIVE");
+        assert!(pin.grants.is_empty(), "pin.grants: {:?}", pin.grants);
+        assert!(pin.sidecar.revoked_grants_seen.is_empty());
     }
 }

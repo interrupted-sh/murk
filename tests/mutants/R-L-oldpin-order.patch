@@ -1,0 +1,19 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -755,12 +755,12 @@
+     }
+     let mut pin = pin.clone();
+     pin.v = PIN_VERSION;
+-    write_sidecar(vault_path, &path, &pin)?;
++    let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
++    write_pin_file(&path, json.as_bytes())
++        .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))?;
+     #[cfg(test)]
+     test_hooks::fail_after_sidecar()?;
+-    let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;
+-    write_pin_file(&path, json.as_bytes())
+-        .map_err(|e| format!("cannot write trust pin {}: {e}", path.display()))
++    write_sidecar(vault_path, &path, &pin)
+ }
+ 
+ /// Write the sidecar of the pin file `pin_file` from `pin`: its sidecar

@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1563,7 +1563,7 @@
+         return Some(Refusal::Unsigned);
+     }
+     let Some(p) = pin.filter(|p| p.has_trust()) else {
+-        return Some(Refusal::UnsignedNotYetTrusted);
++        return None;
+     };
+     pinned_state_verdict(loaded, p, head, None).or_else(|| unsigned_widening(loaded, p))
+ }

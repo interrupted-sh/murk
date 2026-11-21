@@ -4,10 +4,13 @@
 .SH NAME
 murk\-rm \- Remove a secret
 .SH SYNOPSIS
-\fBmurk rm\fR [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIKEY\fR> 
+\fBmurk rm\fR [\fB\-\-group\fR] [\fB\-\-vault\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIKEY\fR> 
 .SH DESCRIPTION
 Remove a secret
 .SH OPTIONS
+.TP
+\fB\-\-group\fR \fI<GROUP>\fR
+Remove only the value held by this group, which must have no member who is a recipient
 .TP
 \fB\-\-vault\fR \fI<VAULT>\fR [default: .murk]
 Vault filename

@@ -183,12 +183,14 @@ pub(crate) fn cmd_authorize(
         // Read SSH public key from a file.
         let path = if path_hint.is_empty() {
             // Default: ~/.ssh/id_ed25519.pub
-            let home = std::env::var("HOME").unwrap_or_else(|_| die(&"HOME not set", 1));
-            std::path::PathBuf::from(home).join(".ssh/id_ed25519.pub")
+            murk_cli::home_dir()
+                .unwrap_or_else(|| die(&"HOME is unset, empty or not an absolute path", 1))
+                .join(".ssh/id_ed25519.pub")
         } else {
             if path_hint.starts_with('~') {
-                let home = std::env::var("HOME").unwrap_or_else(|_| die(&"HOME not set", 1));
-                std::path::PathBuf::from(path_hint.replacen('~', &home, 1))
+                let home = murk_cli::home_dir()
+                    .unwrap_or_else(|| die(&"HOME is unset, empty or not an absolute path", 1));
+                std::path::PathBuf::from(path_hint.replacen('~', &home.to_string_lossy(), 1))
             } else {
                 std::path::PathBuf::from(path_hint)
             }
@@ -254,6 +256,7 @@ pub(crate) fn cmd_revoke(
     rotate: bool,
     values_from: Option<&str>,
     force: bool,
+    allow_orphan: bool,
     vault_path: &str,
 ) {
     let source = values_from.map_or(ValueSource::Prompt, |p| {
@@ -358,11 +361,37 @@ pub(crate) fn cmd_revoke(
             }
         }
     }
+    let orphaned_before = murk_cli::orphaned_groups(&vault, &current);
     let result = try_or_die(murk_cli::revoke_recipient(
         &mut vault,
         &mut current,
         recipient,
     ));
+
+    // A group whose last member who is a recipient goes keeps its values
+    // readable only by keys outside the vault, so no recipient can rotate them.
+    // Refuse that unless the user accepts it, before anything is written.
+    let orphaned: Vec<murk_cli::OrphanedGroup> = murk_cli::orphaned_groups(&vault, &current)
+        .into_iter()
+        .filter(|g| !orphaned_before.contains(g))
+        .collect();
+    if !orphaned.is_empty() && !allow_orphan {
+        let count = orphaned.len();
+        let mut msg = format!(
+            "refusing to revoke: {count} group{} would have no member who is a recipient",
+            if count == 1 { "" } else { "s" }
+        );
+        for g in &orphaned {
+            msg.push_str(&format!(
+                "\ngroup {}: no recipient could then read or rotate {}",
+                g.name,
+                g.keys.join(", ")
+            ));
+        }
+        msg.push_str("\nto keep the values, a member of the group adds another member first: `murk group add GROUP --member KEY`");
+        msg.push_str("\nto revoke anyway, pass --allow-orphan. Then remove each value with `murk rm KEY --group GROUP` and the group with `murk group rm GROUP`");
+        die(&msg, 1);
+    }
 
     // Record that the exposed keys now owe a rotation before persisting, so the
     // obligation survives the user declining the prompt below (or the process
@@ -479,6 +508,22 @@ pub(crate) fn cmd_revoke(
             "{} you are not in group {group}, so {} could not be re-encrypted: {display} can still decrypt its current value until a member of {group} rotates it (`murk rotate --list` keeps listing it)",
             "⚠".yellow(),
             key.bold(),
+        );
+    }
+    for g in &orphaned {
+        eprintln!(
+            "{} group {} has no member who is a recipient. No recipient can read or rotate {}.",
+            "⚠".yellow(),
+            g.name.bold(),
+            g.keys.join(", ").bold(),
+        );
+        eprintln!(
+            "  {}",
+            format!(
+                "clear it: run `murk rm KEY --group {g}` for each of its keys, then `murk group rm {g}`",
+                g = g.name
+            )
+            .dimmed()
         );
     }
     match &outcome {

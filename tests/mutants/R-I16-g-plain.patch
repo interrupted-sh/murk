@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -823,7 +823,7 @@
+         let ids = (!granted.contains(&key)).then(|| ids(&key)).flatten()?;
+         Some(Refusal::RevokedGrantRecipient { key, ids })
+     });
+-    plain.or_else(|| {
++    plain.filter(|_| current).or_else(|| {
+         current.then(|| {
+             granted.iter().find_map(|key| {
+                 Some(Refusal::RevokedGrant {

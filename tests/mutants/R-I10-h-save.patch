@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -957,7 +957,7 @@
+         let key = canonical(r);
+         let at = *pin.removed.get(&key)?;
+         let applies = crate::trust::removal_applies(pin, &key, &checkout);
+-        (applies && before.contains(&key)).then_some((r, at))
++        (applies && before.contains(&key) && on_disk.generation <= at).then_some((r, at))
+     });
+     let Some((key, at)) = carried else {
+         return Ok(());

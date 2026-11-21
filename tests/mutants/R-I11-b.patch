@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1509,7 +1509,7 @@
+     let verified = match crate::load::verify_side(base, identity) {
+         Ok(v) => v,
+         Err(crate::MurkError::Crypto(_)) => {
+-            return Ok(Ancestor::NotAuthority("this key cannot read it".into()));
++            return Ok(Ancestor::Authority(Groups::new()));
+         }
+         Err(e) => return Err(e.to_string()),
+     };

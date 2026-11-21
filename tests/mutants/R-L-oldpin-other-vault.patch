@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -598,7 +598,7 @@
+                 sidecar.vault_id
+             );
+         }
+-        return Ok(Sidecar::default());
++        return Ok(sidecar);
+     }
+     Ok(sidecar)
+ }

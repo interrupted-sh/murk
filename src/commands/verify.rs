@@ -136,6 +136,46 @@ pub(crate) fn cmd_verify(vault_path: &str) {
             });
         }
     }
+    // Another tracked vault file with the same vault id, while this machine
+    // trusts the vault at this path: a load warns. A refusal is the trust
+    // finding above.
+    findings.extend(shared_identity_findings(
+        vault_path,
+        &murk_cli::trust::SharedIdentity {
+            warned: inspected.assessment.shared_with.clone(),
+            ..Default::default()
+        },
+    ));
+    // The value for MURK_EXPECTED_VAULT, for a vault this key loads. It goes
+    // to standard output alone, so a CI step can capture it.
+    if !matches!(
+        inspected.assessment.verdict,
+        murk_cli::trust::Verdict::Refused(_)
+    ) && !vault.vault_id.is_empty()
+    {
+        eprintln!(
+            "{} expected vault  the value for {} is:",
+            "ok".green().bold(),
+            murk_cli::trust::EXPECTED_VAULT_VAR
+        );
+        println!("{}:{}", vault.vault_id, vault.generation);
+    }
+
+    // MURK_NO_SIGNER_PIN stops pin writes only: say whether the checks above
+    // ran against an existing pin, and that this run leaves it as it was.
+    if murk_cli::pins::pin_writes_off() {
+        if inspected.assessment.pin.is_some() {
+            eprintln!(
+                "{} pin  checked against this machine's trust pin. MURK_NO_SIGNER_PIN is set, so murk does not update the pin",
+                "ok".green().bold(),
+            );
+        } else {
+            eprintln!(
+                "{} pin  this machine has no trust pin for this vault. MURK_NO_SIGNER_PIN is set, so murk does not write one, and rollback and stripped-signature checks are off",
+                "warn".yellow().bold(),
+            );
+        }
+    }
 
     // Git anchor — is the vault's latest commit signed, and by someone this
     // vault trusts? The vault signature covers content; a signed commit covers
@@ -440,11 +480,34 @@ pub(crate) fn cmd_doctor(vault_path: &str) {
     // there's no readable vault — doctor still reports the repo-hygiene findings.
     // With no key nothing checks that schema, so say so: a stripped expiry or
     // revoke marker would otherwise read as a clean bill of health.
+    // Group membership is in the encrypted meta, so orphaned groups need a key.
+    // A vault that does not load is left to `murk verify`: doctor reports hygiene.
+    let orphaned = if key_resolves(vault_path)
+        && let Ok((vault, murk, _identity)) = murk_cli::load_vault(vault_path)
+    {
+        murk_cli::orphaned_groups(&vault, &murk)
+    } else {
+        Vec::new()
+    };
     if let Ok((vault, _raw)) = murk_cli::vault::read_with_raw(Path::new(vault_path)) {
         warn_if_keyless(vault_path);
-        for issue in murk_cli::rotation_health(&vault, chrono::Utc::now()) {
+        let issues = murk_cli::rotation_health(&vault, chrono::Utc::now());
+        for issue in rotatable_issues(&vault, &orphaned, issues) {
             findings.push(rotation_finding(&issue));
         }
+        let pin = murk_cli::pins::read(vault_path).ok().flatten();
+        let shared = murk_cli::trust::shared_identity(
+            vault_path,
+            &murk_cli::trust::header_vault_id(&vault),
+            pin.as_ref(),
+            None,
+        );
+        findings.extend(shared_identity_findings(vault_path, &shared));
+    }
+
+    // ── Orphaned groups ──
+    for group in &orphaned {
+        findings.extend(orphan_findings(group));
     }
 
     if findings.is_empty() {
@@ -453,4 +516,50 @@ pub(crate) fn cmd_doctor(vault_path: &str) {
     }
 
     report_findings(&findings, "repo");
+}
+
+/// Findings for other paths that share the vault id of the vault at
+/// `vault_path` (see `murk_cli::trust::shared_identity`): other tracked
+/// vault files in this checkout, and other paths' pins on this machine.
+fn shared_identity_findings(
+    vault_path: &str,
+    shared: &murk_cli::trust::SharedIdentity,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if let Some(by) = &shared.retired_by {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{vault_path} has the same vault id as {by}, and this machine trusts that vault at {by} only, so murk refuses {vault_path}"
+            ),
+            fix: Some(format!(
+                "use {by}, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {by}`"
+            )),
+        });
+    }
+    for other in shared
+        .refused
+        .iter()
+        .filter(|o| shared.retired_by.as_ref() != Some(o))
+    {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{other} has the same vault id as {vault_path}, so murk refuses {vault_path} on this machine"
+            ),
+            fix: Some(format!(
+                "remove the other file, or review both files and run `murk trust --vault {vault_path} --shares-identity-with {other}`"
+            )),
+        });
+    }
+    for other in &shared.warned {
+        findings.push(Finding {
+            category: "identity",
+            message: format!(
+                "{other} has the same vault id as {vault_path}. This machine trusts this vault at {vault_path} only"
+            ),
+            fix: Some(format!("remove {other} if it is a copy")),
+        });
+    }
+    findings
 }

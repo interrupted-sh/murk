@@ -120,6 +120,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             break
         }
         'murk;rm' {
+            [CompletionResult]::new('--group', '--group', [CompletionResultType]::ParameterName, 'Remove only the value held by this group, which must have no member who is a recipient')
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -411,6 +412,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('--rotate', '--rotate', [CompletionResultType]::ParameterName, 'Rotate the secrets they had access to in the same session')
             [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Revoke every key of a multi-key GitHub user without confirmation')
+            [CompletionResult]::new('--allow-orphan', '--allow-orphan', [CompletionResultType]::ParameterName, 'Revoke even if a group that holds values is left with no member who is a recipient')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -444,6 +446,7 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('--rotate', '--rotate', [CompletionResultType]::ParameterName, 'Rotate the secrets they had access to in the same session')
             [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Revoke every key of a multi-key GitHub user without confirmation')
+            [CompletionResult]::new('--allow-orphan', '--allow-orphan', [CompletionResultType]::ParameterName, 'Revoke even if a group that holds values is left with no member who is a recipient')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -516,7 +519,8 @@ Register-ArgumentCompleter -Native -CommandName 'murk' -ScriptBlock {
             break
         }
         'murk;trust' {
-            [CompletionResult]::new('--re-add', '--re-add', [CompletionResultType]::ParameterName, 'Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it')
+            [CompletionResult]::new('--re-add', '--re-add', [CompletionResultType]::ParameterName, 'Trust a key this machine recorded as removed from the vault, or holds as a revoked agent grant, again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key, or holding a revoked grant, is never trusted without it')
+            [CompletionResult]::new('--shares-identity-with', '--shares-identity-with', [CompletionResultType]::ParameterName, 'Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on')
             [CompletionResult]::new('--vault', '--vault', [CompletionResultType]::ParameterName, 'Vault filename')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Accept without asking, for scripts. Review the vault first')
             [CompletionResult]::new('--print-key', '--print-key', [CompletionResultType]::ParameterName, 'Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and signing-key fingerprint (for teammates to confirm), then exit')

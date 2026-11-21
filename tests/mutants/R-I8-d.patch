@@ -1,0 +1,13 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1639,7 +1639,9 @@
+ ) -> Option<Refusal> {
+     // The id comes first, so `murk trust` never re-signs another vault's
+     // file under this vault's id.
+-    if let Some(refusal) = id_refusal(loaded, p) {
++    if signer.is_some()
++        && let Some(refusal) = id_refusal(loaded, p)
++    {
+         return Some(refusal);
+     }
+     // A v1 signature covers neither the vault id nor the counter. Where

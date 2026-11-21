@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -995,7 +995,7 @@
+     external_signers: Option<&TrustedSigners>,
+     head: &HeadState,
+ ) -> Verdict {
+-    if loaded.vault.generation > MAX_GENERATION {
++    if false && loaded.vault.generation > MAX_GENERATION {
+         return Verdict::Refused(Refusal::GenerationOutOfRange {
+             found: loaded.vault.generation,
+         });

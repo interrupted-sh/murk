@@ -19,6 +19,19 @@ use tempfile::TempDir;
 mod common;
 use common::murk_bin;
 
+/// Invariant rows about revoked agent grants and their revocation ids.
+#[path = "authenticity/grant_rows.rs"]
+mod grant_rows;
+/// Invariant rows (see `tests/invariant_rows.tsv`) about loads and `murk trust`.
+#[path = "authenticity/load_rows.rs"]
+mod load_rows;
+/// Invariant rows about the merge driver.
+#[path = "authenticity/merge_rows.rs"]
+mod merge_rows;
+/// Invariant rows about removed members and the sidecar copy of their records.
+#[path = "authenticity/removal_rows.rs"]
+mod removal_rows;
+
 /// One person's machine: a HOME of their own, working in `repo`.
 struct Machine {
     home: PathBuf,
@@ -1298,7 +1311,10 @@ fn github_onboarding_extends_trust_to_the_new_member() {
         fs::read_dir(carol.home.join(".config").join("murk").join("signer-pins"))
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "json")
+                    && !p.to_string_lossy().ends_with(".lineage.json")
+            })
             .map(|p| serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap())
             .find(|p: &serde_json::Value| p["vault_id"] == vault["vault_id"])
             .expect("Carol's pin for the team vault");
@@ -2355,6 +2371,7 @@ fn accepting_an_older_0_13_copy_never_removes_a_later_member() {
 fn re_signing_an_older_0_13_copy_never_removes_a_later_member() {
     let (_base, alice, bob, repo) = upgraded_with_a_later_member();
     git_ok(&repo, &["checkout", "-q", "HEAD~1", "--", ".murk"]);
+    common::rows::decisive("R-I9-a");
     alice
         .murk(&repo)
         .args(["trust", "--yes"])
@@ -2389,6 +2406,7 @@ fn murk_trust_never_accepts_a_0_13_copy_on_a_detached_head() {
     common::forgery::strip_v1(&mut vault, &alice_id);
     murk_cli::vault::write(&path, &vault).unwrap();
     let before = fs::read_to_string(&path).unwrap();
+    common::rows::decisive("R-I9-a");
     alice
         .murk(&detached)
         .args(["trust", "--yes"])
@@ -2755,6 +2773,7 @@ fn merging_the_upgrade_marks_a_branch_only_once_this_machine_saves_there() {
         .success();
     commit(&repo, "save on side");
     git_ok(&repo, &["checkout", "-q", "HEAD~2", "--", ".murk"]);
+    common::rows::decisive("R-I9-a");
     get().assert().failure().stderr(predicate::str::contains(
         "already been upgraded on this branch",
     ));
@@ -2837,6 +2856,7 @@ fn a_merge_never_upgrades_an_unaccepted_0_13_side() {
         .success()
         .stderr(predicate::str::contains("accepted .murk on this machine"));
 
+    common::rows::decisive("R-I9-a");
     let (merged, stderr) = merge_side(&alice, &repo, &key);
     assert!(!merged, "the merge must not complete: {stderr}");
     assert!(
@@ -2894,12 +2914,15 @@ fn pin_dir(who: &Machine) -> PathBuf {
     who.home.join(".config").join("murk").join("signer-pins")
 }
 
-/// The pin files on `who`'s machine.
+/// The pin files on `who`'s machine (not their sidecars).
 fn pin_files(who: &Machine) -> Vec<PathBuf> {
     fs::read_dir(pin_dir(who))
         .map(|d| {
             d.map(|e| e.unwrap().path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "json")
+                        && !p.to_string_lossy().ends_with(".lineage.json")
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -3177,6 +3200,7 @@ fn edit_pin(who: &Machine, repo: &Path, edit: impl FnOnce(&mut serde_json::Value
         .map(|e| e.unwrap().path())
         .find(|p| {
             p.extension().is_some_and(|e| e == "json")
+                && !p.to_string_lossy().ends_with(".lineage.json")
                 && serde_json::from_str::<serde_json::Value>(&fs::read_to_string(p).unwrap())
                     .is_ok_and(|pin| pin["vault_id"] == vault["vault_id"])
         })
@@ -3216,9 +3240,9 @@ fn resign_as(path: &Path, as_signer: &str, holder: &Machine) {
 /// listing him (alice-signed) loaded from a branch, his own older signed
 /// revision, a newer vault signed by his key and built from a revision older
 /// than the removal, the same arriving as a merge side, and `murk trust`
-/// that does not name him are all refused. Trust comes back only through a
-/// newer vault from a trusted signer that re-adds him, or `murk trust
-/// --re-add` naming his key.
+/// that does not name him are all refused. Trust comes back only through
+/// this machine's own `circle authorize` of him, or `murk trust --re-add`
+/// naming his key.
 #[test]
 fn removal_is_permanent_on_the_machine_that_accepted_it() {
     let base = TempDir::new().unwrap();
@@ -3290,6 +3314,7 @@ fn removal_is_permanent_on_the_machine_that_accepted_it() {
     git_ok(&repo, &["checkout", "-q", "-b", "replay"]);
     fs::write(repo.join(".murk"), &with_bob).unwrap();
     commit(&repo, "replay: bob listed");
+    common::rows::decisive("R-I10-a");
     assert_refused_everywhere(&alice, &repo, "prod-db", "rolled back");
     // Bob's own older signed revision on that branch.
     fs::write(repo.join(".murk"), &by_bob).unwrap();
@@ -3374,7 +3399,8 @@ fn removal_is_permanent_on_the_machine_that_accepted_it() {
 /// before Bob ever signs; Alice's machine pins it on Mallory's word, and even
 /// accepts a vault "signed by Bob" with it — which proves only that Mallory
 /// holds that key. Once Alice removes Mallory, the entry stops counting: a
-/// vault signed as Bob with Mallory's key is refused as unconfirmed. Alice's
+/// vault signed as Bob with Mallory's key, which no longer lists her, is
+/// refused as unconfirmed. Alice's
 /// own writes never vouch for the entry, so Carol, a third machine that
 /// learns keys only from Alice's writes, refuses it too.
 #[test]
@@ -3449,7 +3475,10 @@ fn a_registry_entry_stops_counting_once_whoever_added_it_is_removed() {
         .stdout("m2\n");
     let accepted = fs::read(repo.join(".murk")).unwrap();
 
-    // Mallory prepares a later vault as Bob, numbered past the removal.
+    // Mallory prepares a later vault as Bob, numbered past the removal. It
+    // does not list her (a vault that lists a removed member is refused on
+    // that alone), so only the key bound to Bob's name can refuse it. The
+    // MAC is recomputed with alice's key, which still reads the meta.
     set_pin_generation(&mallory, &repo, 40);
     mallory
         .with_key(&repo, &mallory_key)
@@ -3457,6 +3486,15 @@ fn a_registry_entry_stops_counting_once_whoever_added_it_is_removed() {
         .write_stdin("evil\n")
         .assert()
         .success();
+    {
+        let path = repo.join(".murk");
+        let mut vault: murk_cli::types::Vault =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        vault.recipients.retain(|r| *r != mallory.pubkey());
+        let id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
+        common::forgery::reseal(&mut vault, &id);
+        fs::write(&path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
+    }
     resign_as(&repo.join(".murk"), &bob.pubkey(), &mallory);
     let forged = fs::read(repo.join(".murk")).unwrap();
     fs::write(repo.join(".murk"), &accepted).unwrap();
@@ -3646,6 +3684,7 @@ fn a_generation_near_the_u64_limit_is_refused_outright() {
     let id = murk_cli::crypto::parse_identity(&alice.secret_key()).unwrap();
     common::forgery::reseal(&mut vault, &id);
     murk_cli::vault::write(&repo.join(".murk"), &vault).unwrap();
+    common::rows::decisive("R-I7-a");
     alice
         .murk(&repo)
         .args(["get", "TOP"])
@@ -3691,6 +3730,7 @@ fn a_merge_past_the_generation_limit_leaves_ours_and_the_pin() {
             (p, bytes)
         })
         .collect();
+    common::rows::decisive("R-I7-a:merge");
     let (merged, stderr) = git_merge(&alice, &repo, "side");
     assert!(!merged, "{stderr}");
     assert!(stderr.contains("save counter"), "{stderr}");
@@ -3886,6 +3926,7 @@ fn a_merge_side_never_brings_a_removed_recipient_back() {
     commit(&repo, "remove bob");
 
     git_ok(&repo, &["checkout", "-q", "f1"]);
+    common::rows::decisive("R-I10-b");
     let (merged, stderr) = git_merge(&alice, &repo, "f2");
     assert!(!merged, "the merge must not complete: {stderr}");
     assert!(stderr.contains("neither side re-adds them"), "{stderr}");
@@ -3944,6 +3985,7 @@ fn a_save_over_an_older_revision_never_writes_a_removed_recipient_back() {
         );
     };
     git_ok(&repo, &["checkout", "-q", "-b", "pulled", "HEAD~1"]);
+    common::rows::decisive("R-I10-c");
     refuse_save();
     git_ok(&repo, &["checkout", "-q", "--detach", "main~1"]);
     refuse_save();
@@ -4025,6 +4067,7 @@ fn reading_a_pull_request_never_trusts_what_it_adds() {
     fs::write(repo.join(".murk"), &forged).unwrap();
     commit(&repo, "mallory on main");
 
+    common::rows::decisive("R-I3-a");
     alice
         .murk(&repo)
         .args(["get", "DB_URL"])
@@ -4282,6 +4325,7 @@ fn merging_the_removal_into_a_branch_the_removed_member_wrote_to() {
     commit(&repo, "bob writes on main");
 
     // Alice pulls main: Bob's vault is refused, and the hint names the merge.
+    common::rows::decisive("R-I10-d");
     alice
         .murk(&repo)
         .args(["get", "DB_URL"])
@@ -4564,6 +4608,7 @@ fn a_removed_signers_later_vault_is_refused_on_a_new_branch() {
         .failure()
         .stdout("")
         .stderr(predicate::str::contains("signed by bob"));
+    common::rows::decisive("R-I10-e");
     t.refused_on_new_branch("debug", &after);
 
     git_ok(&t.repo, &["checkout", "-q", "-b", "old", &t.bob0]);
@@ -4606,6 +4651,7 @@ fn a_replayed_pre_removal_vault_is_refused_on_a_new_branch() {
     git_ok(&t.repo, &["checkout", "-q", &t.bob0, "--", ".murk"]);
     commit(&t.repo, "bob: replay");
     let replay = head_commit(&t.repo);
+    common::rows::decisive("R-I10-f");
     t.refused_on_new_branch("debug", &replay);
 }
 

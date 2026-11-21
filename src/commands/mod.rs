@@ -163,22 +163,22 @@ pub(crate) fn warn_if_keyless(vault_path: &str) {
 }
 
 /// Read the vault header for a command whose result gates something (`rotate
-/// --list`), returning it with whether a key verified it.
+/// --list`), returning it with the decrypted state when a key verified it.
 ///
 /// With a key the vault loads through [`murk_cli::load_vault`] — MAC, signature
 /// and this machine's trust verdict — before anything is reported, so a header
 /// edited by someone without the key fails the command instead of passing.
 /// Whatever stops the load stops the command: a key that resolves but cannot
 /// check the vault must not quietly downgrade to an unchecked read. With no
-/// key nothing can be checked; the header is read as written and the caller
-/// must label what it reports (see [`warn_unverified`]).
-pub(crate) fn read_header(vault_path: &str) -> (types::Vault, bool) {
+/// key nothing can be checked; the header is read as written (`None`) and the
+/// caller must label what it reports (see [`warn_unverified`]).
+pub(crate) fn read_header(vault_path: &str) -> (types::Vault, Option<types::Murk>) {
     if key_resolves(vault_path) {
-        let (vault, _murk, _identity) = load_vault(vault_path);
-        (vault, true)
+        let (vault, murk, _identity) = load_vault(vault_path);
+        (vault, Some(murk))
     } else {
         let vault = try_or_die(murk_cli::vault::read(std::path::Path::new(vault_path)));
-        (vault, false)
+        (vault, None)
     }
 }
 
@@ -236,6 +236,8 @@ pub(crate) fn load_vault_locked(
     MurkIdentity,
     murk_cli::vault::VaultLock,
 ) {
+    // Lock order: the vault lock first. The load and the save then take the
+    // trust pin lock in short sections of their own (`murk_cli::pins::LOCK_ORDER`).
     let lock = try_or_die(
         murk_cli::vault::lock(std::path::Path::new(vault)).map_err(murk_cli::MurkError::Vault),
     );
@@ -840,4 +842,52 @@ pub(crate) fn rotation_finding(issue: &murk_cli::RotationIssue) -> Finding {
             fix: Some(format!("rotate it: `murk rotate {key}`")),
         },
     }
+}
+
+/// Render each key of a [`murk_cli::OrphanedGroup`] as a doctor [`Finding`].
+pub(crate) fn orphan_findings(group: &murk_cli::OrphanedGroup) -> impl Iterator<Item = Finding> {
+    group.keys.iter().map(|key| Finding {
+        category: "orphaned",
+        message: format!(
+            "{key} is in group {}, which has no member who is a recipient. No recipient can read or rotate it.",
+            group.name
+        ),
+        fix: Some(format!(
+            "clear it: `murk rm {key} --group {g}`, then `murk group rm {g}` when the group holds no keys",
+            g = group.name
+        )),
+    })
+}
+
+/// Rotation issues a recipient can act on: drops those of a key whose every
+/// base value (shared or group) is in an orphaned group, since no recipient
+/// can rotate it. Its orphan finding names the real fix.
+pub(crate) fn rotatable_issues(
+    vault: &types::Vault,
+    orphaned: &[murk_cli::OrphanedGroup],
+    issues: Vec<murk_cli::RotationIssue>,
+) -> Vec<murk_cli::RotationIssue> {
+    let only_orphaned = |key: &str| {
+        vault.secrets.get(key).is_some_and(|e| {
+            e.shared.is_empty()
+                && !e.grouped.is_empty()
+                && e.grouped.keys().all(|g| {
+                    orphaned
+                        .iter()
+                        .any(|o| &o.name == g && o.keys.iter().any(|k| k == key))
+                })
+        })
+    };
+    issues
+        .into_iter()
+        .filter(|issue| {
+            use murk_cli::RotationIssue::*;
+            let (Overdue { key, .. }
+            | NoBaseline { key, .. }
+            | Expired { key, .. }
+            | ExpiringSoon { key, .. }
+            | RevokePending { key, .. }) = issue;
+            !only_orphaned(key)
+        })
+        .collect()
 }

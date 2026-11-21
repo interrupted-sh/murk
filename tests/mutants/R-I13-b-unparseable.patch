@@ -1,0 +1,11 @@
+--- a/src/commands/git.rs
++++ b/src/commands/git.rs
+@@ -360,7 +360,7 @@
+         }
+         text.extend_from_slice(marker.as_bytes());
+     }
+-    fs::write(ours_path, text)
++    fs::write(ours_path, theirs)
+         .unwrap_or_else(|e| die(&format_args!("writing {ours_path}: {e}"), 1));
+     if let Some((first, rest)) = lines.split_first() {
+         eprintln!("{} {first}", "✕".red());

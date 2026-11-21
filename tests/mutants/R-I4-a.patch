@@ -1,0 +1,11 @@
+--- a/src/load.rs
++++ b/src/load.rs
+@@ -730,7 +730,7 @@
+                         &trust::head_of(vault_path),
+                         trust::accepted_commit_of(vault_path).as_deref(),
+                     );
+-                    if self.assessment.env_signers.is_some() {
++                    if false && self.assessment.env_signers.is_some() {
+                         let prior = fresh.cloned().unwrap_or_default();
+                         pin.trusted = prior.trusted;
+                         pin.ever_trusted = prior.ever_trusted;

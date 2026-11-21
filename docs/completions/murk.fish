@@ -91,6 +91,7 @@ complete -c murk -n "__fish_murk_using_subcommand rotate" -l hex -d 'Encode gene
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l list -d 'List the secrets that need rotation instead of rotating (exits 1 if any do)'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -l json -d 'Print the listing as a JSON object with `verified` and `issues`. Rotation findings alone do not make this form fail'
 complete -c murk -n "__fish_murk_using_subcommand rotate" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c murk -n "__fish_murk_using_subcommand rm" -l group -d 'Remove only the value held by this group, which must have no member who is a recipient' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand rm" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand get" -l vault -d 'Vault filename' -r
@@ -231,6 +232,7 @@ complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcom
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l rotate -d 'Rotate the secrets they had access to in the same session'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l force -d 'Revoke every key of a multi-key GitHub user without confirmation'
+complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -l allow-orphan -d 'Revoke even if a group that holds values is left with no member who is a recipient'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from revoke" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from help" -f -a "authorize" -d 'Add a recipient to the vault'
 complete -c murk -n "__fish_murk_using_subcommand circle; and __fish_seen_subcommand_from help" -f -a "revoke" -d 'Remove a recipient from the vault'
@@ -244,6 +246,7 @@ complete -c murk -n "__fish_murk_using_subcommand revoke" -l values-from -d 'Wit
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l rotate -d 'Rotate the secrets they had access to in the same session'
 complete -c murk -n "__fish_murk_using_subcommand revoke" -l force -d 'Revoke every key of a multi-key GitHub user without confirmation'
+complete -c murk -n "__fish_murk_using_subcommand revoke" -l allow-orphan -d 'Revoke even if a group that holds values is left with no member who is a recipient'
 complete -c murk -n "__fish_murk_using_subcommand revoke" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand group; and not __fish_seen_subcommand_from create ls add rm help" -s h -l help -d 'Print help'
 complete -c murk -n "__fish_murk_using_subcommand group; and not __fish_seen_subcommand_from create ls add rm help" -f -a "create" -d 'Create a new recipient group (you become its first member)'
@@ -270,7 +273,8 @@ complete -c murk -n "__fish_murk_using_subcommand group; and __fish_seen_subcomm
 complete -c murk -n "__fish_murk_using_subcommand verify" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand verify" -l signature-only -d 'Check only the vault signature, with no key'
 complete -c murk -n "__fish_murk_using_subcommand verify" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c murk -n "__fish_murk_using_subcommand trust" -l re-add -d 'Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it' -r
+complete -c murk -n "__fish_murk_using_subcommand trust" -l re-add -d 'Trust a key this machine recorded as removed from the vault, or holds as a revoked agent grant, again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key, or holding a revoked grant, is never trusted without it' -r
+complete -c murk -n "__fish_murk_using_subcommand trust" -l shares-identity-with -d 'Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l vault -d 'Vault filename' -r
 complete -c murk -n "__fish_murk_using_subcommand trust" -l yes -d 'Accept without asking, for scripts. Review the vault first'
 complete -c murk -n "__fish_murk_using_subcommand trust" -l print-key -d 'Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and signing-key fingerprint (for teammates to confirm), then exit'

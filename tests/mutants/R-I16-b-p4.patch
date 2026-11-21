@@ -1,0 +1,11 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -636,7 +636,7 @@
+         set.entry(key).or_default().extend(ids);
+     }
+     RevokedForSave {
+-        set: crate::trust::tombstoned(&set, pin),
++        set: crate::trust::without_readmitted(set, pin),
+         sighted,
+         branch,
+     }

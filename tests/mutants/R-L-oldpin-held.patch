@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -770,7 +770,7 @@
+     if let Some(pin) = f(current.as_ref())? {
+         return write(vault_path, &pin);
+     }
+-    if let Some(pin) = current.filter(TrustPin::copy_due)
++    if let Some(pin) = current.filter(|_| false)
+         && let Some(pin_file) = existing_pin_path(vault_path)
+         && let Err(e) = write_sidecar(vault_path, &pin_file, &pin)
+     {

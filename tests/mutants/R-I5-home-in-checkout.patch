@@ -1,0 +1,12 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -751,7 +751,8 @@
+         "the trust pin directory",
+         "murk uses no trust pin, and every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer",
+     );
+-    (!committed).then_some(dir)
++    let _ = committed;
++    Some(dir)
+ }
+ 
+ /// Why murk does not use a directory under HOME: a repository tracks a

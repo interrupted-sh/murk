@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1703,6 +1703,7 @@
+     for r in &side.vault.recipients {
+         let canonical = canonical_recipient(r).into_owned();
+         if let Some(&at) = pin.removed.get(&canonical)
++            && found <= at
+             && !in_base.contains(&canonical)
+         {
+             if found <= at {

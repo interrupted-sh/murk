@@ -279,6 +279,7 @@ pub fn create_vault(
         grants: BTreeMap::new(),
         signers,
         sig: None,
+        revoked_grants: BTreeMap::new(),
     };
     // Every piece of header text here is new.
     crate::validate::new_header_text(None, &vault, &meta.recipients)
@@ -332,6 +333,7 @@ pub fn pin_created_vault(
         names: &HashMap::new(),
         groups: &BTreeMap::new(),
         grants: &BTreeMap::new(),
+        revoked: &BTreeMap::new(),
         // Read only by the trust verdict, which this record never runs.
         loader_can_sign: true,
         operator_key: None,

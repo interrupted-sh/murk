@@ -1,0 +1,10 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -1663,6 +1663,7 @@
+         HeadState::Detached => None,
+     };
+     if let Some(high) = high
++        && signer.is_some()
+         && loaded.vault.generation < high
+     {
+         return Some(Refusal::RolledBack {

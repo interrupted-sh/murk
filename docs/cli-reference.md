@@ -253,6 +253,7 @@ Remove a secret
 
 ###### **Options:**
 
+* `--group <GROUP>` — Remove only the value held by this group, which must have no member who is a recipient
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
@@ -764,6 +765,7 @@ Remove a recipient from the vault
 * `--rotate` — Rotate the secrets they had access to in the same session
 * `--values-from <FILE>` — With --rotate, read new values from a dotenv file of KEY=value lines (`-` for stdin)
 * `--force` — Revoke every key of a multi-key GitHub user without confirmation
+* `--allow-orphan` — Revoke even if a group that holds values is left with no member who is a recipient
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
@@ -866,7 +868,7 @@ Verify vault integrity without exporting secrets
 
 * `--signature-only` — Check only the vault signature, with no key
 
-   Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault's content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull-request check in CI with no secret. It covers the parsed content, not the file's bytes: a reformatted file still passes. murk reads no key and decrypts nothing. So it does not check the MAC over the values, grant expiry, rollback against earlier saves, removed keys, group membership changes or the last commit's signature. `murk verify` with a key checks those
+   Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault's content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull-request check in CI with no secret. It covers the parsed content, not the file's bytes: a reformatted file still passes. murk reads no key, no trust pin and no sidecar, and decrypts nothing. So it does not check the MAC over the values, grant expiry, the vault id, rollback against earlier saves, removed keys, revoked agent grants, group membership changes or the last commit's signature, and it ignores MURK_EXPECTED_VAULT. `murk verify` with a key checks those
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`
@@ -885,7 +887,8 @@ Needed once per vault on a new clone, whenever a teammate's first signed write a
 
 * `--yes` — Accept without asking, for scripts. Review the vault first
 * `--print-key` — Print your own trusted-signer entry (for MURK_TRUSTED_SIGNERS) and signing-key fingerprint (for teammates to confirm), then exit
-* `--re-add <KEY>` — Trust a key this machine recorded as removed from the vault again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key is never trusted without it
+* `--re-add <KEY>` — Trust a key this machine recorded as removed from the vault, or holds as a revoked agent grant, again (its public key, or its name in the vault). Repeat for each key. A vault signed by or listing a removed key, or holding a revoked grant, is never trusted without it
+* `--shares-identity-with <PATH>` — Another vault file in this checkout with the same vault id. murk cannot tell two files with one vault id apart, and refuses such a vault. Review both files, then name the other file here: this machine trusts the vault at --vault and refuses the other path from then on
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

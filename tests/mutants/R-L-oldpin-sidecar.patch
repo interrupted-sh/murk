@@ -1,0 +1,30 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -134,7 +134,7 @@
+     pub was_signed: bool,
+     /// The fields kept in the sidecar file (see [`Sidecar`]), never in the
+     /// pin file.
+-    #[serde(skip)]
++    #[serde(default)]
+     pub sidecar: Sidecar,
+ }
+ 
+@@ -507,7 +507,7 @@
+             ..TrustPin::default()
+         };
+     } else {
+-        pin.sidecar = parse_sidecar(path, raw.sidecar.as_deref(), &pin.vault_id)?;
++        let _ = (parse_sidecar, &raw.sidecar);
+         let records = pin.sidecar.removals.clone();
+         for key in pin.overlay_removals(&records) {
+             warn_divergence(vault_path, path, &key);
+@@ -725,7 +725,8 @@
+     }
+     let mut pin = pin.clone();
+     pin.v = PIN_VERSION;
+-    write_sidecar(vault_path, &path, &pin)?;
++    let _ = write_sidecar;
++    pin.sidecar.removals = pin.removal_records();
+     #[cfg(test)]
+     test_hooks::fail_after_sidecar()?;
+     let json = serde_json::to_string_pretty(&pin).map_err(|e| format!("trust pin: {e}"))?;

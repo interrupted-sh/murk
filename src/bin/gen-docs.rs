@@ -144,8 +144,12 @@ const ENV_GROUPS: &[(&str, &[EnvVar])] = &[
                 summary: "Signers trusted to sign the vault on this machine, separated by commas or newlines. It replaces the set in the local trust pin. An age signer is `age1...:<verifying key>`. An ssh-ed25519 signer is its public key line. `murk trust --print-key` prints the entry for your own key. Use it on CI runners and other machines with no pin. Any other entry, including a bare age key, is an error. Set it only from a CI secret or the real process environment. Never set it from a file in the repository or from a `.env` that an app's dotenv loader reads, because it decides which signers this machine trusts.",
             },
             EnvVar {
+                name: "MURK_EXPECTED_VAULT",
+                summary: "`<vault id>:<minimum generation>`, from a protected CI variable. murk refuses a vault whose vault id differs or whose save counter is below the minimum, on every keyed load, grant load and merge side, with or without a trust pin. `murk trust` cannot accept that refusal. A value that does not parse, a value with a third part, and a value that is set but empty are errors, so unset the variable to turn the check off. `murk verify` prints the value for the vault it checked on stdout. `murk verify --signature-only` ignores the variable.",
+            },
+            EnvVar {
                 name: "MURK_NO_SIGNER_PIN",
-                summary: "Present (any value) stops murk reading or writing the local trust pin. Trust then comes only from `MURK_TRUSTED_SIGNERS`, and rollback and stripped-signature detection are off.",
+                summary: "Present (any value) stops murk creating or writing the local trust pin. murk still reads a pin that already exists and applies every rule against it. A save still needs the pin's lock when a pin exists, so the variable does not help with a read-only pin directory. With no pin, trust comes only from `MURK_TRUSTED_SIGNERS`, and rollback and stripped-signature detection are off.",
             },
         ],
     ),
@@ -166,7 +170,7 @@ const ENV_GROUPS: &[(&str, &[EnvVar])] = &[
             },
             EnvVar {
                 name: "HOME, then USERPROFILE",
-                summary: "Base directory for murk state: `~/.config/murk/keys`, `agent-keys` and `signer-pins`. Outside a git checkout, it is also where the search for `.murk` in parent directories stops. murk reads `HOME` and falls back to `USERPROFILE` on any platform. `murk completion install` and `murk circle authorize ssh:` need `HOME`.",
+                summary: "Base directory for murk state: `~/.config/murk/keys`, `agent-keys` and `signer-pins`. Outside a git checkout, it is also where the search for `.murk` in parent directories stops. murk reads `HOME` and falls back to `USERPROFILE` on any platform when `HOME` is unset. An empty or relative value counts as no home directory: murk warns, keeps no trust pin and reads no stored key. `murk completion install` and `murk circle authorize ssh:` need a home directory.",
             },
         ],
     ),

@@ -1,0 +1,17 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -68,7 +68,13 @@
+ /// the "ours" value.
+ pub(crate) fn merge_vaults(base: Base<'_>, ours: &Vault, theirs: &Vault) -> MergeResult {
+     let Base::Authority(base) = base else {
+-        return merge_two_way(ours, theirs);
++        let mut empty = ours.clone();
++        empty.recipients.clear();
++        empty.schema.clear();
++        empty.secrets.clear();
++        empty.policy = None;
++        empty.agents.clear();
++        return merge_vaults(Base::Authority(&empty), ours, theirs);
+     };
+     let mut conflicts = Vec::new();
+     let mut rekeyed = BTreeSet::new();

@@ -1,0 +1,11 @@
+--- a/src/merge.rs
++++ b/src/merge.rs
+@@ -1514,7 +1514,7 @@
+         Err(e) => return Err(e.to_string()),
+     };
+     if matches!(verified.signature, crate::types::SignatureState::Unsigned) {
+-        return Ok(Ancestor::NotAuthority("it is not signed".into()));
++        return Ok(Ancestor::Authority(verified.groups));
+     }
+     let loaded = crate::trust::Loaded {
+         vault: base,

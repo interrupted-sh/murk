@@ -1,0 +1,11 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -982,7 +982,7 @@
+         .collect();
+     let pinned_here = pin.is_some_and(|p| p.v >= pins::PIN_VERSION && p.vault_id == id);
+     for other in &tracked {
+-        if pinned_here || shares_with == Some(other.as_str()) {
++        if shares_with == Some(other.as_str()) {
+             out.warned.push(other.clone());
+         } else {
+             out.refused.push(other.clone());

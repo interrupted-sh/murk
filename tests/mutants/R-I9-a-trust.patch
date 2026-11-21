@@ -1,0 +1,24 @@
+Index: src/commands/trust.rs
+--- a/src/commands/trust.rs
++++ b/src/commands/trust.rs
+@@ -63,7 +63,7 @@
+         Verdict::Trusted if readmit.is_empty() && read_only => {
+             // A murk 0.13 copy that loads as history here is read-only until
+             // the user accepts it; then the next write upgrades it.
+-            if head == murk_cli::trust::HeadState::Detached {
++            if false && head == murk_cli::trust::HeadState::Detached {
+                 die(
+                     &format_args!(
+                         "{vault_path} is in the pre-0.14 format and HEAD is detached, so there is no branch to accept it on\ncheck out a branch, then run `murk trust --vault {vault_path}`"
+Index: src/trust.rs
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -914,7 +914,7 @@
+     match head {
+         HeadState::Branch(b) => Some(b.clone()),
+         HeadState::NotARepo => Some(String::new()),
+-        HeadState::Detached => None,
++        HeadState::Detached => Some(String::new()),
+     }
+ }
+ 

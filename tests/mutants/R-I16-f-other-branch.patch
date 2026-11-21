@@ -1,0 +1,14 @@
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -626,7 +626,10 @@
+     };
+     let dropped = keys(original).into_iter().filter(|k| !saved.contains(k));
+     let mut minted = types::RevokedGrants::new();
+-    for key in dropped.chain(sighted.iter().cloned()) {
++    for key in dropped.chain(sighted.iter().cloned()).chain(
++        pin.map(|p| p.grants.iter().filter(|k| !saved.contains(*k)).cloned().collect::<Vec<_>>())
++            .unwrap_or_default(),
++    ) {
+         if !held.contains_key(&key) && !minted.contains_key(&key) {
+             minted.insert(key, BTreeSet::from([new_revocation_id()]));
+         }

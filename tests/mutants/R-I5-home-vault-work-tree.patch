@@ -1,0 +1,13 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -787,7 +787,9 @@
+     static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+ 
+     let real = real_path(dir);
+-    if !real.ancestors().any(|d| d.join(".git").exists()) {
++    let cwd = std::env::current_dir().ok().and_then(|d| crate::git::real_dir(&d));
++    let vault_tree = cwd.as_deref().and_then(crate::git::worktree_root);
++    if !vault_tree.is_some_and(|root| real.starts_with(root)) {
+         return false;
+     }
+     let Ok(mut last) = LAST.lock() else {
