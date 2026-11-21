@@ -42,6 +42,12 @@ const MERGE_DRIVER_COMMAND: &str = "murk merge-driver -- %O %A %B %P";
 /// as committed. Replace refs (`refs/replace/`) and a graft file both rewrite
 /// the graph git reports, and anyone who can write to the repository can add
 /// them, so both are switched off.
+///
+/// Some of these commands run under the trust pin lock, so none may wait on
+/// the network or a prompt: a partial clone's lazy fetch of a missing object
+/// (`GIT_NO_LAZY_FETCH`) and a credential prompt (`GIT_TERMINAL_PROMPT`) are
+/// switched off. A missing object is then missing, which the removal rule
+/// treats as history it cannot check.
 pub fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -52,6 +58,8 @@ pub fn git_command() -> Command {
         "core.hooksPath=/dev/null",
     ]);
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_GRAFT_FILE", "/dev/null");
     crate::env::strip_key_env(&mut cmd);
@@ -1424,40 +1432,58 @@ pub fn vault_at_commit(abs_vault: &Path, commit: &str) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// The most vault revisions [`vault_history_drops`] reads on each
-/// first-parent path it walks. A removal further back counts as unknown
-/// history ([`HistoryCheck::TooLong`]).
-pub const VAULT_HISTORY_CAP: usize = 1000;
+/// The most vault revisions [`vault_history_drops`] reads: commits that
+/// change the vault file, on any path of HEAD's history back to the bound.
+/// Past it the answer is [`HistoryCheck::TooLong`], which refuses a vault
+/// listing the removed key. The cost of a walk to the cap: two `git rev-list`
+/// runs and one blob read and JSON parse per distinct vault blob, about a
+/// second per 10 MB of vault revisions, paid only when this machine reads a
+/// vault that lists a key it recorded as removed, on a marked branch the
+/// removal is not recorded on by name. A history longer than this costs only
+/// that refusal, which `git fetch` cannot fix but `murk trust --re-add` or
+/// `murk circle authorize` can.
+pub const VAULT_HISTORY_CAP: usize = 10_000;
 
 /// What [`vault_history_drops`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryCheck {
-    /// A revision in the walk dropped the key.
+    /// A commit in the walk dropped the key.
     Found,
-    /// The whole walk was read and no revision dropped the key.
+    /// The whole walk was read and no commit dropped the key.
     NotFound,
     /// No drop in the newest [`VAULT_HISTORY_CAP`] revisions, and there are
     /// more.
     TooLong,
-    /// git could not show the history: a git failure, the bound commit
-    /// missing here, or a revision hidden by a shallow boundary.
+    /// git could not show the history: a shallow clone, a partial clone, a
+    /// git failure, the bound commit missing here, a vault revision whose
+    /// recipients do not parse, or no recorded commit to start from.
     Unavailable,
 }
 
-/// One `git cat-file --batch` process, reading blobs by name.
-struct BlobBatch {
+/// The vault file at one commit, as the walk sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// The vault's recipients do (`true`) or do not list the key.
+    Lists(bool),
+    /// No vault file at that commit.
+    Absent,
+    /// The file is there but could not be read, or its recipients do not
+    /// parse.
+    Unreadable,
+}
+
+/// One running `git cat-file` process in batch mode: `--batch-check` for
+/// object ids, or `--batch` for contents.
+struct CatFile {
     child: std::process::Child,
     input: std::process::ChildStdin,
     output: std::io::BufReader<std::process::ChildStdout>,
-    /// Set once a read failed part-way: the stream is out of step, so every
-    /// later read answers `None`.
-    broken: bool,
 }
 
-impl BlobBatch {
-    fn start(dir: &Path) -> Option<Self> {
+impl CatFile {
+    fn start(dir: &Path, mode: &str) -> Option<Self> {
         let mut child = git_command()
-            .args(["cat-file", "--batch"])
+            .args(["cat-file", mode])
             .current_dir(dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1469,7 +1495,6 @@ impl BlobBatch {
                 child,
                 input,
                 output: std::io::BufReader::new(output),
-                broken: false,
             });
         }
         let _ = child.kill();
@@ -1477,64 +1502,107 @@ impl BlobBatch {
         None
     }
 
-    /// The blob `spec` names (`<rev>:./<file>`), or `None` when git cannot
-    /// read it (no such file at that revision, a missing object).
-    fn read(&mut self, spec: &str) -> Option<Vec<u8>> {
-        use std::io::{BufRead, Read, Write};
-        if self.broken {
-            return None;
-        }
-        // One answer per request: `<oid> blob <size>\n<bytes>\n`, or one
-        // line ending in ` missing` (or ` ambiguous`).
+    /// Send `spec` and read the header line git answers with: `<oid> <type>
+    /// <size>`, or `<spec> missing`. `None` when the stream broke.
+    fn ask(&mut self, spec: &str) -> Option<Vec<String>> {
+        use std::io::{BufRead, Write};
         let mut header = String::new();
-        let ok = writeln!(self.input, "{spec}").is_ok()
+        (writeln!(self.input, "{spec}").is_ok()
             && self.input.flush().is_ok()
-            && self.output.read_line(&mut header).is_ok_and(|n| n > 0);
-        if !ok {
-            self.broken = true;
-            return None;
-        }
-        let mut fields = header.split_whitespace();
-        let (Some(_), Some("blob"), Some(size)) = (fields.next(), fields.next(), fields.next())
-        else {
-            return None;
-        };
-        let Ok(size) = size.parse::<usize>() else {
-            self.broken = true;
-            return None;
-        };
-        let mut bytes = vec![0; size + 1];
-        if self.output.read_exact(&mut bytes).is_err() {
-            self.broken = true;
-            return None;
-        }
-        bytes.pop();
-        Some(bytes)
+            && self.output.read_line(&mut header).is_ok_and(|n| n > 0))
+        .then(|| header.split_whitespace().map(str::to_string).collect())
     }
 }
 
-impl Drop for BlobBatch {
+impl Drop for CatFile {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// The commits on the first-parent path of `range` (a `git rev-list` range)
-/// that change the vault file `name` in `dir`, newest first, at most
-/// [`VAULT_HISTORY_CAP`], and whether there are more. `None` when git fails.
-fn first_parent_revisions(dir: &Path, name: &str, range: &str) -> Option<(Vec<String>, bool)> {
-    let out = git_output(
-        dir,
-        &[
-            "rev-list",
-            "--first-parent",
-            &format!("--max-count={}", VAULT_HISTORY_CAP + 1),
-            range,
-            "--",
-            &format!("./{name}"),
-        ],
-    )?;
+/// Reads the vault file at commits, once per distinct blob.
+struct VaultReader<'a, F: Fn(&[u8]) -> Option<bool>> {
+    name: &'a str,
+    lists: F,
+    /// Whether every object of the history is here (not a shallow or a
+    /// partial clone), so a missing path is a vault file that is not there.
+    complete: bool,
+    check: CatFile,
+    contents: CatFile,
+    by_commit: std::collections::HashMap<String, Listing>,
+    by_blob: std::collections::HashMap<String, Listing>,
+    broken: bool,
+}
+
+impl<F: Fn(&[u8]) -> Option<bool>> VaultReader<'_, F> {
+    fn at(&mut self, commit: &str) -> Listing {
+        if let Some(&known) = self.by_commit.get(commit) {
+            return known;
+        }
+        let listing = self.read(commit);
+        self.by_commit.insert(commit.to_string(), listing);
+        listing
+    }
+
+    fn read(&mut self, commit: &str) -> Listing {
+        use std::io::Read;
+        if self.broken {
+            return Listing::Unreadable;
+        }
+        let Some(header) = self.check.ask(&format!("{commit}:./{}", self.name)) else {
+            self.broken = true;
+            return Listing::Unreadable;
+        };
+        let (oid, kind) = match header.as_slice() {
+            [oid, kind, _] => (oid.clone(), kind.as_str()),
+            [.., last] if last == "missing" && self.complete => return Listing::Absent,
+            _ => return Listing::Unreadable,
+        };
+        if kind != "blob" {
+            return Listing::Unreadable;
+        }
+        if let Some(&known) = self.by_blob.get(&oid) {
+            return known;
+        }
+        let Some(answer) = self.contents.ask(&oid) else {
+            self.broken = true;
+            return Listing::Unreadable;
+        };
+        // A `missing` answer has no body; a blob answer is followed by its
+        // bytes and a newline.
+        let listing = if let [_, kind, size] = answer.as_slice()
+            && kind == "blob"
+        {
+            let Ok(size) = size.parse::<usize>() else {
+                self.broken = true;
+                return Listing::Unreadable;
+            };
+            let mut bytes = vec![0; size + 1];
+            if self.contents.output.read_exact(&mut bytes).is_err() {
+                self.broken = true;
+                return Listing::Unreadable;
+            }
+            bytes.pop();
+            (self.lists)(&bytes).map_or(Listing::Unreadable, Listing::Lists)
+        } else {
+            Listing::Unreadable
+        };
+        self.by_blob.insert(oid, listing);
+        listing
+    }
+}
+
+/// The commits of `args` (a `git rev-list` command line, path-limited to the
+/// vault file `name`), at most [`VAULT_HISTORY_CAP`], and whether there are
+/// more. `None` when git fails.
+fn vault_revisions(dir: &Path, name: &str, args: &[&str]) -> Option<(Vec<String>, bool)> {
+    let cap = format!("--max-count={}", VAULT_HISTORY_CAP + 1);
+    let path = format!("./{name}");
+    let mut all = vec!["rev-list", &cap];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--", &path]);
+    let out = git_output(dir, &all)?;
     let mut revisions: Vec<String> = out
         .lines()
         .filter(|r| is_commit_id(r))
@@ -1545,26 +1613,74 @@ fn first_parent_revisions(dir: &Path, name: &str, range: &str) -> Option<(Vec<St
     Some((revisions, more))
 }
 
-/// Whether the repository holding `dir` is a shallow clone.
-fn is_shallow(dir: &Path) -> bool {
-    git_output(dir, &["rev-parse", "--is-shallow-repository"]).is_none_or(|s| s != "false")
+/// Each of `commits` with its parents, as committed (`git rev-list
+/// --no-walk --parents --stdin`, no history simplification). `None` when git
+/// fails or leaves one out.
+fn parents_of(dir: &Path, commits: &[String]) -> Option<Vec<(String, Vec<String>)>> {
+    use std::io::Write;
+    let mut child = git_command()
+        .args(["rev-list", "--no-walk=unsorted", "--parents", "--stdin"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut input = child.stdin.take()?;
+    // git reads all of stdin before it writes, so this cannot fill both
+    // pipes.
+    let written = commits.iter().all(|c| writeln!(input, "{c}").is_ok());
+    drop(input);
+    let out = child.wait_with_output().ok()?;
+    if !written || !out.status.success() {
+        return None;
+    }
+    let parsed: Vec<(String, Vec<String>)> = String::from_utf8(out.stdout)
+        .ok()?
+        .lines()
+        .filter_map(|line| {
+            let mut ids = line.split_whitespace().map(str::to_string);
+            Some((ids.next()?, ids.collect()))
+        })
+        .collect();
+    (parsed.len() == commits.len()
+        && parsed
+            .iter()
+            .all(|(c, ps)| is_commit_id(c) && ps.iter().all(|p| is_commit_id(p))))
+    .then_some(parsed)
 }
 
-/// Whether the first-parent history of the vault file `abs_vault` from HEAD
-/// holds a revision whose vault `lists` answers `Some(false)` for while the
-/// vault at its first parent answers `Some(true)`: a commit that dropped
-/// what `lists` looks for.
+/// Whether the repository holding `dir` may lack objects of its history: a
+/// shallow clone, or a partial clone (`extensions.partialClone`). `true` when
+/// git cannot tell.
+fn history_incomplete(dir: &Path) -> bool {
+    git_output(dir, &["rev-parse", "--is-shallow-repository"]).is_none_or(|s| s != "false")
+        || git_output(dir, &["config", "--get", "extensions.partialclone"]).is_some()
+}
+
+/// Whether HEAD's history holds a commit that dropped what `lists` looks for
+/// from the vault file `abs_vault`: a commit whose vault `lists` answers
+/// `Some(false)` for (or that has no vault file) while one of its parents'
+/// vaults answers `Some(true)`. Every path of the history counts, not only
+/// first parents, so a merge that makes another branch the first parent
+/// does not hide the drop.
 ///
 /// The walk is bounded below by a commit `B` that still lists it: `since`
 /// (a full commit id) when its vault does, else the newest revision on
 /// `since`'s own first-parent path whose vault does (for a removal accepted
-/// at `since`, the vault just before the drop that `since` holds), else
-/// `since`. It reads `git rev-list --first-parent B..HEAD -- <vault>`: back
-/// to `B`, or to its merge base with HEAD when `B` is not an ancestor, so a
-/// drop already in `B`'s history (an older removal, undone before `since`)
-/// does not count. Each path reads the newest [`VAULT_HISTORY_CAP`]
-/// revisions at most, through one `git cat-file --batch`, and the walk
-/// stops at the first drop. Read-only: takes no `index.lock`.
+/// at `since`, the vault just before the drop that `since` holds). It reads
+/// `git rev-list --full-history B..HEAD -- <vault>` (every commit that
+/// changes the vault file, reachable from HEAD and not from `B`), so a drop
+/// already in `B`'s history (an older removal, undone before `since`) does
+/// not count. Both walks read at most [`VAULT_HISTORY_CAP`] revisions.
+///
+/// It answers [`HistoryCheck::Found`] as soon as it sees a drop. Otherwise
+/// anything it cannot read makes the answer [`HistoryCheck::TooLong`] or
+/// [`HistoryCheck::Unavailable`], never [`HistoryCheck::NotFound`]: a walk
+/// past the cap; a shallow or partial clone; a git failure; `B` missing; a
+/// vault revision that is not a blob or whose recipients do not parse; or no
+/// revision on `since`'s first-parent path that lists the key. Read-only:
+/// takes no `index.lock`.
 pub fn vault_history_drops(
     abs_vault: &Path,
     since: &str,
@@ -1579,50 +1695,74 @@ pub fn vault_history_drops(
     if !is_commit_id(since) {
         return HistoryCheck::Unavailable;
     }
-    let Some(mut batch) = BlobBatch::start(dir) else {
+    let incomplete = history_incomplete(dir);
+    let (Some(check), Some(contents)) = (
+        CatFile::start(dir, "--batch-check"),
+        CatFile::start(dir, "--batch"),
+    ) else {
         return HistoryCheck::Unavailable;
     };
-    let listing = |batch: &mut BlobBatch, rev: &str| {
-        batch
-            .read(&format!("{rev}:./{name}"))
-            .and_then(|b| lists(&b))
+    let mut reader = VaultReader {
+        name,
+        lists,
+        complete: !incomplete,
+        check,
+        contents,
+        by_commit: std::collections::HashMap::new(),
+        by_blob: std::collections::HashMap::new(),
+        broken: false,
     };
-    let bound = match listing(&mut batch, since) {
-        Some(true) => since.to_string(),
-        None => return HistoryCheck::Unavailable,
-        Some(false) => first_parent_revisions(dir, name, since)
-            .and_then(|(revisions, _)| {
-                revisions
-                    .into_iter()
-                    .find(|r| listing(&mut batch, r) == Some(true))
-            })
-            .unwrap_or_else(|| since.to_string()),
-    };
-    let Some((revisions, more)) = first_parent_revisions(dir, name, &format!("{bound}..HEAD"))
-    else {
-        return HistoryCheck::Unavailable;
-    };
-    let Some(oldest) = revisions.last() else {
-        return HistoryCheck::NotFound;
-    };
-    let parent = format!("{oldest}^");
-    let mut unread = false;
-    let mut newer: Option<bool> = None;
-    for rev in revisions
-        .iter()
-        .map(String::as_str)
-        .chain([parent.as_str()])
-    {
-        let older = listing(&mut batch, rev);
-        unread |= older.is_none();
-        if newer == Some(false) && older == Some(true) {
-            return HistoryCheck::Found;
+    let bound = match reader.at(since) {
+        Listing::Lists(true) => since.to_string(),
+        Listing::Lists(false) | Listing::Absent => {
+            let Some((revisions, more)) = vault_revisions(dir, name, &["--first-parent", since])
+            else {
+                return HistoryCheck::Unavailable;
+            };
+            let mut bound = None;
+            for r in revisions {
+                match reader.at(&r) {
+                    Listing::Lists(true) => {
+                        bound = Some(r);
+                        break;
+                    }
+                    Listing::Unreadable => return HistoryCheck::Unavailable,
+                    Listing::Lists(false) | Listing::Absent => {}
+                }
+            }
+            match bound {
+                Some(bound) => bound,
+                None if more => return HistoryCheck::TooLong,
+                None => return HistoryCheck::Unavailable,
+            }
         }
-        newer = older;
+        Listing::Unreadable => return HistoryCheck::Unavailable,
+    };
+    let range = format!("{bound}..HEAD");
+    let Some((revisions, more)) = vault_revisions(dir, name, &["--full-history", &range]) else {
+        return HistoryCheck::Unavailable;
+    };
+    let Some(with_parents) = parents_of(dir, &revisions) else {
+        return HistoryCheck::Unavailable;
+    };
+    let mut unread = false;
+    for (commit, parents) in &with_parents {
+        let at = reader.at(commit);
+        unread |= at == Listing::Unreadable;
+        if !matches!(at, Listing::Lists(false) | Listing::Absent) {
+            continue;
+        }
+        for parent in parents {
+            match reader.at(parent) {
+                Listing::Lists(true) => return HistoryCheck::Found,
+                Listing::Unreadable => unread = true,
+                Listing::Lists(false) | Listing::Absent => {}
+            }
+        }
     }
     if more {
         HistoryCheck::TooLong
-    } else if unread && (batch.broken || is_shallow(dir)) {
+    } else if unread || incomplete || reader.broken {
         HistoryCheck::Unavailable
     } else {
         HistoryCheck::NotFound

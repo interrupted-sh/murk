@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1615,7 +1615,7 @@
-     {
-         let older = listing(&mut batch, rev);
-         unread |= older.is_none();
--        if newer == Some(false) && older == Some(true) {
-+        if older == Some(false) {
-             return HistoryCheck::Found;
+@@ -1753,7 +1753,7 @@
          }
-         newer = older;
+         for parent in parents {
+             match reader.at(parent) {
+-                Listing::Lists(true) => return HistoryCheck::Found,
++                Listing::Lists(_) | Listing::Absent => return HistoryCheck::Found,
+                 Listing::Unreadable => unread = true,
+                 Listing::Lists(false) | Listing::Absent => {}
+             }

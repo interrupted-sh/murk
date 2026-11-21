@@ -250,12 +250,15 @@ pub enum Refusal {
     /// The vault is signed by, or lists, a key this machine recorded as
     /// removed (`removed_at`), whatever its generation `found`. Only this
     /// machine's own save that adds the key or `murk trust --re-add` naming
-    /// the key brings it back.
+    /// the key brings it back. `unchecked` says why git could not show
+    /// whether this branch's history holds the removal, when that is why it
+    /// applies (see [`Checkout::history_unchecked`]).
     RemovedKey {
         key: String,
         removed_at: u64,
         found: u64,
         signer: bool,
+        unchecked: Option<String>,
     },
     /// A different vault with the generation this machine accepted on the
     /// branch (or outside git): the branch was rewritten, or another save
@@ -570,9 +573,9 @@ pub struct Checkout {
     /// The vault file, absolute, when git history may be asked: on a branch,
     /// with a pin.
     vault: Option<std::path::PathBuf>,
-    /// Removed key (canonical) → whether its removal is in the history of the
-    /// commit checked out, for each key asked so far.
-    reached: std::cell::RefCell<BTreeMap<String, bool>>,
+    /// Removed key (canonical) → what git showed about its removal in the
+    /// history of the commit checked out, for each key asked so far.
+    reached: std::cell::RefCell<BTreeMap<String, crate::git::HistoryCheck>>,
 }
 
 impl Checkout {
@@ -625,69 +628,55 @@ impl Checkout {
         }
     }
 
-    /// Whether the removal of `key` (canonical) that `pin` records is in the
-    /// history of the commit checked out (see [`removal_in_history`]), on a
+    /// Whether the removal of `key` (canonical) that `pin` records holds at
+    /// this checkout through git history (see [`removal_in_history`]), on a
     /// branch `pin` has a mark for whose name the removal is not recorded
-    /// on. Asks git once per key. When git cannot tell, says so on stderr
-    /// once per vault, branch and key, and answers no.
+    /// on: yes when the history holds it, and yes when git cannot tell (fail
+    /// closed; [`Checkout::history_unchecked`] then says why). Asks git once
+    /// per key.
     fn reached(&self, pin: &TrustPin, key: &str) -> bool {
+        self.history(pin, key)
+            .is_some_and(|h| h != crate::git::HistoryCheck::NotFound)
+    }
+
+    /// What git showed about `key`'s removal here, when the question applies
+    /// (see [`Checkout::reached`]).
+    fn history(&self, pin: &TrustPin, key: &str) -> Option<crate::git::HistoryCheck> {
         let (HeadState::Branch(branch), Some(vault)) = (&self.head, &self.vault) else {
-            return false;
+            return None;
         };
-        let Some(on) = pin.removed_on.get(key) else {
-            return false;
-        };
+        let on = pin.removed_on.get(key)?;
         if !pin.branches.contains_key(branch)
             || !pin.removed.contains_key(key)
             || on.contains(branch)
         {
-            return false;
+            return None;
         }
         if let Some(&known) = self.reached.borrow().get(key) {
-            return known;
+            return Some(known);
         }
-        let reached = match removal_in_history(vault, pin, key, on) {
-            crate::git::HistoryCheck::Found => true,
-            crate::git::HistoryCheck::NotFound => false,
-            unknown => {
-                warn_history_unchecked(vault, branch, key, unknown);
-                false
-            }
-        };
-        self.reached.borrow_mut().insert(key.to_string(), reached);
-        reached
+        let found = removal_in_history(vault, pin, key, on);
+        self.reached.borrow_mut().insert(key.to_string(), found);
+        Some(found)
     }
-}
 
-/// Say once per process, vault, branch and key that git could not show
-/// whether the removal of `key` is in the branch's history (see
-/// [`crate::git::HistoryCheck`]), so it was not applied there.
-fn warn_history_unchecked(
-    vault: &std::path::Path,
-    branch: &str,
-    key: &str,
-    why: crate::git::HistoryCheck,
-) {
-    static WARNED: std::sync::Mutex<BTreeSet<(std::path::PathBuf, String, String)>> =
-        std::sync::Mutex::new(BTreeSet::new());
-    let first = WARNED.lock().map_or(true, |mut w| {
-        w.insert((vault.to_path_buf(), branch.to_string(), key.to_string()))
-    });
-    if !first {
-        return;
+    /// Why git could not show whether `key`'s removal is in this branch's
+    /// history, when that is why the removal applies here: the history is
+    /// past [`crate::git::VAULT_HISTORY_CAP`], or not all of it is available.
+    /// `None` when the removal applies by name or by history, or not at all.
+    pub fn history_unchecked(&self, pin: &TrustPin, key: &str) -> Option<String> {
+        match self.history(pin, key)? {
+            crate::git::HistoryCheck::TooLong => Some(format!(
+                "its history is too long to check (more than {} revisions of the vault file)",
+                crate::git::VAULT_HISTORY_CAP
+            )),
+            crate::git::HistoryCheck::Unavailable => Some(
+                "its history could not be checked (a shallow or partial clone, a missing object, a vault revision that does not parse, or a git failure)"
+                    .to_string(),
+            ),
+            crate::git::HistoryCheck::Found | crate::git::HistoryCheck::NotFound => None,
+        }
     }
-    let cause = match why {
-        crate::git::HistoryCheck::TooLong => format!(
-            "history too long to check (more than {} revisions of the vault file)",
-            crate::git::VAULT_HISTORY_CAP
-        ),
-        _ => "history not available to check (a shallow clone, a missing object or a git failure)"
-            .to_string(),
-    };
-    eprintln!(
-        "warn {}: {cause}; the removal of {key} was not applied on this branch ({branch}). If this branch merged that removal, a vault here that lists them may be a stale fork: review it (`murk diff`)",
-        vault.display()
-    );
 }
 
 /// Whether the removal of `key` (canonical) is in the history of the commit
@@ -704,31 +693,33 @@ fn warn_history_unchecked(
 ///    that is HEAD or an ancestor of it, has `C` as an ancestor, and whose
 ///    vault does not list the key holds the removal.
 /// 3. By content, for every other way the removal can reach HEAD (a squash
-///    or rebase merge, a branch deleted, renamed or moved on since, a
-///    teammate's removal accepted on a merge or squash commit of another
-///    branch): the first-parent history of the vault file from HEAD, back
-///    to a commit whose vault still lists the key (`C`, or for an accepted
-///    removal the newest such revision on `C`'s own first-parent path), at
-///    most the newest [`crate::git::VAULT_HISTORY_CAP`] revisions, holds a
-///    revision that does not list the key while its first parent's does (see
+///    or rebase merge, a branch deleted, renamed or moved on since, a merge
+///    that makes another branch its first parent, a teammate's removal
+///    accepted on a merge or squash commit of another branch): HEAD's
+///    history of the vault file, on every path, back to a commit whose vault
+///    still lists the key (`C`, or for an accepted removal the newest such
+///    revision on `C`'s own first-parent path), at most
+///    [`crate::git::VAULT_HISTORY_CAP`] revisions, holds a commit whose
+///    vault does not list the key (or is gone) while a parent's does (see
 ///    [`crate::git::vault_history_drops`]). Only the key's presence in the
 ///    recipient list counts: what else the revision changes (values, other
-///    recipients) does not matter. A key added on a branch that never listed
-///    it is not a removal, and a drop already in the bound's history (one
-///    undone before this removal) does not count. Recipients are read
-///    without verifying any signature: the arm only ever applies to a key
-///    this machine already recorded as removed, so a forged revision can at
-///    most keep out a key this machine itself saw removed; it cannot lock
-///    anyone new out. A re-add later on the branch by another machine does
-///    not undo it (only this machine's own `circle authorize` or `murk trust
-///    --re-add` does).
+///    recipients, the vault id) does not matter. A key added on a branch that
+///    never listed it is not a removal, and a drop already in the bound's
+///    history (one undone before this removal) does not count. Recipients
+///    are read without verifying any signature: the arm only ever applies to
+///    a key this machine already recorded as removed, so a forged revision
+///    can at most keep out a key this machine itself saw removed; it cannot
+///    lock anyone new out. A re-add later on the branch by another machine
+///    does not undo it (only this machine's own `circle authorize` or `murk
+///    trust --re-add` does).
 ///
-/// Stated limit: when git cannot tell (no recorded commit, a shallow clone
-/// that hides `C` or the drop's parent, a missing object, a git failure, or
-/// a drop further back than the cap), this answers
+/// When git cannot tell (no recorded commit, a shallow or partial clone, a
+/// missing object, a vault revision that does not parse, a git failure, a
+/// history past the cap), this answers
 /// [`crate::git::HistoryCheck::TooLong`] or
-/// [`crate::git::HistoryCheck::Unavailable`]: the removal applies where it
-/// did by name alone, and [`Checkout::reached`] warns.
+/// [`crate::git::HistoryCheck::Unavailable`], and the removal applies: a
+/// repo writer who pads the history or commits junk gets a refusal, never a
+/// load.
 fn removal_in_history(
     abs_vault: &std::path::Path,
     pin: &TrustPin,
@@ -873,6 +864,7 @@ fn removal_refusal(
             removed_at,
             found,
             signer: true,
+            unchecked: None,
         });
     }
     loaded.vault.recipients.iter().find_map(|r| {
@@ -883,6 +875,7 @@ fn removal_refusal(
             removed_at,
             found,
             signer: false,
+            unchecked: checkout.history_unchecked(pin, &key),
         })
     })
 }
@@ -2745,6 +2738,7 @@ pub fn ancestor_verdict(
             removed_at,
             found,
             signer: true,
+            unchecked: None,
         }));
     }
     let id = judged_vault_id(ancestor);
@@ -2964,7 +2958,11 @@ pub fn refusal_message(
             removed_at,
             found,
             signer,
-        } => removed_key_message(vault_path, loaded, key, *removed_at, *found, *signer),
+            unchecked,
+        } => match unchecked {
+            Some(why) => unchecked_removal_message(vault_path, loaded, key, *removed_at, why),
+            None => removed_key_message(vault_path, loaded, key, *removed_at, *found, *signer),
+        },
         Refusal::Forked { generation } => format!(
             "vault {vault_path} forked: generation {generation} is not the vault this machine accepted at that generation here — the branch was rewritten, or another save with the same counter replaced it\nmerge the two saves with the murk merge driver, or {review}"
         ),
@@ -3042,6 +3040,33 @@ fn unsigned_refusal_message(
     };
     format!(
         "vault {vault_path} is unsigned and {what} — nothing shows who made this change{changes}\nmurk does not encrypt to it until you accept it\n{review}"
+    )
+}
+
+/// The message for [`Refusal::RemovedKey`] when the removal applies only
+/// because git could not show whether this branch's history holds it.
+pub fn unchecked_removal_message(
+    vault_path: &str,
+    loaded: &Loaded<'_>,
+    key: &str,
+    removed_at: u64,
+    why: &str,
+) -> String {
+    unchecked_removal_text(vault_path, &label(loaded.names, key), key, removed_at, why)
+}
+
+/// The text of [`unchecked_removal_message`], for a caller with the label of
+/// `key` (canonical) already made.
+pub fn unchecked_removal_text(
+    vault_path: &str,
+    who: &str,
+    key: &str,
+    removed_at: u64,
+    why: &str,
+) -> String {
+    let key = canonical_recipient(key);
+    format!(
+        "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine, and murk cannot tell whether this branch merged that removal: {why}. It may be a stale fork that brings them back, so murk refuses it\nfetch the full history (`git fetch --unshallow`, or without a filter) and try again; if this branch never merged the removal, or to re-add them on purpose, review it (`murk diff`) and run `murk trust --vault {vault_path} --re-add {key}`, or `murk circle authorize {key}`"
     )
 }
 

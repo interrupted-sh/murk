@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::common::rows::{Probe, check};
+
+/// The history walk's cap (`VAULT_HISTORY_CAP` in `src/git.rs`).
+const VAULT_HISTORY_CAP: usize = 10_000;
 use super::{Machine, alice_repo, authorize, commit, git, git_ok, head_commit};
 
 // ── Helpers ──
@@ -699,12 +702,73 @@ fn row_r_i10_h_pr_flow_unmerged() {
     });
 }
 
-/// Stated limit: where git cannot show the removal in HEAD's history — here
-/// a shallow boundary at main's tip after a squash merge hides both the
-/// removal commit and the squash's parent — the removal applies where it did
-/// by name alone, so the pull-request scene's replay loads on main. It is
-/// never silent: stderr says the history could not be checked and that the
-/// removal was not applied.
+/// Whether `stderr` is the refusal for a removal that applies only because
+/// git could not show whether the branch merged it (`why` names the cause),
+/// naming bob and the ways out.
+fn refused_unchecked(stderr: &str, why: &str) -> bool {
+    stderr.contains("murk cannot tell whether this branch merged that removal")
+        && stderr.contains(why)
+        && names_re_add(stderr)
+        && stderr.contains("git fetch")
+}
+
+/// alice's load on main, which must be refused for the unchecked history
+/// `why`, print nothing on stdout, and leave her next save undone.
+fn unchecked_load_refused(s: &Scene, p: &mut Probe, why: &str) {
+    let get = s.run(&s.alice, &["get", "DB_URL"]);
+    p.reached();
+    let stderr = text(&get.stderr);
+    p.note(format!("get on main: {}", stderr.trim()));
+    p.target(
+        !get.status.success() && refused_unchecked(&stderr, why),
+        "the load on main is refused and says the history could not be checked",
+    );
+    p.target(text(&get.stdout).is_empty(), "nothing is printed on stdout");
+    p.target(
+        next_save_writes_nothing(s, &s.alice),
+        "the next save on main does not happen",
+    );
+}
+
+/// Commit `count` revisions of the vault file on top of the current branch
+/// with `git fast-import`, cycling through `blobs`: commits that change the
+/// vault file and need no signature, as a repo writer could push.
+fn pad_history(repo: &Path, count: usize, blobs: &[Vec<u8>]) -> bool {
+    let branch = String::from_utf8(git(repo, &["symbolic-ref", "HEAD"]).stdout).unwrap();
+    let branch = branch.trim();
+    let mut stream = Vec::new();
+    for i in 1..=count {
+        let blob = &blobs[i % blobs.len()];
+        stream.extend(
+            format!(
+                "commit {branch}\ncommitter t <t@t> {i} +0000\ndata 4\nfill\n{}M 100644 inline .murk\ndata {}\n",
+                if i == 1 { format!("from {branch}^0\n") } else { String::new() },
+                blob.len()
+            )
+            .into_bytes(),
+        );
+        stream.extend(blob);
+        stream.push(b'\n');
+    }
+    let mut import = std::process::Command::new("git")
+        .args(["fast-import", "--quiet", "--force"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        import.stdin.take().unwrap().write_all(&stream).unwrap();
+    }
+    import.wait().unwrap().success() && git(repo, &["reset", "-q", "--hard"]).status.success()
+}
+
+/// Where git cannot show the removal in HEAD's history — here a shallow
+/// boundary at main's tip after a squash merge hides the squash and its
+/// parent — the vault that lists bob is refused: murk cannot tell a stale
+/// fork from a branch that never merged the removal, so it fails closed and
+/// names the way out. With the full history the same load is refused as a
+/// stale fork.
 #[test]
 fn row_r_i10_h_pr_flow_unknown() {
     check("R-I10-h:pr-flow-unknown", |p: &mut Probe| {
@@ -714,93 +778,211 @@ fn row_r_i10_h_pr_flow_unknown() {
         put(&s.repo, &stale, "pr: change");
         let shallow = s.repo.join(".git").join("shallow");
         fs::write(&shallow, format!("{}\n", head_commit(&s.repo))).unwrap();
-        let get = s.run(&s.alice, &["get", "DB_URL"]);
-        p.reached();
-        let stderr = text(&get.stderr);
-        p.note(format!("shallow: {}", stderr.trim()));
-        p.target(
-            get.status.success() && text(&get.stdout).contains("prod-db"),
-            "behind a shallow boundary the replay loads (the stated limit)",
-        );
-        p.target(
-            stderr.contains("history not available to check")
-                && stderr.contains(&format!(
-                    "the removal of {} was not applied on this branch",
-                    s.bob.pubkey()
-                )),
-            "stderr says the history could not be checked and the removal was not applied",
-        );
+        unchecked_load_refused(&s, p, "its history could not be checked");
         fs::remove_file(&shallow).unwrap();
+        let full = s.run(&s.alice, &["get", "DB_URL"]);
         p.target(
-            !s.run(&s.alice, &["get", "DB_URL"]).status.success(),
-            "with the full history the same load is refused",
+            !full.status.success() && !text(&full.stderr).contains("cannot tell"),
+            "with the full history the same load is refused as a stale fork",
         );
         Ok(())
     });
 }
 
-/// The cap on the history walk: after the squash merge of the pull request,
-/// main gets more than 1000 further commits that change the vault file (here
-/// only its trailing whitespace), and the stale fork is committed on top.
-/// The drop is past the newest 1000 revisions, so the removal is not applied
-/// on main and the replay loads (the stated limit), but never silently:
-/// stderr says the history was too long to check and that the removal of
-/// bob was not applied on this branch.
+/// Padding past the cap: after the squash merge of the pull request, a repo
+/// writer commits more than `VAULT_HISTORY_CAP` revisions of the vault file
+/// (unsigned bytes, alternating two old files), then the stale fork. The
+/// walk cannot reach the drop, so the load is refused, never loaded: the
+/// refusal says the history is too long to check.
 #[test]
 fn row_r_i10_h_pr_flow_cap() {
     check("R-I10-h:pr-flow-cap", |p: &mut Probe| {
         let s = Scene::new();
         let stale = pr_flow_scene(&s);
+        let r0 = file_at(&s.repo, &s.r0);
         merge_pr_as(&s, PrMerge::Squash { delete: true });
-        let squashed = working(&s.repo);
-        let mut stream = Vec::new();
-        for i in 1..=1001 {
-            let mut file = squashed.clone();
-            file.extend(std::iter::repeat_n(b' ', i));
-            stream.extend(
-                format!(
-                    "commit refs/heads/main\ncommitter t <t@t> {i} +0000\ndata 4\nfill\n{}M 100644 inline .murk\ndata {}\n",
-                    if i == 1 { "from refs/heads/main^0\n" } else { "" },
-                    file.len()
-                )
-                .into_bytes(),
-            );
-            stream.extend(file);
-            stream.push(b'\n');
-        }
-        let mut import = std::process::Command::new("git")
-            .args(["fast-import", "--quiet", "--force"])
-            .current_dir(&s.repo)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        {
-            use std::io::Write;
-            import.stdin.take().unwrap().write_all(&stream).unwrap();
-        }
-        p.require(import.wait().unwrap().success(), "git fast-import ran")?;
-        git_ok(&s.repo, &["reset", "-q", "--hard", "main"]);
+        p.require(
+            pad_history(&s.repo, VAULT_HISTORY_CAP + 2, &[r0, stale.clone()]),
+            "git fast-import ran",
+        )?;
         put(&s.repo, &stale, "pr: change");
+        unchecked_load_refused(&s, p, "its history is too long to check");
+        Ok(())
+    });
+}
+
+/// A junk revision in the walk: alice's machine is marked on `old` (her
+/// save there), cut before her removal of bob, which never merges there (so
+/// old's vault still lists bob and loads). A repo writer commits a vault file that is
+/// not a vault, then old's file again. murk cannot read every revision of
+/// old's history, so it cannot rule out that one of them dropped bob: the
+/// load is refused, never loaded.
+#[test]
+fn row_r_i10_h_pr_flow_junk() {
+    check("R-I10-h:pr-flow-junk", |p: &mut Probe| {
+        let s = Scene::new();
+        git_ok(&s.repo, &["checkout", "-q", "-b", "old"]);
+        s.alice.add(&s.repo, "OLD_K", "old-k");
+        commit(&s.repo, "old: add OLD_K");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "old"]);
+        let control = s.run(&s.alice, &["get", "DB_URL"]);
+        p.require(
+            control.status.success(),
+            format!("old loads before the junk: {}", text(&control.stderr)),
+        )?;
+        let old = working(&s.repo);
+        put(&s.repo, b"{\"not\": \"a vault\"}\n", "junk");
+        put(&s.repo, &old, "old again");
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on old: {}", stderr.trim()));
+        p.target(
+            !get.status.success() && refused_unchecked(&stderr, "its history could not be checked"),
+            "the load on old is refused and says the history could not be checked",
+        );
+        p.target(text(&get.stdout).is_empty(), "nothing is printed on stdout");
+        Ok(())
+    });
+}
+
+/// The drop reaches main only through a second parent: after the squash
+/// merge, the stale fork's branch merges main with `-s ours` (its vault
+/// stays the stale fork's, listing bob), and main is fast-forwarded to it.
+/// main's first-parent history never drops bob, but its full history does:
+/// refused, and the next save does not happen.
+#[test]
+fn row_r_i10_h_pr_flow_ours_ff() {
+    check("R-I10-h:pr-flow-ours-ff", |p: &mut Probe| {
+        let s = Scene::new();
+        pr_flow_scene(&s);
+        merge_pr_as(&s, PrMerge::Squash { delete: true });
+        git_ok(&s.repo, &["checkout", "-q", "stale"]);
+        git_ok(&s.repo, &["merge", "-q", "-s", "ours", "--no-edit", "main"]);
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        git_ok(&s.repo, &["merge", "-q", "--ff-only", "stale"]);
+        p.require(s.lists_bob(), "main's vault is the stale fork's")?;
         let get = s.run(&s.alice, &["get", "DB_URL"]);
         p.reached();
         let stderr = text(&get.stderr);
         p.note(format!("get on main: {}", stderr.trim()));
         p.target(
-            stderr.contains("history too long to check")
-                && stderr.contains(&format!(
-                    "the removal of {} was not applied on this branch",
-                    s.bob.pubkey()
-                )),
-            "stderr says the history was too long to check and the removal was not applied",
+            !get.status.success() && names_re_add(&stderr),
+            "the load on main is refused and names --re-add",
         );
         p.target(
-            stderr.matches("history too long to check").count() == 1,
-            "the warning prints once in the process",
+            next_save_writes_nothing(&s, &s.alice),
+            "the next save on main does not happen",
         );
-        let stdout = text(&get.stdout);
+        Ok(())
+    });
+}
+
+/// The drop arrives on a topic branch through a second parent: alice's
+/// machine is marked on `topic` (her save there), cut before her removal.
+/// After the squash merge on main, topic merges main with `-s ours`, so
+/// topic's vault still lists bob while its history holds the drop, only
+/// through the merge's second parent: refused on topic.
+#[test]
+fn row_r_i10_h_pr_flow_second_parent() {
+    check("R-I10-h:pr-flow-second-parent", |p: &mut Probe| {
+        let s = Scene::new();
+        git_ok(&s.repo, &["checkout", "-q", "-b", "topic"]);
+        s.alice.add(&s.repo, "TOPIC_K", "topic-k");
+        commit(&s.repo, "topic: add TOPIC_K");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "revoke-bob"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        merge_pr_as(&s, PrMerge::Squash { delete: true });
+        git_ok(&s.repo, &["checkout", "-q", "topic"]);
+        let control = s.run(&s.alice, &["get", "TOPIC_K"]);
+        p.require(
+            control.status.success(),
+            format!("topic loads before the merge: {}", text(&control.stderr)),
+        )?;
+        git_ok(&s.repo, &["merge", "-q", "-s", "ours", "--no-edit", "main"]);
+        p.require(s.lists_bob(), "topic's vault still lists bob")?;
+        let get = s.run(&s.alice, &["get", "TOPIC_K"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on topic: {}", stderr.trim()));
         p.target(
-            get.status.success() && stdout.trim() == "prod-db",
-            format!("past the cap the replay loads (the stated limit) and stdout holds only the value: {stdout:?}"),
+            !get.status.success() && names_re_add(&stderr),
+            "the load on topic is refused and names --re-add",
+        );
+        p.target(text(&get.stdout).is_empty(), "nothing is printed on stdout");
+        Ok(())
+    });
+}
+
+/// Control: a drop on a branch HEAD never merged does not count. carol
+/// revokes bob on `side`, which never merges. alice revokes him on her own
+/// `revoke-bob`, which never merges either. alice's main, which still lists
+/// bob, loads.
+#[test]
+fn row_r_i10_h_pr_flow_side_unmerged() {
+    check("R-I10-h:pr-flow-side-unmerged", |p: &mut Probe| {
+        let s = Scene::new();
+        s.run_ok(&s.alice, &["get", "DB_URL"]);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "side"]);
+        s.run_ok(&s.carol, &["circle", "revoke", &s.bob.pubkey()]);
+        commit(&s.repo, "side: carol revokes bob");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "revoke-bob"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        p.require(s.lists_bob(), "main's vault lists bob")?;
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        p.note(format!("get on main: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("prod-db"),
+            "main, which never merged either drop, still loads",
+        );
+        Ok(())
+    });
+}
+
+/// Stated limit (decision 10): another machine drops bob on main and adds
+/// him back, after the commit alice's later removal of bob (on `release-1`,
+/// cut before both, never merged) is recorded at. main's history holds a
+/// drop of bob, which murk reads as alice's removal reaching main: main's
+/// vault, which lists bob, is refused until alice re-adds him here on
+/// purpose, and the refusal says how.
+#[test]
+fn row_r_i10_h_pr_flow_unrelated_drop() {
+    check("R-I10-h:pr-flow-unrelated-drop", |p: &mut Probe| {
+        let s = Scene::new();
+        s.run_ok(&s.alice, &["get", "DB_URL"]);
+        git_ok(&s.repo, &["branch", "release-1"]);
+        let laptop = s.laptop("alice2");
+        s.on_laptop(&laptop, &["trust", "--yes"], None);
+        s.on_laptop(&laptop, &["circle", "revoke", &s.bob.pubkey()], None);
+        commit(&s.repo, "main: drop bob");
+        s.on_laptop(
+            &laptop,
+            &["circle", "authorize", &s.bob.pubkey(), "--name", "bob"],
+            None,
+        );
+        commit(&s.repo, "main: re-add bob");
+        git_ok(&s.repo, &["checkout", "-q", "release-1"]);
+        s.revoke_bob();
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on main: {}", stderr.trim()));
+        p.target(
+            !get.status.success() && names_re_add(&stderr),
+            "main is refused and the refusal names --re-add (the stated limit)",
+        );
+        s.run_ok(&s.alice, &["trust", "--yes", "--re-add", &s.bob.pubkey()]);
+        p.target(
+            s.run(&s.alice, &["get", "DB_URL"]).status.success(),
+            "after murk trust --re-add, main loads",
         );
         Ok(())
     });

@@ -959,14 +959,20 @@ fn refuse_carried_removed_keys(
         let applies = crate::trust::removal_applies(pin, &key, &checkout);
         (applies && before.contains(&key)).then_some((r, at))
     });
-    match carried {
-        Some((key, at)) => Err(MurkError::Secret(format!(
-            "refusing to save: this vault still lists {}, who was removed from it at generation {at} on this machine (this file has generation {}) — saving would add them back\nnothing was written\nupdate to the vault that removed them (pull, or merge the removal into this branch), then make the change again; to re-add them on purpose, run `murk circle authorize` for them",
-            crate::trust::label(&current.recipients, key),
-            on_disk.generation
-        ))),
-        None => Ok(()),
+    let Some((key, at)) = carried else {
+        return Ok(());
+    };
+    let who = crate::trust::label(&current.recipients, key);
+    if let Some(why) = checkout.history_unchecked(pin, &canonical(key)) {
+        return Err(MurkError::Secret(format!(
+            "refusing to save: {}\nnothing was written",
+            crate::trust::unchecked_removal_text(vault_path, &who, key, at, &why)
+        )));
     }
+    Err(MurkError::Secret(format!(
+        "refusing to save: this vault still lists {who}, who was removed from it at generation {at} on this machine (this file has generation {}) — saving would add them back\nnothing was written\nupdate to the vault that removed them (pull, or merge the removal into this branch), then make the change again; to re-add them on purpose, run `murk circle authorize` for them",
+        on_disk.generation
+    )))
 }
 
 /// Refuse an unsigned save (the key cannot sign) that carries a recipient
