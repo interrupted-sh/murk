@@ -87,6 +87,13 @@ The set of trusted signers is shared too. Loading a PR branch never adds a
 signer to it. See [Trusting the vault on a new
 machine](/guides/teams/#trusting-the-vault-on-a-new-machine) for what does.
 
+Each save in a worktree updates the shared pin. A save checks the pin again
+just before it replaces the vault file. When another worktree changed the
+pin meanwhile, the save waits a short random time and starts again. It makes
+up to 16 attempts. When many worktrees save at the same time, a save can still stop
+with "nothing was written … Running the command again is safe." Nothing was
+changed, so run the command again.
+
 The pre-0.14 rules apply per branch, also in worktrees. The first 0.14 save
 in one worktree does not make your other worktrees refuse their committed
 0.13 vaults. Make that first save on the default branch and commit it, then

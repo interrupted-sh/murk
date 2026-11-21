@@ -167,6 +167,14 @@ it"). Review it the same way. `murk trust` on that machine cannot sign. So it
 accepts the vault and forgets that it saw a signed version. Later unsigned
 loads then give only the warning.
 
+A load of an unsigned vault records nothing in the trust pin. It doesn't
+raise the branch's save counter mark, and it records no removed member. So
+the rollback check on such a machine compares with the mark of its last
+`murk trust`, its own save or an accepted signed load. After it reads an
+unsigned vault at counter 6, it still accepts an unsigned vault at counter 5
+or 4 above that mark. Signed git commits, reviewed in pull requests, are the
+check against such a rollback.
+
 ## Choosing `MURK_KEY` vs `MURK_KEY_FILE`
 
 Setting `MURK_KEY` to a raw `AGE-SECRET-KEY-1...` string works, but then the

@@ -52,6 +52,8 @@ An expired grant keeps its record until the next vault write by anyone, and `mur
 
 `murk agent revoke NAME [--rotate]` removes the grant and its ephemeral recipient, clearing its private ciphertexts so it can no longer read current values. The key could still decrypt old `.murk` versions from git history. **Revocation doesn't erase git history.** `--rotate` re-prompts for new values across the grant's scope, which is the step that actually closes the exposure.
 
+Each revoke, each expiry pruning and each `--renew` also writes a revocation id for the old key into the vault's encrypted meta. A machine on the current release that accepts the vault then refuses that key, until `murk trust --re-add` after review. murk 0.15 and earlier don't check the ids, and an agent grant's own load never sees them (see [Revoked agent grants stay revoked](/security/threat-model/#vault-signatures) for the residuals). Nothing prunes these ids. Each one stays in every later revision of the vault, so a team that mints short-lived grants often sees the vault grow without bound.
+
 If you don't rotate, murk stamps `revoked_at` on each key the grant could read. `murk doctor` and `murk rotate --list` then report those keys until their values change.
 
 A grant's key file trusts the signers recorded in the grant when it was minted, and nothing updates the key file afterwards. So `murk circle revoke` also revokes every grant that trusts the revoked key, and every grant with no recorded signers (an unknown anchor is treated as trusting every signer). It marks those grants' keys as owing rotation, deletes their key files in murk's own slot, and tells you to delete other copies and re-mint the grants with `murk agent grant --renew`.

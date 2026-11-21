@@ -868,7 +868,7 @@ Verify vault integrity without exporting secrets
 
 * `--signature-only` — Check only the vault signature, with no key
 
-   Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault's content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull-request check in CI with no secret. It covers the parsed content, not the file's bytes: a reformatted file still passes. murk reads no key and decrypts nothing. So it does not check the MAC over the values, grant expiry, rollback against earlier saves, removed keys, group membership changes or the last commit's signature. `murk verify` with a key checks those
+   Accepts the vault only when a signer in MURK_TRUSTED_SIGNERS signed this vault's content. The signature covers every field except itself, so a text merge of two changed vaults fails this check: use it as a pull-request check in CI with no secret. It covers the parsed content, not the file's bytes: a reformatted file still passes. murk reads no key, no trust pin and no sidecar, and decrypts nothing. So it does not check the MAC over the values, grant expiry, the vault id, rollback against earlier saves, removed keys, revoked agent grants, group membership changes or the last commit's signature, and it ignores MURK_EXPECTED_VAULT. `murk verify` with a key checks those
 * `--vault <VAULT>` — Vault filename
 
   Default value: `.murk`

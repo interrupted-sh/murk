@@ -58,7 +58,15 @@ That state is the **trust pin**, a file under `~/.config/murk/signer-pins/` (mod
 - every agent-grant key seen, which never counts as a signer
 - the verifying key of each age signer this machine has confirmed, which a different key can never replace
 
-Only an accepted load, `murk trust`, or this machine's own `init` and saves write the pin. Nothing from an unverified vault ever does. A pin that can't be parsed is an error, not an empty pin. A pin that can't be written during a normal load (a read-only home, say) only prints a warning: the vault is trusted either way, but murk can't remember it.
+Only an accepted load, `murk trust`, or this machine's own `init` and saves write the pin. Nothing from an unverified vault ever does. A pin that can't be parsed is an error, not an empty pin.
+
+When murk can't write the pin directory (a read-only `HOME` or file system):
+
+- **A load** only prints a warning. The vault is trusted either way, but murk can't remember it.
+- **A save or a keyed merge, with no pin for this vault yet,** writes the vault, writes no pin, and prints a warning.
+- **A save or a keyed merge, with a pin for this vault,** fails and writes nothing. murk needs the pin's lock to write the vault, so that another process can't record a removal or a revoked grant meanwhile. `MURK_NO_SIGNER_PIN` doesn't get around this: the existing pin still applies. Run murk with a writable `HOME`.
+
+murk takes the pin directory from `HOME` (else `USERPROFILE`). An empty or relative `HOME` counts as no home directory: murk warns, keeps no pin and reads no stored key, as with no `HOME` at all.
 
 Every keyed load checks the vault against it, for the CLI, the MCP server and the Python and Node bindings alike. Write commands load through the same check, so a write never re-signs content the machine doesn't trust. murk refuses the vault when:
 
@@ -68,7 +76,7 @@ Every keyed load checks the vault against it, for the CLI, the MCP server and th
 - **An age signer's signing key isn't confirmed here yet.** The signer is a trusted recipient, but this machine hasn't seen their signing key before. That is typically a newly authorized teammate's first signed write. murk refuses it once and shows the key's fingerprint. Check the fingerprint with the teammate, then run `murk trust`. See [A new teammate's first write](#a-new-teammates-first-write).
 - **An agent grant signed it.** Grants are read-only, so a grant key never signs. A former grant key that is back in the recipients without its grant is refused the same way. `murk trust` won't accept either. Restore the file from git.
 - **It's a different vault.** The vault id doesn't match the pinned one, as if another vault's file had been copied over it. Restore the file from git. If you replaced the vault on purpose, review it and run `murk trust`. `murk trust` refuses only another vault's unsigned 0.13 file, because nothing signed shows whose file it is. See [Vault ids and upgrading from 0.13](#vault-ids-and-upgrading-from-013).
-- **Another vault file has the same vault id.** Another git-tracked vault file in the checkout carries this vault's id, for example a byte copy. murk can't tell the two apart. Remove the copy, or review both files and run `murk trust --vault FILE --shares-identity-with OTHER` to choose FILE. Plain `murk trust` doesn't accept this.
+- **Another vault file has the same vault id.** Another git-tracked vault file in the checkout carries this vault's id, for example a byte copy. murk can't tell the two apart. Remove the copy, or review both files and run `murk trust --vault FILE --shares-identity-with OTHER` to choose FILE. Plain `murk trust` doesn't accept this. murk only looks at files named `.murk`, `.murk.*` or `*.murk`, so it doesn't see a copy of a vault file with another name (`prod.vault`).
 - **It isn't the vault `MURK_EXPECTED_VAULT` names.** Its vault id is different, or its save counter is below the minimum in the variable. Only the variable decides this, so `murk trust` doesn't accept it. See [CI/CD](/guides/cicd/#name-the-expected-vault-and-a-minimum-counter).
 - **It's signed by a removed key, or lists one again.** This machine recorded that an accepted vault removed the key. The vault is signed by that key, or it lists the key, at any counter. Update to the vault that removed the key: pull it, or merge the removal into this branch. To bring the key back on purpose, review the vault and run `murk trust --re-add KEY`. The rules for each case follow the list.
 - **It holds an agent grant that was revoked.** The vault lists a revoked grant key as a recipient, or holds a grant for it. murk refuses it as the current vault, and refuses to save or merge it. An older revision read on a detached HEAD or an unaccepted branch loads with a warning. If the revocation was a mistake, review it and run `murk trust --re-add KEY`. See [Revoked agent grants stay revoked](/security/threat-model/#vault-signatures).
@@ -83,9 +91,16 @@ Every keyed load checks the vault against it, for the CLI, the MCP server and th
 
 The one exception is the key's own history. The vault must be at the recorded commit or an older one, exactly as committed, on a branch the removal hasn't reached, and numbered at or below the removal. Such a vault loads but never makes the key trusted again. On a branch this machine never accepted, it is read-only. With no recorded commit there is no exception.
 
-A vault that still lists the removed key is a separate case. murk refuses it at any counter wherever the removal has reached. That covers the branch it was made on, branches it was merged or pulled into, a detached HEAD, outside git, and a branch this machine never accepted. At or below the removal's counter the refusal says it rolled back. Above it, the refusal says the vault may re-add the key on purpose or be a stale fork. On a branch this machine never accepted, the vault loads in one case. The checked-out commit is the one where the removal was recorded, or an ancestor of it, and the vault is exactly as committed there.
+A vault that still lists the removed key is a separate case. murk refuses it at any counter wherever the removal applies. That covers the branch it was made on, branches where this machine later accepted a vault without the key, branches whose git history holds the removal (for example main, after a pull request that removed the key merged there), a detached HEAD, outside git, and a branch this machine never accepted. At or below the removal's counter the refusal says it rolled back. Above it, the refusal says the vault may re-add the key on purpose or be a stale fork. On a branch this machine never accepted, the vault loads in one case. The checked-out commit is the one where the removal was recorded, or an ancestor of it, and the vault is exactly as committed there.
 
 A branch this machine accepted before the removal reached it keeps loading and saving vaults that list the key until the removal is merged there. `murk trust` accepts a vault that murk refused for a removed key only when you name the key with `--re-add KEY`. No load clears the removal. To re-add someone on purpose, a member runs `murk circle authorize`, and each teammate whose machine recorded the removal runs `murk trust --re-add KEY` once. A teammate can run it before the re-add arrives: when the vault doesn't list the key, it clears the record and writes nothing.
+
+The record has limits. On a branch this machine accepted before, the removal applies only after this machine accepts a vault there without the key when:
+
+- git can't show the removal in the branch's history: a shallow clone, a missing object, or the branch the removal was saved on was deleted or rewritten;
+- this machine saved the removal on a detached HEAD.
+
+The record also belongs to one vault path. A renamed vault file (`git mv .murk secrets.murk`) starts with no record after `murk trust`, and `murk trust --shares-identity-with` deletes the other path's record. A load of an unsigned vault records nothing. See [limit 10 in the threat model](/security/threat-model/#vault-signatures).
 
 Each refusal says what happened and points you at the review step. It shows the signer's key next to its name, because whoever wrote the file chose the name. It also lists the recipient changes since the pin.
 
