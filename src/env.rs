@@ -2033,9 +2033,16 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/home/mickey") };
+        // A platform-absolute HOME: on Windows a drive-less path counts as
+        // no home directory (see `home_dir`).
+        let home = if cfg!(windows) {
+            "C:/Users/mickey"
+        } else {
+            "/home/mickey"
+        };
+        unsafe { std::env::set_var("HOME", home) };
 
-        let inside = home_short("/home/mickey/.config/murk/agent-keys/ab-codex");
+        let inside = home_short(&format!("{home}/.config/murk/agent-keys/ab-codex"));
         let outside = home_short("/etc/murk/k");
 
         unsafe {

@@ -1887,6 +1887,17 @@ fn row_r_i5_home_key_store() {
     });
 }
 
+/// How many lines of `stderr` warn that a git repository tracks a file
+/// under `tail` (`/`-separated). Windows prints the path with `\`, so each
+/// line is compared with its separators made `/`.
+fn tracked_warnings(stderr: &str, tail: &str) -> usize {
+    stderr
+        .lines()
+        .map(|l| l.replace('\\', "/"))
+        .filter(|l| l.starts_with("warn a git repository tracks ") && l.contains(tail))
+        .count()
+}
+
 /// With an absolute `HOME` equal to the checkout root, the key store is
 /// inside the checkout, so a repository can commit a key file there. A key
 /// file that git tracks is never read: the load finds no stored key, with
@@ -1928,14 +1939,7 @@ fn row_r_i5_home_key_in_checkout() {
             "with HOME at the checkout root, the committed key file is not read",
         );
         p.target(
-            get.stderr
-                .lines()
-                .filter(|l| {
-                    l.starts_with("warn a git repository tracks ")
-                        && l.contains(".config/murk/keys/")
-                })
-                .count()
-                == 1,
+            tracked_warnings(&get.stderr, ".config/murk/keys/") == 1,
             "one warning names the tracked key file",
         );
         Ok(())
@@ -2228,14 +2232,7 @@ fn committed_pin_refused(id: &str, layout: PinLayout) {
             "the refusal is the no-pin one",
         );
         p.target(
-            get.stderr
-                .lines()
-                .filter(|l| {
-                    l.starts_with("warn a git repository tracks ")
-                        && l.contains(".config/murk/signer-pins/")
-                })
-                .count()
-                == 1,
+            tracked_warnings(&get.stderr, ".config/murk/signer-pins/") == 1,
             "one warning names the tracked pin file",
         );
         Ok(())
