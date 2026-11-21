@@ -219,6 +219,11 @@ fn restore_vault(repo: &Path, rev: &str) {
 /// `git merge <branch>` in `repo` as `who`, with the murk driver and `who`'s
 /// key: (success, stderr).
 fn merge(who: &Person, repo: &Path, branch: &str) -> (bool, String) {
+    merge_with(who, repo, branch, &[])
+}
+
+/// [`merge`] with the extra environment variables `env`.
+fn merge_with(who: &Person, repo: &Path, branch: &str, env: &[(&str, &str)]) -> (bool, String) {
     let mut merge = std::process::Command::new("git");
     merge
         .args(["-c", "commit.gpgsign=false", "merge", "--no-edit", branch])
@@ -232,7 +237,9 @@ fn merge(who: &Person, repo: &Path, branch: &str) -> (bool, String) {
     for var in super::common::MURK_CONTEXT_VARS {
         merge.env_remove(var);
     }
-    merge.env("MURK_KEY_FILE", &who.key);
+    merge
+        .env("MURK_KEY_FILE", &who.key)
+        .envs(env.iter().copied());
     let out = merge.output().unwrap();
     (
         out.status.success(),
@@ -1618,6 +1625,234 @@ fn row_r_i22_a() {
         p.target(
             load.stderr.contains("tampered"),
             "the error is the integrity check",
+        );
+        Ok(())
+    });
+}
+
+// ── R-I5-readonly: a pin directory murk cannot write to ──
+
+/// Every file in `who`'s pin directory, with its bytes.
+#[cfg(unix)]
+fn pin_dir_files(who: &Person) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<(PathBuf, Vec<u8>)> = fs::read_dir(pin_dir(&who.machine))
+        .unwrap()
+        .map(|e| {
+            let path = e.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Run `f` with `who`'s HOME read-only throughout, as in a container with
+/// a read-only root file system, and make it writable again after.
+#[cfg(unix)]
+fn with_read_only_home<T>(who: &Person, f: impl FnOnce() -> T) -> T {
+    let chmod = |mode: &str| {
+        let status = std::process::Command::new("chmod")
+            .args(["-R", mode])
+            .arg(who.home())
+            .status()
+            .unwrap();
+        assert!(status.success(), "chmod -R {mode}");
+    };
+    chmod("a-w");
+    let result = f();
+    chmod("u+w");
+    result
+}
+
+/// With a read-only HOME and no pin or sidecar for the vault (a CI job that
+/// anchors trust with MURK_TRUSTED_SIGNERS), a save writes the vault as
+/// murk 0.15.2 did: it warns that the trust pin is not updated, and creates
+/// no file in the pin directory. The success message comes after the write.
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_no_pin() {
+    rows::check("R-I5-readonly:no-pin", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let (entry, _) = machine.signer_entry(&repo);
+        let alice = Person::of(machine);
+        for (file, _) in pin_dir_files(&alice) {
+            fs::remove_file(file).unwrap();
+        }
+        let anchored = |args: &[&str], value: &str| {
+            let mut cmd = alice.murk(&repo);
+            cmd.env("MURK_TRUSTED_SIGNERS", &entry)
+                .args(args)
+                .write_stdin(format!("{value}\n"));
+            out(cmd)
+        };
+
+        let add = with_read_only_home(&alice, || anchored(&["add", "SYN2"], "two"));
+        p.reached();
+        p.note(add.stderr.clone());
+        p.target(add.ok, "murk add exits 0");
+        let warned = add.stderr.find("the trust pin is not updated");
+        p.target(
+            warned.is_some(),
+            "a warning says the trust pin is not updated",
+        );
+        p.target(
+            add.stderr
+                .find("added SYN2")
+                .is_some_and(|added| warned.is_some_and(|w| w < added)),
+            "\"added SYN2\" comes after the write",
+        );
+        p.target(
+            has_secret(&repo.join(".murk"), "SYN2"),
+            "the vault file holds the new key",
+        );
+        p.target(
+            pin_dir_files(&alice).is_empty(),
+            "no pin, sidecar or lock file was created",
+        );
+        let get = with_read_only_home(&alice, || anchored(&["get", "SYN2"], ""));
+        p.target(printed(&get, "two"), "the new value loads");
+        Ok(())
+    });
+}
+
+/// With a read-only HOME and a pin for the vault, a save fails closed: a
+/// process sharing the directory could still write the pin, so the publish
+/// needs the pin lock. The error names the read-only pin directory and a
+/// writable HOME, nothing claims the key was added, and the vault file and
+/// the pin directory are unchanged.
+#[cfg(unix)]
+fn readonly_pin_fails_closed(id: &str) {
+    rows::check(id, |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let alice = Person::of(machine);
+        let pins = pin_dir_files(&alice);
+        p.require(!pins.is_empty(), "alice's machine has a pin for the vault")?;
+        let before = fs::read(repo.join(".murk")).unwrap();
+
+        let add = with_read_only_home(&alice, || alice.add(&repo, ".murk", "SYN2", "two"));
+        p.reached();
+        p.note(add.stderr.clone());
+        p.target(!add.ok, "murk add fails");
+        p.target(
+            add.stderr.contains("is read-only") && add.stderr.contains("writable HOME"),
+            "the error names the read-only pin directory and a writable HOME",
+        );
+        p.target(
+            !add.stderr.contains("added SYN2"),
+            "nothing claims the key was added",
+        );
+        p.target(
+            fs::read(repo.join(".murk")).unwrap() == before,
+            "the vault file is unchanged",
+        );
+        p.target(
+            pin_dir_files(&alice) == pins,
+            "the pin directory is unchanged",
+        );
+        Ok(())
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_pin() {
+    readonly_pin_fails_closed("R-I5-readonly:pin");
+}
+
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_pin_order() {
+    readonly_pin_fails_closed("R-I5-readonly:pin-order");
+}
+
+/// A repo where `main` and `side` each added a key since they forked, both
+/// committed, with the murk driver configured and `main` checked out.
+/// Returns main's committed vault bytes.
+#[cfg(unix)]
+fn forked_keys(alice: &Person, repo: &Path) -> Result<Vec<u8>, String> {
+    super::use_merge_driver(repo);
+    git_ok(repo, &["checkout", "-q", "-b", "side"]);
+    must(alice.add(repo, ".murk", "SIDE_K", "side"), "add on side")?;
+    commit(repo, "side: add SIDE_K");
+    git_ok(repo, &["checkout", "-q", "main"]);
+    must(alice.add(repo, ".murk", "MAIN_K", "main"), "add on main")?;
+    commit(repo, "main: add MAIN_K");
+    Ok(fs::read(repo.join(".murk")).unwrap())
+}
+
+/// With a read-only HOME and a pin for the vault, a keyed merge fails
+/// closed. The driver exits non-zero with the same error as a save, so git
+/// stops the merge with a conflict on `.murk` and takes the driver's %A,
+/// which the driver never wrote: `.murk` holds ours' bytes. The pin
+/// directory is unchanged.
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_merge_pin() {
+    rows::check("R-I5-readonly:merge-pin", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let alice = Person::of(machine);
+        let ours = forked_keys(&alice, &repo)?;
+        let pins = pin_dir_files(&alice);
+        p.require(!pins.is_empty(), "alice's machine has a pin for the vault")?;
+
+        let (ok, stderr) = with_read_only_home(&alice, || merge(&alice, &repo, "side"));
+        p.reached();
+        p.note(stderr.clone());
+        p.target(!ok, "git merge fails");
+        p.target(
+            stderr.contains("is read-only") && stderr.contains("writable HOME"),
+            "the driver's error names the read-only pin directory and a writable HOME",
+        );
+        p.target(
+            fs::read(repo.join(".murk")).unwrap() == ours,
+            ".murk holds ours' bytes",
+        );
+        p.target(
+            pin_dir_files(&alice) == pins,
+            "the pin directory is unchanged",
+        );
+        Ok(())
+    });
+}
+
+/// With a read-only HOME and no pin or sidecar for the vault (trust from
+/// MURK_TRUSTED_SIGNERS), a keyed merge publishes its result without the
+/// pin lock, warns, and creates no file in the pin directory.
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_merge_no_pin() {
+    rows::check("R-I5-readonly:merge-no-pin", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let (entry, _) = machine.signer_entry(&repo);
+        let alice = Person::of(machine);
+        forked_keys(&alice, &repo)?;
+        for (file, _) in pin_dir_files(&alice) {
+            fs::remove_file(file).unwrap();
+        }
+
+        let env = [("MURK_TRUSTED_SIGNERS", entry.as_str())];
+        let (ok, stderr) = with_read_only_home(&alice, || merge_with(&alice, &repo, "side", &env));
+        p.note(stderr.clone());
+        p.require(driver_spoke(&stderr), "the murk driver ran")?;
+        p.reached();
+        p.target(ok, "git merge succeeds");
+        p.target(
+            stderr.contains("without the trust pin lock"),
+            "a warning says the result is written without the pin lock",
+        );
+        let vault = repo.join(".murk");
+        p.target(
+            has_secret(&vault, "SIDE_K") && has_secret(&vault, "MAIN_K"),
+            "the merged vault holds both sides' keys",
+        );
+        p.target(
+            pin_dir_files(&alice).is_empty(),
+            "no pin, sidecar or lock file was created",
         );
         Ok(())
     });

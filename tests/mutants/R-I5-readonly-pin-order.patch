@@ -1,0 +1,19 @@
+--- a/src/commands/secrets.rs
++++ b/src/commands/secrets.rs
+@@ -182,8 +182,6 @@
+     ));
+     let needs_desc_hint = write.needs_desc_hint;
+ 
+-    save_vault(vault_path, &mut vault, &original, &current);
+-
+     report_move(key, &write);
+     eprintln!(
+         "{} added {}{}",
+@@ -191,6 +189,7 @@
+         key.bold(),
+         tiers_label(&write.tiers)
+     );
++    save_vault(vault_path, &mut vault, &original, &current);
+ 
+     if needs_desc_hint {
+         eprintln!(

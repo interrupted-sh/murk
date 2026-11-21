@@ -1032,7 +1032,8 @@ impl MergeDriverOutput {
 /// [`crate::pins::Snapshot`]): only if the trust pin, its sidecar, `%A`, the
 /// branch and the commit are as they were before the merge read them. When
 /// the trust state changed, the merge runs again from the same inputs
-/// against the new pin, up to [`crate::pins::PUBLISH_ATTEMPTS`] times. When
+/// against the new pin, up to [`crate::pins::PUBLISH_ATTEMPTS`] times with a
+/// short random wait before each new attempt. When
 /// `%A` changed, it stops. Every failure leaves `%A` as it was. A merge
 /// writes no pin. Returns the output and whether `%A` was written.
 pub fn run_merge_driver_into(
@@ -1045,7 +1046,10 @@ pub fn run_merge_driver_into(
     use crate::pins::{Publish, Snapshot, TrustPin};
     type NoRecord = fn(Option<&TrustPin>, &crate::trust::HeadState, Option<&str>) -> TrustPin;
 
-    for _ in 0..crate::pins::PUBLISH_ATTEMPTS {
+    for attempt in 1..=crate::pins::PUBLISH_ATTEMPTS {
+        if attempt > 1 {
+            crate::pins::backoff(attempt);
+        }
         // The snapshot comes first: every pin read of the merge is then at
         // least as new as the token, so a change after any of them is seen.
         let snapshot = Snapshot::take(vault_path, target)?;

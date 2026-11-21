@@ -182,6 +182,8 @@ pub(crate) fn cmd_add(
     ));
     let needs_desc_hint = write.needs_desc_hint;
 
+    save_vault(vault_path, &mut vault, &original, &current);
+
     report_move(key, &write);
     eprintln!(
         "{} added {}{}",
@@ -196,8 +198,6 @@ pub(crate) fn cmd_add(
             format!("run: murk describe {key} \"your description\"").dimmed()
         );
     }
-
-    save_vault(vault_path, &mut vault, &original, &current);
 }
 
 pub(crate) fn cmd_import(
@@ -287,6 +287,7 @@ pub(crate) fn cmd_import(
         imported.push((key, write));
     }
 
+    save_vault(vault_path, &mut vault, &original, &current);
     for (key, write) in &imported {
         report_move(key, write);
         eprintln!(
@@ -296,8 +297,6 @@ pub(crate) fn cmd_import(
             tiers_label(&write.tiers)
         );
     }
-
-    save_vault(vault_path, &mut vault, &original, &current);
     let count = imported.len();
     let label = match &tier {
         Some(SecretTier::Group(name)) => format!(" into group {name}"),
@@ -352,6 +351,7 @@ pub(crate) fn cmd_generate(
         &pubkey,
     ));
 
+    save_vault(vault_path, &mut vault, &original, &current);
     report_move(key, &write);
     eprintln!(
         "{} generated {}{}",
@@ -359,8 +359,6 @@ pub(crate) fn cmd_generate(
         key.bold(),
         tiers_label(&write.tiers)
     );
-
-    save_vault(vault_path, &mut vault, &original, &current);
 }
 
 pub(crate) fn cmd_rotate(

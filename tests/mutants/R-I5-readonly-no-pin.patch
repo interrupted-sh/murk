@@ -1,0 +1,11 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -1063,7 +1063,7 @@
+             // without a pin write. The comparison below still refuses a
+             // target, or a pin or sidecar, that appeared since the snapshot.
+             Err(e)
+-                if e.read_only
++                if e.read_only && false
+                     && self.token.pin.file.is_none()
+                     && self.token.pin.sidecar.is_none() =>
+             {

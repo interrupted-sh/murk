@@ -1,0 +1,14 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -1062,10 +1062,7 @@
+             // made against. Publish as murk 0.15.2 did, without the lock and
+             // without a pin write. The comparison below still refuses a
+             // target, or a pin or sidecar, that appeared since the snapshot.
+-            Err(e)
+-                if e.read_only
+-                    && self.token.pin.file.is_none()
+-                    && self.token.pin.sidecar.is_none() =>
++            Err(e) if e.read_only =>
+             {
+                 unlocked = Some((e.message, writes && record.is_some()));
+                 writes = false;

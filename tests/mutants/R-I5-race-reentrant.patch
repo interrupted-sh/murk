@@ -1,7 +1,7 @@
 --- a/src/pins.rs
 +++ b/src/pins.rs
-@@ -784,7 +784,7 @@
-         staged.persist(&self.target).map_err(|e| e.to_string())?;
+@@ -1093,7 +1093,7 @@
+         }
          if let Some(record) = record.filter(|_| writes) {
              let pin = record(self.pin.as_ref(), &head, commit.as_deref());
 -            if let Err(e) = write(&self.vault_path, &pin) {
