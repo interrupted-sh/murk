@@ -362,7 +362,7 @@ pub fn existing_pin_path(vault_path: &str) -> Option<PathBuf> {
 /// so a vault that was created before `git init`, or pinned by an older
 /// release, keeps its pin; writes always go to the first.
 fn pin_paths(vault_path: &str) -> Vec<PathBuf> {
-    let Some(dir) = pin_dir() else {
+    let Some(dir) = pin_dir(vault_path) else {
         return Vec::new();
     };
     let p = std::path::Path::new(vault_path);
@@ -425,11 +425,12 @@ pub fn pin_writes_off() -> bool {
     std::env::var_os("MURK_NO_SIGNER_PIN").is_some()
 }
 
-/// Whether a trust pin can be stored on this machine — false when opted out
-/// ([`pin_writes_off`]) or when there is no usable home directory (see
-/// [`pin_dir`]). A pin that already exists is still read under the opt-out.
-pub fn signer_pin_available() -> bool {
-    !pin_writes_off() && pin_dir().is_some()
+/// Whether a trust pin for `vault_path` can be stored on this machine —
+/// false when opted out ([`pin_writes_off`]) or when there is no usable pin
+/// directory (see [`pin_dir`]). A pin that already exists is still read
+/// under the opt-out.
+pub fn signer_pin_available(vault_path: &str) -> bool {
+    !pin_writes_off() && pin_dir(vault_path).is_some()
 }
 
 /// The pin file a write goes to, or why no pin can be written.
@@ -440,7 +441,7 @@ fn writable_pin_path(vault_path: &str) -> Result<PathBuf, String> {
         );
     }
     pin_path(vault_path).ok_or_else(|| {
-        "no trust pin can be stored because there is no HOME. Set MURK_TRUSTED_SIGNERS instead"
+        "no trust pin can be stored: there is no usable HOME, or git tracks a file in the trust pin directory. Set MURK_TRUSTED_SIGNERS instead"
             .to_string()
     })
 }
@@ -692,8 +693,8 @@ pub fn vault_location(vault_path: &str) -> Option<(String, String)> {
 /// vault id, with that pin file. Read without the pin lock: both files are
 /// replaced by an atomic rename, so a read sees one whole version. A file
 /// that cannot be read or parsed is left out.
-pub fn peek_sidecars() -> Vec<(PathBuf, Sidecar)> {
-    let Some(dir) = pin_dir() else {
+pub fn peek_sidecars(vault_path: &str) -> Vec<(PathBuf, Sidecar)> {
+    let Some(dir) = pin_dir(vault_path) else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -733,18 +734,130 @@ pub fn remove(pin_file: &Path) -> Result<(), String> {
         })
 }
 
-/// The directory that holds the pins: `~/.config/murk/signer-pins`. `None`
-/// when there is no usable home directory (see [`crate::env::home_dir`]): an
-/// empty or relative `HOME` would put the pin inside the checkout, where a
-/// pin committed to the repository would become this machine's trust anchor.
-/// murk then reads and writes no pin, as with no `HOME` at all.
-fn pin_dir() -> Option<PathBuf> {
-    Some(
-        crate::env::home_dir()?
-            .join(".config")
-            .join("murk")
-            .join("signer-pins"),
-    )
+/// The directory that holds the pins for `vault_path`:
+/// `~/.config/murk/signer-pins`. `None` when there is no usable home
+/// directory (see [`crate::env::home_dir`]): an empty or relative `HOME`
+/// would put the pin inside the checkout, where a pin committed to the
+/// repository would become this machine's trust anchor. Also `None` when
+/// git tracks a file in the directory (see [`committed_dir`]), which an
+/// absolute `HOME` inside the checkout allows. murk then reads and writes
+/// no pin, as with no `HOME` at all.
+fn pin_dir(vault_path: &str) -> Option<PathBuf> {
+    let dir = crate::env::home_dir()?
+        .join(".config")
+        .join("murk")
+        .join("signer-pins");
+    let committed = committed_dir(
+        vault_path,
+        &dir,
+        "the trust pin directory",
+        "murk uses no trust pin for this vault: every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer",
+    );
+    (!committed).then_some(dir)
+}
+
+/// Whether the directory `dir` under HOME (`what` names it in the warning)
+/// is inside the work tree of the vault at `vault_path` and git tracks a
+/// file in it, so a repository can supply this machine's trust pin or
+/// stored key (for example with `HOME` set to the checkout root). A git
+/// command that fails counts as tracked. Warns once per directory when the
+/// answer is yes, with `consequence`.
+///
+/// The work tree is found lexically (see [`crate::git::worktree_root`]), so
+/// a directory outside it costs no git command. Inside it, every call runs
+/// `git ls-files` again, so a long-lived process (a binding, `murk mcp`)
+/// sees a file that git starts to track. The one exception is a thread
+/// that holds the pin lock: it runs no git command outside [`LOCK_ORDER`],
+/// so it takes the last answer, which every lock path computed just before
+/// it took the lock (it computes the pin path first). With no answer yet,
+/// it counts the directory as tracked.
+pub(crate) fn committed_dir(vault_path: &str, dir: &Path, what: &str, consequence: &str) -> bool {
+    type Answers = BTreeMap<(PathBuf, PathBuf), Option<String>>;
+    static LAST: std::sync::Mutex<Answers> = std::sync::Mutex::new(BTreeMap::new());
+    static WARNED: std::sync::Mutex<BTreeSet<(PathBuf, PathBuf)>> =
+        std::sync::Mutex::new(BTreeSet::new());
+
+    let Some(root) = vault_work_tree(vault_path) else {
+        return false;
+    };
+    let real = real_path(dir);
+    if !real.starts_with(&root) {
+        return false;
+    }
+    let key = (root, real);
+    let Ok(mut last) = LAST.lock() else {
+        return true;
+    };
+    let refusal = if check_lock_order().is_err() {
+        last.get(&key).cloned().unwrap_or_else(|| {
+            Some(format!(
+                "murk did not check if git tracks a file in it before it locked the trust pin ({LOCK_ORDER})"
+            ))
+        })
+    } else {
+        let answer = match tracked_in(&key.0, &key.1) {
+            Ok(None) => None,
+            Ok(Some(file)) => Some(format!("git tracks {file} in it")),
+            Err(e) => Some(format!(
+                "murk cannot ask git if a file in it is committed: {e}"
+            )),
+        };
+        last.insert(key.clone(), answer.clone());
+        answer
+    };
+    drop(last);
+    let Some(refusal) = refusal else {
+        return false;
+    };
+    if WARNED.lock().map_or(true, |mut w| w.insert(key.clone())) {
+        eprintln!(
+            "warn {what} {} is inside the git work tree {}, and {refusal}. A file that a repository commits must never act as this machine's own, so {consequence}. Set HOME to a directory outside the repository",
+            key.1.display(),
+            key.0.display(),
+        );
+    }
+    true
+}
+
+/// The work tree that holds the vault at `vault_path`, as a real path:
+/// the nearest ancestor of its resolved directory with a `.git` entry.
+fn vault_work_tree(vault_path: &str) -> Option<PathBuf> {
+    let abs = std::env::current_dir().ok()?.join(vault_path);
+    let resolved = crate::git::real_parent(&abs);
+    crate::git::worktree_root(resolved.parent()?)
+}
+
+/// `path` with its nearest existing ancestor resolved to a real path (see
+/// [`crate::git::real_dir`]) and the rest kept as given.
+fn real_path(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|dir| {
+            let real = crate::git::real_dir(dir)?;
+            Some(real.join(path.strip_prefix(dir).ok()?))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// The first file git tracks under `dir` in the work tree `root`, relative
+/// to `root`, if any.
+fn tracked_in(root: &Path, dir: &Path) -> Result<Option<String>, String> {
+    let out = crate::git::git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--"])
+        .arg(dir)
+        .output()
+        .map_err(|e| format!("running git ls-files: {e}"))?;
+    if !out.status.success() {
+        return Err(
+            crate::terminal_text(String::from_utf8_lossy(&out.stderr).trim(), true).into_owned(),
+        );
+    }
+    Ok(out
+        .stdout
+        .split(|b| *b == 0)
+        .find(|name| !name.is_empty())
+        .map(|name| crate::terminal_text(&String::from_utf8_lossy(name), false).into_owned()))
 }
 
 /// Drop from `pin` every 32-byte signing key [`crate::signing::checked_verifying_key`]
@@ -933,6 +1046,9 @@ pub(crate) struct LockError {
     /// The pin directory or the lock file cannot be created or opened for
     /// writing: permission denied, or a read-only file system.
     read_only: bool,
+    /// Whether the lock file, not the pin directory, is the path that
+    /// could not be opened.
+    lock_file: bool,
 }
 
 impl From<LockError> for String {
@@ -942,13 +1058,23 @@ impl From<LockError> for String {
 }
 
 impl LockError {
-    fn io(what: &str, path: &Path, e: &std::io::Error) -> Self {
+    /// A lock error with no path to blame.
+    fn other(message: String) -> Self {
+        Self {
+            message,
+            read_only: false,
+            lock_file: false,
+        }
+    }
+
+    fn io(what: &str, path: &Path, e: &std::io::Error, lock_file: bool) -> Self {
         Self {
             message: format!("cannot {what} {}: {e}", path.display()),
             read_only: matches!(
                 e.kind(),
                 std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
             ),
+            lock_file,
         }
     }
 }
@@ -956,9 +1082,8 @@ impl LockError {
 /// Take the pin lock for `vault_path`. Errors when there is no home
 /// directory, or when this thread already holds a pin lock.
 pub(crate) fn lock(vault_path: &str) -> Result<PinLock, LockError> {
-    let path = pin_path(vault_path).ok_or_else(|| LockError {
-        message: "no home directory to keep the trust pin in".to_string(),
-        read_only: false,
+    let path = pin_path(vault_path).ok_or_else(|| {
+        LockError::other("no home directory to keep the trust pin in".to_string())
     })?;
     open_lock(&path)
 }
@@ -967,15 +1092,11 @@ pub(crate) fn lock(vault_path: &str) -> Result<PinLock, LockError> {
 fn open_lock(path: &Path) -> Result<PinLock, LockError> {
     use fs2::FileExt;
 
-    check_lock_order().map_err(|message| LockError {
-        message,
-        read_only: false,
-    })?;
-    let parent = path.parent().ok_or_else(|| LockError {
-        message: format!("invalid trust pin path {}", path.display()),
-        read_only: false,
-    })?;
-    std::fs::create_dir_all(parent).map_err(|e| LockError::io("create", parent, &e))?;
+    check_lock_order().map_err(LockError::other)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| LockError::other(format!("invalid trust pin path {}", path.display())))?;
+    std::fs::create_dir_all(parent).map_err(|e| LockError::io("create", parent, &e, false))?;
     let lock_path = path.with_extension("lock");
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).truncate(false).write(true);
@@ -984,15 +1105,33 @@ fn open_lock(path: &Path) -> Result<PinLock, LockError> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let file = opts
-        .open(&lock_path)
-        .map_err(|e| LockError::io("open", &lock_path, &e))?;
-    file.lock_exclusive().map_err(|e| LockError {
-        message: format!("cannot lock {}: {e}", lock_path.display()),
-        read_only: false,
+    let file = opts.open(&lock_path).map_err(|e| {
+        // A lock file that will not open for writing in a directory that
+        // is writable is the lock file's fault; otherwise the directory's.
+        let lock_file = e.kind() == std::io::ErrorKind::PermissionDenied
+            && std::fs::symlink_metadata(&lock_path).is_ok()
+            && dir_writable(parent);
+        LockError::io("open", &lock_path, &e, lock_file)
     })?;
+    file.lock_exclusive()
+        .map_err(|e| LockError::other(format!("cannot lock {}: {e}", lock_path.display())))?;
     PIN_LOCKS_HELD.with(|n| n.set(n.get() + 1));
     Ok(PinLock { file })
+}
+
+/// Whether this process may create files in `dir`.
+fn dir_writable(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(dir.as_os_str().as_bytes())
+            // SAFETY: `path` is a valid NUL-terminated string for the call.
+            .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(dir).is_ok_and(|m| !m.permissions().readonly())
+    }
 }
 
 /// How many times a save or a merge prepares its result when the trust
@@ -1105,7 +1244,7 @@ impl Snapshot {
     {
         #[cfg(test)]
         test_hooks::run(&test_hooks::BEFORE_LOCK);
-        let mut writes = signer_pin_available();
+        let mut writes = signer_pin_available(&self.vault_path);
         let needs_lock = pin_path(&self.vault_path).is_some()
             && (writes || self.token.pin.file.is_some() || self.token.pin.sidecar.is_some());
         // Lock order: the caller may hold the vault lock; this takes the
@@ -1135,11 +1274,23 @@ impl Snapshot {
                 let dir = pin_path(&self.vault_path)
                     .and_then(|p| p.parent().map(Path::to_path_buf))
                     .unwrap_or_default();
+                let (cause, fix) = if e.lock_file {
+                    (
+                        format!(
+                            "The lock file in the trust pin directory {} does not open for writing",
+                            dir.display()
+                        ),
+                        "Make the lock file writable, or delete it so that murk makes a new one",
+                    )
+                } else {
+                    (
+                        format!("The trust pin directory {} is read-only", dir.display()),
+                        "Run murk with a writable HOME",
+                    )
+                };
                 return Err(format!(
-                    "{}. The trust pin directory {} is read-only, and it holds a trust pin for {}, so murk cannot write the vault under the pin's lock. Nothing was written. Run murk with a writable HOME. (MURK_NO_SIGNER_PIN helps only on a machine that has no pin for this vault.)",
-                    e.message,
-                    dir.display(),
-                    self.vault_path
+                    "{}. {cause}. The directory holds a trust pin for {}, so murk cannot write the vault under the pin's lock. Nothing was written. {fix}. (MURK_NO_SIGNER_PIN helps only on a machine that has no pin for this vault.)",
+                    e.message, self.vault_path
                 ));
             }
             Err(e) => return Err(e.into()),
@@ -1287,6 +1438,38 @@ mod tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
         out
+    }
+
+    /// A long-lived process (a binding, `murk mcp`) that saw an untracked
+    /// pin directory must stop using it once git tracks a file there, and
+    /// use it again once git no longer does.
+    #[test]
+    fn committed_dir_follows_the_index_within_one_process() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        let git = |args: &[&str]| {
+            let ok = crate::git::git_command()
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let dir = root.join("home").join("signer-pins");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pin.json"), "{}").unwrap();
+        let vault = root.join(".murk");
+        let vault = vault.to_str().unwrap();
+        let committed = || committed_dir(vault, &dir, "the test directory", "nothing happens");
+
+        assert!(!committed(), "an untracked file is not committed");
+        git(&["add", "--", "home/signer-pins/pin.json"]);
+        assert!(committed(), "the same process sees the file git now tracks");
+        git(&["rm", "-q", "--cached", "--", "home/signer-pins/pin.json"]);
+        assert!(!committed(), "and sees it untracked again");
     }
 
     #[test]

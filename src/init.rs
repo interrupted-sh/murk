@@ -309,7 +309,7 @@ pub fn pin_created_vault(
     vault: &types::Vault,
     identity: &crate::crypto::MurkIdentity,
 ) -> Result<(), String> {
-    if !crate::pins::signer_pin_available() {
+    if !crate::pins::signer_pin_available(vault_path) {
         return Ok(());
     }
     let creator = vault.recipients.first().cloned().unwrap_or_default();

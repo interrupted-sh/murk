@@ -34,7 +34,9 @@ Do these steps on each machine that uses murk.
 7. Upgrade every component from steps 1 to 6 to the new release.
 8. In each checkout of each vault, run `murk verify` once with the new
    release. Do this before any older component runs again. It copies each
-   removal record into a file that older components do not touch.
+   removal record into a file that older components do not touch. Unset
+   `MURK_NO_SIGNER_PIN` for this step: when it is set, `murk verify` copies
+   nothing.
 9. If you re-added a removed member with murk 0.15 or earlier, run
    `murk trust --vault P --re-add KEY` again with the new release. A re-add
    made with an older component does not count.
@@ -57,6 +59,11 @@ Do these steps on each machine that uses murk.
   reads and writes no trust pin, and reads no stored key. Set `HOME` to an
   absolute path, or set `MURK_KEY` or `MURK_KEY_FILE` and
   `MURK_TRUSTED_SIGNERS`.
+- **A trust pin or key file that git tracks is not used.** When `HOME` is
+  inside the checkout (for example `HOME=/workspace` in a container) and git
+  tracks a file in the trust pin directory or a key directory, murk warns
+  and uses no trust pin, or no stored key, for that vault. Set `HOME` to a
+  directory outside the repository.
 - **`MURK_EXPECTED_VAULT` set but empty is an error.** A missing CI secret
   expands to an empty string, so murk fails closed. To turn the check off,
   unset the variable.

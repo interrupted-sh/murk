@@ -1770,6 +1770,56 @@ fn row_r_i5_readonly_pin_order() {
     readonly_pin_fails_closed("R-I5-readonly:pin-order");
 }
 
+/// As :pin, for the group commands: with a read-only HOME and a pin for the
+/// vault, `murk group create` and `murk group add` fail closed, and neither
+/// says the group was created or gained a member.
+#[cfg(unix)]
+#[test]
+fn row_r_i5_readonly_pin_order_group() {
+    rows::check("R-I5-readonly:pin-order-group", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let alice = Person::of(machine);
+        let bob = age::x25519::Identity::generate().to_public().to_string();
+        let setup = alice.run(&repo, &["circle", "authorize", &bob, "--name", "bob"]);
+        p.require(setup.ok, format!("bob is authorized: {}", setup.said()))?;
+        let setup = alice.run(&repo, &["group", "create", "ops"]);
+        p.require(setup.ok, format!("group ops is created: {}", setup.said()))?;
+        let pins = pin_dir_files(&alice);
+        p.require(!pins.is_empty(), "alice's machine has a pin for the vault")?;
+        let before = fs::read(repo.join(".murk")).unwrap();
+
+        let (create, add) = with_read_only_home(&alice, || {
+            (
+                alice.run(&repo, &["group", "create", "dev"]),
+                alice.run(&repo, &["group", "add", "ops", "--member", "bob"]),
+            )
+        });
+        p.reached();
+        p.note(create.stderr.clone());
+        p.note(add.stderr.clone());
+        p.target(!create.ok, "murk group create fails");
+        p.target(!add.ok, "murk group add fails");
+        p.target(
+            !create.stderr.contains("gained") && !create.stderr.contains("created group"),
+            "nothing claims group dev was created or gained a member",
+        );
+        p.target(
+            !add.stderr.contains("gained") && !add.stderr.contains("added bob"),
+            "nothing claims group ops gained bob",
+        );
+        p.target(
+            fs::read(repo.join(".murk")).unwrap() == before,
+            "the vault file is unchanged",
+        );
+        p.target(
+            pin_dir_files(&alice) == pins,
+            "the pin directory is unchanged",
+        );
+        Ok(())
+    });
+}
+
 /// With `HOME` set to an empty or a relative path, murk uses no key store:
 /// such a HOME resolves against the working directory, so a key file
 /// committed in the checkout must never be read, and `murk init` must never
@@ -1833,6 +1883,99 @@ fn row_r_i5_home_key_store() {
                 format!("with a {label} HOME, one warning names HOME"),
             );
         }
+        Ok(())
+    });
+}
+
+/// With an absolute `HOME` equal to the checkout root, the key store is
+/// inside the checkout, so a repository can commit a key file there. A key
+/// file that git tracks is never read: the load finds no stored key, with
+/// one warning that names the tracked file. The vault is anchored by
+/// MURK_TRUSTED_SIGNERS, so only the key decides whether the read succeeds.
+#[test]
+fn row_r_i5_home_key_in_checkout() {
+    rows::check("R-I5-home:key-in-checkout", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let (entry, _) = machine.signer_entry(&repo);
+        // alice's stored key, committed at the path HOME=<checkout> reads.
+        let planted = repo.join(".config").join("murk").join("keys");
+        fs::create_dir_all(&planted).unwrap();
+        let keys = machine.home.join(".config").join("murk").join("keys");
+        for entry in fs::read_dir(&keys).unwrap() {
+            let path = entry.unwrap().path();
+            fs::copy(&path, planted.join(path.file_name().unwrap())).unwrap();
+        }
+        commit(&repo, "alice's vault and a key file");
+        let get_with_home = |home: &Path| {
+            let mut cmd = machine.murk(&repo);
+            cmd.env("HOME", home)
+                .env("MURK_TRUSTED_SIGNERS", &entry)
+                .args(["get", "DB_URL"]);
+            out(cmd)
+        };
+        let control = get_with_home(&machine.home);
+        p.require(
+            control.ok && control.stdout.contains("prod-db"),
+            format!("the stored key reads with a real HOME: {}", control.said()),
+        )?;
+
+        let get = get_with_home(&repo);
+        p.reached();
+        p.note(get.said());
+        p.target(
+            !get.ok && !get.stdout.contains("prod-db"),
+            "with HOME at the checkout root, the committed key file is not read",
+        );
+        p.target(
+            get.stderr.matches("git tracks .config/murk/keys/").count() == 1,
+            "one warning names the tracked key file",
+        );
+        Ok(())
+    });
+}
+
+/// A HOME that is itself a git work tree (a dotfiles repository) with a
+/// vault in a folder of HOME that has no repository of its own: the key
+/// store is inside the vault's work tree, but git tracks no file in it, so
+/// the stored key reads as anywhere else. The vault is anchored by
+/// MURK_TRUSTED_SIGNERS, so only the key decides whether the read succeeds.
+#[test]
+fn row_r_i5_home_key_work_tree_untracked() {
+    rows::check("R-I5-home:key-work-tree-untracked", |p| {
+        let base = TempDir::new().unwrap();
+        let alice = Machine::new(base.path(), "alice");
+        let proj = alice.home.join("proj");
+        alice.init(&proj, "alice");
+        alice.add(&proj, "DB_URL", "prod-db");
+        let (entry, _) = alice.signer_entry(&proj);
+        // HOME becomes a dotfiles repository, which keeps murk's own files
+        // out of git.
+        git_ok(&alice.home, &["init", "-q", "-b", "main"]);
+        fs::write(alice.home.join(".gitignore"), ".config/murk/\n").unwrap();
+        commit(&alice.home, "dotfiles and the vault, not the key");
+        let tracked = git(&alice.home, &["ls-files", "--", ".config/murk/keys"]);
+        p.require(
+            tracked.status.success() && tracked.stdout.is_empty(),
+            "git tracks no file in the key store",
+        )?;
+
+        let get = out({
+            let mut cmd = alice.murk(&proj);
+            cmd.env("MURK_TRUSTED_SIGNERS", &entry)
+                .args(["get", "DB_URL"]);
+            cmd
+        });
+        p.reached();
+        p.note(get.said());
+        p.target(
+            get.ok && get.stdout == "prod-db\n",
+            "the stored key reads the vault",
+        );
+        p.target(
+            !get.stderr.contains("key directory"),
+            "no warning about the key store",
+        );
         Ok(())
     });
 }
@@ -1911,6 +2054,117 @@ fn row_r_i5_home_relative() {
                 format!("with a {label} HOME, one warning names HOME"),
             );
         }
+        Ok(())
+    });
+}
+
+/// With an absolute `HOME` equal to the checkout root (a container with
+/// `HOME=/workspace`, say), the pin directory is inside the checkout, so a
+/// repository can commit a pin there. A pin that git tracks is never used:
+/// a planted pin that trusts Mallory does not let her vault load. It is
+/// refused as on a machine with no pin, with one warning that names the
+/// tracked file.
+#[test]
+fn row_r_i5_home_in_checkout() {
+    rows::check("R-I5-home:in-checkout", |p| {
+        let base = TempDir::new().unwrap();
+        let (machine, repo) = alice_repo(base.path());
+        let alice = Person::of(machine);
+        commit(&repo, "alice's vault");
+
+        // Mallory's vault lists alice; the pin a normal HOME would write for
+        // it (the file name depends only on the repository) is committed in
+        // the checkout, where HOME=<checkout> reads it.
+        let forged = mallory_vault(
+            base.path(),
+            &[("alice", alice.machine.pubkey())],
+            &[("DB_URL", "evil")],
+        );
+        fs::copy(&forged, repo.join(".murk")).unwrap();
+        let planter = Person::new(base.path(), "planter", &alice.key);
+        let planted = planter.trust(&repo, ".murk");
+        p.require(planted.ok, format!("the pin to plant: {}", planted.said()))?;
+        let planted_dir = repo.join(".config").join("murk").join("signer-pins");
+        fs::create_dir_all(&planted_dir).unwrap();
+        for entry in fs::read_dir(pin_dir(&planter.machine)).unwrap() {
+            let path = entry.unwrap().path();
+            fs::copy(&path, planted_dir.join(path.file_name().unwrap())).unwrap();
+        }
+        commit(&repo, "mallory's vault and pin");
+        let control = planter.get(&repo, ".murk", "DB_URL");
+        p.require(
+            control.stdout.contains("evil"),
+            "the planted pin trusts Mallory where it is read",
+        )?;
+
+        let get = {
+            let mut cmd = alice.murk(&repo);
+            cmd.env("HOME", &repo).args(["get", "DB_URL"]);
+            out(cmd)
+        };
+        p.reached();
+        p.note(get.said());
+        p.target(
+            !get.ok && !get.stdout.contains("evil"),
+            "with HOME at the checkout root, Mallory's vault is refused",
+        );
+        p.target(
+            get.stderr.contains("not trusted on this machine"),
+            "the refusal is the no-pin one",
+        );
+        p.target(
+            get.stderr
+                .matches("git tracks .config/murk/signer-pins/")
+                .count()
+                == 1,
+            "one warning names the tracked pin file",
+        );
+        Ok(())
+    });
+}
+
+/// A HOME that is itself a git work tree (a dotfiles repository) with a
+/// vault in a folder of HOME that has no repository of its own: the pin
+/// directory is inside the vault's work tree, but git tracks no file in it,
+/// so the pin applies as anywhere else and the signed vault loads.
+#[test]
+fn row_r_i5_home_work_tree_untracked() {
+    rows::check("R-I5-home:work-tree-untracked", |p| {
+        let base = TempDir::new().unwrap();
+        let alice = Machine::new(base.path(), "alice");
+        let proj = alice.home.join("proj");
+        alice.init(&proj, "alice");
+        alice.add(&proj, "DB_URL", "prod-db");
+        // HOME becomes a dotfiles repository, which keeps murk's own files
+        // out of git.
+        git_ok(&alice.home, &["init", "-q", "-b", "main"]);
+        fs::write(alice.home.join(".gitignore"), ".config/murk/\n").unwrap();
+        commit(&alice.home, "dotfiles and the vault, not the pin");
+        let tracked = git(&alice.home, &["ls-files", "--", ".config/murk/signer-pins"]);
+        p.require(
+            tracked.status.success() && tracked.stdout.is_empty(),
+            "git tracks no file in the pin directory",
+        )?;
+        p.require(
+            fs::read_dir(pin_dir(&alice)).is_ok_and(|d| d.count() > 0),
+            "alice's machine has a pin for the vault",
+        )?;
+
+        let get = out({
+            let mut cmd = alice.murk(&proj);
+            cmd.args(["get", "DB_URL"]);
+            cmd
+        });
+        p.reached();
+        p.note(get.said());
+        p.target(
+            get.ok && get.stdout == "prod-db\n",
+            "the signed vault loads: the pin applies",
+        );
+        p.target(
+            !get.stderr.contains("trust pin directory"),
+            "no warning about the pin directory",
+        );
         Ok(())
     });
 }
