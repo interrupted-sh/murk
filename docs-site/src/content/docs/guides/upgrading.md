@@ -75,6 +75,21 @@ Do these steps on each machine that uses murk.
 - **Saves in many worktrees at once can stop.** A save that loses the race
   for the shared pin 16 times stops with "nothing was written … Running the
   command again is safe." Run the command again.
+- **A vault that lists a removed member can be refused in a shallow or
+  partial clone.** On a branch this machine accepted before, murk reads
+  the vault file's git history to see whether the branch merged the
+  removal. When it cannot decide, it refuses and says why, with the fix for
+  that case: `git fetch --unshallow` for a shallow clone whose boundary
+  cuts the history it reads; `git fetch --refetch --no-filter <remote>`,
+  then `git config --unset remote.<remote>.promisor` and
+  `git config --unset remote.<remote>.partialclonefilter`, for a blobless
+  clone missing old vault files. A history over 10000 vault revisions, a
+  rewritten history, or a vault revision over 8 MiB or that does not parse
+  cannot be fixed by fetching: review the branch, then run
+  `murk trust --vault P --re-add KEY`. That trusts the member again on
+  every branch on this machine, so fix the history first where you can. CI
+  runners that use `MURK_TRUSTED_SIGNERS` keep no removal records and are
+  not affected.
 
 ## When murk says the pin no longer records a removal
 

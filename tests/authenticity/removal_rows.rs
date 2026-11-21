@@ -702,26 +702,32 @@ fn row_r_i10_h_pr_flow_unmerged() {
     });
 }
 
+/// What `murk trust --re-add` does, as every refusal that offers it says.
+const READD_SCOPE: &str = "it trusts them again on every branch on this machine";
+
 /// Whether `stderr` is the refusal for a removal that applies only because
-/// git could not show whether the branch merged it (`why` names the cause),
-/// naming bob and the ways out.
-fn refused_unchecked(stderr: &str, why: &str) -> bool {
+/// git could not show whether the branch merged it: `why` names the cause
+/// and `way` the way out that fits it; the refusal also names bob,
+/// `--re-add` and what `--re-add` does.
+fn refused_unchecked(stderr: &str, why: &str, way: &str) -> bool {
     stderr.contains("murk cannot tell whether this branch merged that removal")
         && stderr.contains(why)
+        && stderr.contains(way)
         && names_re_add(stderr)
-        && stderr.contains("git fetch")
+        && stderr.contains(READD_SCOPE)
 }
 
 /// alice's load on main, which must be refused for the unchecked history
-/// `why`, print nothing on stdout, and leave her next save undone.
-fn unchecked_load_refused(s: &Scene, p: &mut Probe, why: &str) {
+/// `why` with the way out `way`, print nothing on stdout, and leave her
+/// next save undone.
+fn unchecked_load_refused(s: &Scene, p: &mut Probe, why: &str, way: &str) {
     let get = s.run(&s.alice, &["get", "DB_URL"]);
     p.reached();
     let stderr = text(&get.stderr);
     p.note(format!("get on main: {}", stderr.trim()));
     p.target(
-        !get.status.success() && refused_unchecked(&stderr, why),
-        "the load on main is refused and says the history could not be checked",
+        !get.status.success() && refused_unchecked(&stderr, why, way),
+        format!("the load on main is refused, says {why:?} and names {way:?}"),
     );
     p.target(text(&get.stdout).is_empty(), "nothing is printed on stdout");
     p.target(
@@ -778,7 +784,12 @@ fn row_r_i10_h_pr_flow_unknown() {
         put(&s.repo, &stale, "pr: change");
         let shallow = s.repo.join(".git").join("shallow");
         fs::write(&shallow, format!("{}\n", head_commit(&s.repo))).unwrap();
-        unchecked_load_refused(&s, p, "its history could not be checked");
+        unchecked_load_refused(
+            &s,
+            p,
+            "this is a shallow clone, and the history murk needs is past its boundary",
+            "`git fetch --unshallow`",
+        );
         fs::remove_file(&shallow).unwrap();
         let full = s.run(&s.alice, &["get", "DB_URL"]);
         p.target(
@@ -806,7 +817,12 @@ fn row_r_i10_h_pr_flow_cap() {
             "git fast-import ran",
         )?;
         put(&s.repo, &stale, "pr: change");
-        unchecked_load_refused(&s, p, "its history is too long to check");
+        unchecked_load_refused(
+            &s,
+            p,
+            "its history is too long to check",
+            "fetching more history cannot help",
+        );
         Ok(())
     });
 }
@@ -840,10 +856,197 @@ fn row_r_i10_h_pr_flow_junk() {
         let stderr = text(&get.stderr);
         p.note(format!("get on old: {}", stderr.trim()));
         p.target(
-            !get.status.success() && refused_unchecked(&stderr, "its history could not be checked"),
-            "the load on old is refused and says the history could not be checked",
+            !get.status.success()
+                && refused_unchecked(
+                    &stderr,
+                    "a vault revision in its history cannot be read",
+                    "fetching cannot fix a revision committed that way",
+                ),
+            "the load on old is refused and says a revision cannot be read",
         );
         p.target(text(&get.stdout).is_empty(), "nothing is printed on stdout");
+        Ok(())
+    });
+}
+
+/// alice's machine marked on `old` (her save there), cut before her
+/// removal of bob, which never merges there: old's vault lists bob and
+/// loads. Returns the scene and old's file.
+fn unmerged_old_scene() -> (Scene, Vec<u8>) {
+    let s = Scene::new();
+    git_ok(&s.repo, &["checkout", "-q", "-b", "old"]);
+    s.alice.add(&s.repo, "OLD_K", "old-k");
+    commit(&s.repo, "old: add OLD_K");
+    git_ok(&s.repo, &["checkout", "-q", "main"]);
+    s.revoke_bob();
+    git_ok(&s.repo, &["checkout", "-q", "old"]);
+    let old = working(&s.repo);
+    (s, old)
+}
+
+/// An oversized vault revision in the walk: on the unmerged `old`, a repo
+/// writer commits old's own file padded past the 8 MiB read limit, then
+/// old's file again. murk does not read a revision that large, so it cannot
+/// rule out that one dropped bob: the load is refused, never loaded.
+#[test]
+fn row_r_i10_h_pr_flow_oversize() {
+    check("R-I10-h:pr-flow-oversize", |p: &mut Probe| {
+        let (s, old) = unmerged_old_scene();
+        let control = s.run(&s.alice, &["get", "OLD_K"]);
+        p.require(
+            control.status.success(),
+            format!(
+                "old loads before the big revision: {}",
+                text(&control.stderr)
+            ),
+        )?;
+        let mut big = old.clone();
+        big.extend(std::iter::repeat_n(b' ', 9 * 1024 * 1024));
+        put(&s.repo, &big, "big");
+        put(&s.repo, &old, "old again");
+        let get = s.run(&s.alice, &["get", "OLD_K"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!(
+            "get on old: {}",
+            stderr.lines().next().unwrap_or_default()
+        ));
+        p.target(
+            !get.status.success()
+                && refused_unchecked(
+                    &stderr,
+                    "a vault revision in its history cannot be read",
+                    "fetching cannot fix",
+                )
+                && stderr.contains("over 8 MiB"),
+            "the load on old is refused and names the 8 MiB limit",
+        );
+        Ok(())
+    });
+}
+
+/// A shallow clone whose fetched history holds the whole walk is decided
+/// normally: on the unmerged `old`, with the shallow boundary at the commit
+/// alice's removal is recorded at (main's tip before her revoke, old's
+/// parent), old still loads.
+#[test]
+fn row_r_i10_h_pr_flow_shallow_decided() {
+    check("R-I10-h:pr-flow-shallow-decided", |p: &mut Probe| {
+        let (s, _) = unmerged_old_scene();
+        let (pin, _) = s.pin(&s.alice);
+        let recorded = pin["removed_at_commit"][s.bob.pubkey()]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        p.require(!recorded.is_empty(), "the removal is recorded at a commit")?;
+        fs::write(s.repo.join(".git").join("shallow"), format!("{recorded}\n")).unwrap();
+        let get = s.run(&s.alice, &["get", "OLD_K"]);
+        p.reached();
+        p.note(format!("get on old: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("old-k"),
+            "in the shallow clone, old, which never merged the removal, still loads",
+        );
+        Ok(())
+    });
+}
+
+/// A blobless clone of the repository: whether the walk can decide depends
+/// on the vault objects it needs, never on the clone being partial.
+/// alice's machine works in the clone: marked on main, she revokes bob on
+/// `topic` (her own save, never merged). Three more saves then land on main
+/// upstream (bob still listed), and alice pulls: the clone has not
+/// downloaded those revisions' vault files except the tip's, so murk cannot
+/// tell, and says it is a partial clone and how to download them. After
+/// `git fetch --refetch --no-filter origin`, main, which never merged the
+/// removal, loads.
+#[test]
+fn row_r_i10_h_pr_flow_partial() {
+    check("R-I10-h:pr-flow-partial", |p: &mut Probe| {
+        let s = Scene::new();
+        let origin = s.base.join("origin.git");
+        git_ok(
+            &s.base,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                s.repo.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        git_ok(&origin, &["config", "uploadpack.allowFilter", "true"]);
+        git_ok(
+            &origin,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let url = format!("file://{}", origin.display());
+        git_ok(
+            &s.base,
+            &["clone", "-q", "--filter=blob:none", &url, "clone"],
+        );
+        let clone = s.base.join("clone");
+        let alice = |args: &[&str]| {
+            s.alice
+                .with_key(&clone, &s.alice.key_file())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let trusted = alice(&["trust", "--yes"]);
+        p.require(
+            trusted.status.success(),
+            format!("alice trusts the clone's vault: {}", text(&trusted.stderr)),
+        )?;
+        let first = alice(&["get", "DB_URL"]);
+        p.require(
+            first.status.success(),
+            format!("alice loads main in the clone: {}", text(&first.stderr)),
+        )?;
+        git_ok(&clone, &["checkout", "-q", "-b", "topic"]);
+        let revoke = alice(&["circle", "revoke", &s.bob.pubkey()]);
+        p.require(
+            revoke.status.success(),
+            format!("alice revokes bob on topic: {}", text(&revoke.stderr)),
+        )?;
+        commit(&clone, "topic: revoke bob");
+        git_ok(&clone, &["checkout", "-q", "main"]);
+        for i in 1..=3 {
+            s.alice.add(&s.repo, &format!("UP{i}"), "up");
+            commit(&s.repo, &format!("main: up {i}"));
+        }
+        git_ok(&s.repo, &["push", "-q", origin.to_str().unwrap(), "main"]);
+        git_ok(&clone, &["pull", "-q", "--ff-only"]);
+        p.require(
+            lists(&fs::read(clone.join(".murk")).unwrap(), &s.bob.pubkey()),
+            "main lists bob",
+        )?;
+        let get = alice(&["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get in the blobless clone: {}", stderr.trim()));
+        p.target(
+            !get.status.success()
+                && refused_unchecked(
+                    &stderr,
+                    "this is a partial clone of origin",
+                    "`git fetch --refetch --no-filter origin`",
+                )
+                && stderr.contains("`git config --unset remote.origin.promisor`"),
+            "the load is refused as a partial clone, with the commands that download the history",
+        );
+        git_ok(
+            &clone,
+            &["fetch", "-q", "--refetch", "--no-filter", "origin"],
+        );
+        let after = alice(&["get", "DB_URL"]);
+        p.target(
+            after.status.success(),
+            format!(
+                "after the full fetch, main, which never merged the removal, loads: {}",
+                text(&after.stderr).trim()
+            ),
+        );
         Ok(())
     });
 }
@@ -941,6 +1144,18 @@ fn row_r_i10_h_pr_flow_side_unmerged() {
         p.target(
             get.status.success() && text(&get.stdout).contains("prod-db"),
             "main, which never merged either drop, still loads",
+        );
+        // `murk trust --re-add` here says what it sees: main lists bob, and
+        // the record goes for every branch.
+        let readd = s.run(&s.alice, &["trust", "--yes", "--re-add", &s.bob.pubkey()]);
+        let said = text(&readd.stderr);
+        p.note(format!("trust --re-add on main: {}", said.trim()));
+        p.target(
+            readd.status.success()
+                && said.contains("the removal does not apply on this branch")
+                && !said.contains("does not list")
+                && said.contains(READD_SCOPE),
+            "murk trust --re-add says main lists bob and that it trusts him again on every branch",
         );
         Ok(())
     });

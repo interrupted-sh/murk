@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1737,7 +1737,7 @@
-         }
-         Listing::Unreadable => return HistoryCheck::Unavailable,
+@@ -1895,7 +1895,7 @@
+         Ok(bound) => bound,
+         Err(undecided) => return undecided,
      };
 -    let range = format!("{bound}..HEAD");
 +    let range = format!("HEAD");
      let Some((revisions, more)) = vault_revisions(dir, name, &["--full-history", &range]) else {
-         return HistoryCheck::Unavailable;
+         return HistoryCheck::Unreadable;
      };

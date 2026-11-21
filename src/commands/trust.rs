@@ -84,7 +84,13 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
             .into_iter()
             .partition(|k| removed.contains_key(k));
     if !unlisted.is_empty() {
-        clear_removal_records(yes, vault_path, &unlisted);
+        let listed: std::collections::BTreeSet<String> = inspected
+            .vault
+            .recipients
+            .iter()
+            .map(|k| murk_cli::canonical_recipient(k).into_owned())
+            .collect();
+        clear_removal_records(yes, vault_path, &unlisted, &listed);
         if readmit.is_empty() && shares_with.is_none() {
             // Consent given before the vault lists them: nothing else to do.
             return;
@@ -215,8 +221,9 @@ fn decide(
     {
         die(
             &format_args!(
-                "{} was removed from this vault at generation {at} on this machine, and this vault lists them or is signed by them\nrefusing to trust it; to trust them again on purpose, review it and run `murk trust --vault {vault_path} --re-add {key}`",
-                murk_cli::trust::label(&inspected.murk.recipients, key)
+                "{} was removed from this vault at generation {at} on this machine, and this vault lists them or is signed by them\nrefusing to trust it; to trust them again on purpose, review it and run `murk trust --vault {vault_path} --re-add {key}` ({})",
+                murk_cli::trust::label(&inspected.murk.recipients, key),
+                murk_cli::trust::READD_SCOPE
             ),
             1,
         );
@@ -675,18 +682,44 @@ fn readmit_grants(
     );
 }
 
-/// `murk trust --re-add` for removed keys the vault does not list: after
-/// confirmation, take them out of this machine's removal records, so that a
-/// vault that lists them again loads here. The vault file is not written.
-fn clear_removal_records(yes: bool, vault_path: &str, keys: &std::collections::BTreeSet<String>) {
+/// `murk trust --re-add` for removed keys whose removal does not apply to
+/// this vault here (the vault does not list them, or lists them on a branch
+/// the removal has not reached): after confirmation, take them out of this
+/// machine's removal records, so that a vault that lists them loads here on
+/// every branch. `listed` holds the vault's canonical recipients. The vault
+/// file is not written.
+fn clear_removal_records(
+    yes: bool,
+    vault_path: &str,
+    keys: &std::collections::BTreeSet<String>,
+    listed: &std::collections::BTreeSet<String>,
+) {
+    let shown = |ks: Vec<&String>| -> Vec<String> {
+        ks.into_iter()
+            .map(|k| murk_cli::truncate_pubkey(k))
+            .collect()
+    };
+    let (on, off): (Vec<&String>, Vec<&String>) = keys.iter().partition(|k| listed.contains(*k));
+    if !off.is_empty() {
+        eprintln!(
+            "{} {vault_path} does not list {}. This machine recorded them as removed",
+            "⚠".yellow(),
+            shown(off).join(", ")
+        );
+    }
+    if !on.is_empty() {
+        eprintln!(
+            "{} {vault_path} lists {}, whom this machine recorded as removed; the removal does not apply on this branch",
+            "⚠".yellow(),
+            shown(on).join(", ")
+        );
+    }
+    eprintln!("  {}", murk_cli::trust::READD_SCOPE);
     let shown: Vec<String> = keys.iter().map(|k| murk_cli::truncate_pubkey(k)).collect();
-    eprintln!(
-        "{} {vault_path} does not list {}. This machine recorded them as removed",
-        "⚠".yellow(),
-        shown.join(", ")
-    );
     if !yes
-        && !confirmed("trust them again on this machine, so a vault that lists them can load here?")
+        && !confirmed(
+            "trust them again on every branch on this machine, so a vault that lists them can load anywhere here?",
+        )
     {
         die(&"not trusted", 1);
     }

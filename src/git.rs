@@ -1444,8 +1444,16 @@ pub fn vault_at_commit(abs_vault: &Path, commit: &str) -> Option<Vec<u8>> {
 /// `murk circle authorize` can.
 pub const VAULT_HISTORY_CAP: usize = 10_000;
 
+/// The largest vault revision [`vault_history_drops`] reads, in bytes
+/// (8 MiB). A larger blob is not read: the walk runs under the trust pin
+/// lock, and a repo writer could commit huge files to slow it down or
+/// exhaust memory. Such a revision counts as unreadable, so the answer is
+/// [`HistoryCheck::Unreadable`] (a refusal), never a load. A real vault is
+/// far smaller.
+pub const VAULT_BLOB_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// What [`vault_history_drops`] found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryCheck {
     /// A commit in the walk dropped the key.
     Found,
@@ -1454,10 +1462,18 @@ pub enum HistoryCheck {
     /// No drop in the newest [`VAULT_HISTORY_CAP`] revisions, and there are
     /// more.
     TooLong,
-    /// git could not show the history: a shallow clone, a partial clone, a
-    /// git failure, the bound commit missing here, a vault revision whose
-    /// recipients do not parse, or no recorded commit to start from.
-    Unavailable,
+    /// A shallow clone, and the walk reached its boundary before the bound.
+    Shallow,
+    /// A partial clone: a vault revision the walk needs was not downloaded.
+    /// `remote` is the promisor remote.
+    Partial { remote: String },
+    /// The commit the removal was recorded at is not in this repository (a
+    /// rewritten and garbage-collected history), or none was recorded.
+    Gone,
+    /// A vault revision in the walk could not be read: not a vault, its
+    /// recipients do not parse, over [`VAULT_BLOB_LIMIT`], an object
+    /// missing from a full clone, or a git failure.
+    Unreadable,
 }
 
 /// The vault file at one commit, as the walk sees it.
@@ -1465,15 +1481,18 @@ pub enum HistoryCheck {
 enum Listing {
     /// The vault's recipients do (`true`) or do not list the key.
     Lists(bool),
-    /// No vault file at that commit.
+    /// No vault file at that commit: the commit's tree has no such entry.
     Absent,
-    /// The file is there but could not be read, or its recipients do not
-    /// parse.
+    /// The commit's tree names a vault file whose object is not here (a
+    /// partial clone, or a damaged repository).
+    Missing,
+    /// The file is there but is not a vault, its recipients do not parse,
+    /// or it is over [`VAULT_BLOB_LIMIT`].
     Unreadable,
 }
 
 /// One running `git cat-file` process in batch mode: `--batch-check` for
-/// object ids, or `--batch` for contents.
+/// object ids and sizes, or `--batch` for contents.
 struct CatFile {
     child: std::process::Child,
     input: std::process::ChildStdin,
@@ -1512,6 +1531,16 @@ impl CatFile {
             && self.output.read_line(&mut header).is_ok_and(|n| n > 0))
         .then(|| header.split_whitespace().map(str::to_string).collect())
     }
+
+    /// The body of an object `--batch` answered with `size` bytes, read with
+    /// its trailing newline. `None` when the stream broke.
+    fn body(&mut self, size: usize) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = vec![0; size + 1];
+        self.output.read_exact(&mut bytes).ok()?;
+        bytes.pop();
+        Some(bytes)
+    }
 }
 
 impl Drop for CatFile {
@@ -1521,13 +1550,25 @@ impl Drop for CatFile {
     }
 }
 
+/// Whether the raw tree object `tree` (git's binary format, object ids of
+/// `oid_len` bytes) has an entry named `name`.
+fn tree_has_entry(tree: &[u8], name: &str, oid_len: usize) -> Option<bool> {
+    let mut rest = tree;
+    while !rest.is_empty() {
+        let space = rest.iter().position(|&b| b == b' ')?;
+        let nul = space + rest[space..].iter().position(|&b| b == 0)?;
+        if &rest[space + 1..nul] == name.as_bytes() {
+            return Some(true);
+        }
+        rest = rest.get(nul + 1 + oid_len..)?;
+    }
+    Some(false)
+}
+
 /// Reads the vault file at commits, once per distinct blob.
 struct VaultReader<'a, F: Fn(&[u8]) -> Option<bool>> {
     name: &'a str,
     lists: F,
-    /// Whether every object of the history is here (not a shallow or a
-    /// partial clone), so a missing path is a vault file that is not there.
-    complete: bool,
     check: CatFile,
     contents: CatFile,
     by_commit: std::collections::HashMap<String, Listing>,
@@ -1546,7 +1587,6 @@ impl<F: Fn(&[u8]) -> Option<bool>> VaultReader<'_, F> {
     }
 
     fn read(&mut self, commit: &str) -> Listing {
-        use std::io::Read;
         if self.broken {
             return Listing::Unreadable;
         }
@@ -1554,42 +1594,82 @@ impl<F: Fn(&[u8]) -> Option<bool>> VaultReader<'_, F> {
             self.broken = true;
             return Listing::Unreadable;
         };
-        let (oid, kind) = match header.as_slice() {
-            [oid, kind, _] => (oid.clone(), kind.as_str()),
-            [.., last] if last == "missing" && self.complete => return Listing::Absent,
-            _ => return Listing::Unreadable,
+        match header.as_slice() {
+            [oid, kind, size] if kind == "blob" => {
+                let Ok(size) = size.parse::<u64>() else {
+                    return Listing::Unreadable;
+                };
+                if let Some(&known) = self.by_blob.get(oid) {
+                    return known;
+                }
+                let listing = if size > VAULT_BLOB_LIMIT {
+                    Listing::Unreadable
+                } else {
+                    self.blob(oid)
+                };
+                self.by_blob.insert(oid.clone(), listing);
+                listing
+            }
+            [.., last] if last == "missing" => self.missing(commit),
+            _ => Listing::Unreadable,
+        }
+    }
+
+    /// The vault blob `oid`, at most [`VAULT_BLOB_LIMIT`] bytes as
+    /// `--batch-check` said.
+    fn blob(&mut self, oid: &str) -> Listing {
+        let Some(answer) = self.contents.ask(oid) else {
+            self.broken = true;
+            return Listing::Unreadable;
         };
-        if kind != "blob" {
+        match answer.as_slice() {
+            [_, kind, size] if kind == "blob" => {
+                let Some(bytes) = size.parse().ok().and_then(|s| self.contents.body(s)) else {
+                    self.broken = true;
+                    return Listing::Unreadable;
+                };
+                (self.lists)(&bytes).map_or(Listing::Unreadable, Listing::Lists)
+            }
+            [.., last] if last == "missing" => Listing::Missing,
+            _ => {
+                self.broken = true;
+                Listing::Unreadable
+            }
+        }
+    }
+
+    /// git answered `missing` for the vault file at `commit`: either the
+    /// commit's tree has no such entry (no vault file there) or the entry's
+    /// object is not here. The vault's directory tree tells which; a missing
+    /// tree is itself a missing object.
+    fn missing(&mut self, commit: &str) -> Listing {
+        let Some(header) = self.check.ask(&format!("{commit}:./")) else {
+            self.broken = true;
+            return Listing::Unreadable;
+        };
+        let [oid, kind, size] = header.as_slice() else {
+            return Listing::Missing;
+        };
+        if kind != "tree" {
             return Listing::Unreadable;
         }
-        if let Some(&known) = self.by_blob.get(&oid) {
-            return known;
-        }
+        let (oid, size) = (oid.clone(), size.clone());
         let Some(answer) = self.contents.ask(&oid) else {
             self.broken = true;
             return Listing::Unreadable;
         };
-        // A `missing` answer has no body; a blob answer is followed by its
-        // bytes and a newline.
-        let listing = if let [_, kind, size] = answer.as_slice()
-            && kind == "blob"
-        {
-            let Ok(size) = size.parse::<usize>() else {
-                self.broken = true;
-                return Listing::Unreadable;
-            };
-            let mut bytes = vec![0; size + 1];
-            if self.contents.output.read_exact(&mut bytes).is_err() {
-                self.broken = true;
-                return Listing::Unreadable;
-            }
-            bytes.pop();
-            (self.lists)(&bytes).map_or(Listing::Unreadable, Listing::Lists)
-        } else {
-            Listing::Unreadable
+        if answer.get(1).map(String::as_str) != Some("tree") {
+            return Listing::Missing;
+        }
+        let Some(tree) = size.parse().ok().and_then(|s| self.contents.body(s)) else {
+            self.broken = true;
+            return Listing::Unreadable;
         };
-        self.by_blob.insert(oid, listing);
-        listing
+        match tree_has_entry(&tree, self.name, oid.len() / 2) {
+            Some(true) => Listing::Missing,
+            Some(false) => Listing::Absent,
+            None => Listing::Unreadable,
+        }
     }
 }
 
@@ -1650,12 +1730,93 @@ fn parents_of(dir: &Path, commits: &[String]) -> Option<Vec<(String, Vec<String>
     .then_some(parsed)
 }
 
-/// Whether the repository holding `dir` may lack objects of its history: a
-/// shallow clone, or a partial clone (`extensions.partialClone`). `true` when
-/// git cannot tell.
-fn history_incomplete(dir: &Path) -> bool {
-    git_output(dir, &["rev-parse", "--is-shallow-repository"]).is_none_or(|s| s != "false")
-        || git_output(dir, &["config", "--get", "extensions.partialclone"]).is_some()
+/// The shallow boundary of the repository holding `dir`: the commits listed
+/// in its `shallow` file, whose parents this clone does not have. Empty for
+/// a full clone; `None` when git fails.
+fn shallow_commits(dir: &Path) -> Option<Vec<String>> {
+    let path = git_output(dir, &["rev-parse", "--git-path", "shallow"])?;
+    let path = dir.join(path);
+    match fs::read_to_string(&path) {
+        Ok(text) => Some(
+            text.lines()
+                .map(str::trim)
+                .filter(|c| is_commit_id(c))
+                .map(str::to_string)
+                .collect(),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+/// Whether `commit` is in `range_top`'s history and not in `bound`'s: a
+/// shallow boundary commit there means the walk from `range_top` back to
+/// `bound` stopped early.
+fn boundary_between(dir: &Path, boundary: &[String], bound: &str, range_top: &str) -> bool {
+    boundary
+        .iter()
+        .any(|s| is_ancestor(dir, s, range_top) && !is_ancestor(dir, s, bound))
+}
+
+/// The promisor remote of a partial clone (`remote.<name>.promisor`, or the
+/// older `extensions.partialClone`), if any.
+fn promisor_remote(dir: &Path) -> Option<String> {
+    let listed =
+        git_output(dir, &["config", "--get-regexp", r"^remote\..*\.promisor$"]).unwrap_or_default();
+    listed
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            (value.trim() == "true")
+                .then(|| key.strip_prefix("remote.")?.strip_suffix(".promisor"))?
+        })
+        .map(str::to_string)
+        .or_else(|| git_output(dir, &["config", "--get", "extensions.partialclone"]))
+}
+
+/// What to answer for an object the walk needed and did not find: a partial
+/// clone did not download it, else the repository is damaged.
+fn missing_object(dir: &Path) -> HistoryCheck {
+    match promisor_remote(dir) {
+        Some(remote) => HistoryCheck::Partial { remote },
+        None => HistoryCheck::Unreadable,
+    }
+}
+
+/// The walk's bound for [`vault_history_drops`]: `since` when its vault
+/// lists the key, else the newest revision on `since`'s first-parent path
+/// whose vault does. `Err` holds the answer when there is none to find.
+fn walk_bound<F: Fn(&[u8]) -> Option<bool>>(
+    reader: &mut VaultReader<'_, F>,
+    dir: &Path,
+    since: &str,
+    boundary: &[String],
+) -> Result<String, HistoryCheck> {
+    match reader.at(since) {
+        Listing::Lists(true) => return Ok(since.to_string()),
+        Listing::Missing => return Err(missing_object(dir)),
+        Listing::Unreadable => return Err(HistoryCheck::Unreadable),
+        Listing::Lists(false) | Listing::Absent => {}
+    }
+    let Some((revisions, more)) = vault_revisions(dir, reader.name, &["--first-parent", since])
+    else {
+        return Err(HistoryCheck::Unreadable);
+    };
+    for r in revisions {
+        match reader.at(&r) {
+            Listing::Lists(true) => return Ok(r),
+            Listing::Missing => return Err(missing_object(dir)),
+            Listing::Unreadable => return Err(HistoryCheck::Unreadable),
+            Listing::Lists(false) | Listing::Absent => {}
+        }
+    }
+    Err(if more {
+        HistoryCheck::TooLong
+    } else if boundary.iter().any(|s| is_ancestor(dir, s, since)) {
+        HistoryCheck::Shallow
+    } else {
+        HistoryCheck::Unreadable
+    })
 }
 
 /// Whether HEAD's history holds a commit that dropped what `lists` looks for
@@ -1675,12 +1836,18 @@ fn history_incomplete(dir: &Path) -> bool {
 /// not count. Both walks read at most [`VAULT_HISTORY_CAP`] revisions.
 ///
 /// It answers [`HistoryCheck::Found`] as soon as it sees a drop. Otherwise
-/// anything it cannot read makes the answer [`HistoryCheck::TooLong`] or
-/// [`HistoryCheck::Unavailable`], never [`HistoryCheck::NotFound`]: a walk
-/// past the cap; a shallow or partial clone; a git failure; `B` missing; a
-/// vault revision that is not a blob or whose recipients do not parse; or no
-/// revision on `since`'s first-parent path that lists the key. Read-only:
-/// takes no `index.lock`.
+/// anything it cannot decide makes the answer one of the other kinds,
+/// never [`HistoryCheck::NotFound`]: a walk past the cap
+/// ([`HistoryCheck::TooLong`]); a shallow clone whose boundary lies between
+/// HEAD and `B`, or before the first listing revision on `since`'s path
+/// ([`HistoryCheck::Shallow`]; a shallow clone whose fetched history holds
+/// the whole walk is decided normally); a vault object a partial clone did
+/// not download ([`HistoryCheck::Partial`]; one it did download is read
+/// normally); `since` not in the repository ([`HistoryCheck::Gone`]); or a
+/// revision that is not a vault, does not parse, is over
+/// [`VAULT_BLOB_LIMIT`], or a git failure ([`HistoryCheck::Unreadable`]).
+/// Lazy fetches are off (see [`git_command`]), so a missing object is never
+/// downloaded here. Read-only: takes no `index.lock`.
 pub fn vault_history_drops(
     abs_vault: &Path,
     since: &str,
@@ -1690,80 +1857,78 @@ pub fn vault_history_drops(
         abs_vault.parent(),
         abs_vault.file_name().and_then(|n| n.to_str()),
     ) else {
-        return HistoryCheck::Unavailable;
+        return HistoryCheck::Unreadable;
     };
-    if !is_commit_id(since) {
-        return HistoryCheck::Unavailable;
+    let Some(boundary) = shallow_commits(dir) else {
+        return HistoryCheck::Unreadable;
+    };
+    let exists = |c: &str| {
+        is_commit_id(c)
+            && git_succeeds(
+                dir,
+                git_command().args(["cat-file", "-e", &format!("{c}^{{commit}}")]),
+            )
+    };
+    if !exists(since) {
+        return if boundary.is_empty() {
+            HistoryCheck::Gone
+        } else {
+            HistoryCheck::Shallow
+        };
     }
-    let incomplete = history_incomplete(dir);
     let (Some(check), Some(contents)) = (
         CatFile::start(dir, "--batch-check"),
         CatFile::start(dir, "--batch"),
     ) else {
-        return HistoryCheck::Unavailable;
+        return HistoryCheck::Unreadable;
     };
     let mut reader = VaultReader {
         name,
         lists,
-        complete: !incomplete,
         check,
         contents,
         by_commit: std::collections::HashMap::new(),
         by_blob: std::collections::HashMap::new(),
         broken: false,
     };
-    let bound = match reader.at(since) {
-        Listing::Lists(true) => since.to_string(),
-        Listing::Lists(false) | Listing::Absent => {
-            let Some((revisions, more)) = vault_revisions(dir, name, &["--first-parent", since])
-            else {
-                return HistoryCheck::Unavailable;
-            };
-            let mut bound = None;
-            for r in revisions {
-                match reader.at(&r) {
-                    Listing::Lists(true) => {
-                        bound = Some(r);
-                        break;
-                    }
-                    Listing::Unreadable => return HistoryCheck::Unavailable,
-                    Listing::Lists(false) | Listing::Absent => {}
-                }
-            }
-            match bound {
-                Some(bound) => bound,
-                None if more => return HistoryCheck::TooLong,
-                None => return HistoryCheck::Unavailable,
-            }
-        }
-        Listing::Unreadable => return HistoryCheck::Unavailable,
+    let bound = match walk_bound(&mut reader, dir, since, &boundary) {
+        Ok(bound) => bound,
+        Err(undecided) => return undecided,
     };
     let range = format!("{bound}..HEAD");
     let Some((revisions, more)) = vault_revisions(dir, name, &["--full-history", &range]) else {
-        return HistoryCheck::Unavailable;
+        return HistoryCheck::Unreadable;
     };
     let Some(with_parents) = parents_of(dir, &revisions) else {
-        return HistoryCheck::Unavailable;
+        return HistoryCheck::Unreadable;
     };
-    let mut unread = false;
+    let (mut missing, mut unreadable) = (false, false);
+    let mut note = |l: Listing| match l {
+        Listing::Missing => missing = true,
+        Listing::Unreadable => unreadable = true,
+        Listing::Lists(_) | Listing::Absent => {}
+    };
     for (commit, parents) in &with_parents {
         let at = reader.at(commit);
-        unread |= at == Listing::Unreadable;
+        note(at);
         if !matches!(at, Listing::Lists(false) | Listing::Absent) {
             continue;
         }
         for parent in parents {
             match reader.at(parent) {
                 Listing::Lists(true) => return HistoryCheck::Found,
-                Listing::Unreadable => unread = true,
-                Listing::Lists(false) | Listing::Absent => {}
+                other => note(other),
             }
         }
     }
     if more {
         HistoryCheck::TooLong
-    } else if unread || incomplete || reader.broken {
-        HistoryCheck::Unavailable
+    } else if boundary_between(dir, &boundary, &bound, "HEAD") {
+        HistoryCheck::Shallow
+    } else if missing {
+        missing_object(dir)
+    } else if unreadable || reader.broken {
+        HistoryCheck::Unreadable
     } else {
         HistoryCheck::NotFound
     }

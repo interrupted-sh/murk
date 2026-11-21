@@ -1480,8 +1480,9 @@ fn result_conflict(
         let reason = if pin.is_some_and(|p| crate::trust::removal_applies(p, &canonical, checkout))
         {
             format!(
-                "{} was removed from this vault at generation {at} on this machine, and the merged result lists them. Merge the branch that removed them first. To re-add them on purpose, review the change, run `murk trust --vault {vault_path} --re-add {canonical}`, and merge again",
-                crate::truncate_pubkey(&key)
+                "{} was removed from this vault at generation {at} on this machine, and the merged result lists them. Merge the branch that removed them first. To re-add them on purpose, review the change, run `murk trust --vault {vault_path} --re-add {canonical}` ({}), and merge again",
+                crate::truncate_pubkey(&key),
+                crate::trust::READD_SCOPE
             )
         } else {
             format!(
