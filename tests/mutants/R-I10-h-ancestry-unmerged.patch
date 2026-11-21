@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -670,9 +670,6 @@
+                 )
+             })
+     };
+-    if !crate::git::is_ancestor(dir, commit, "HEAD") {
+-        return false;
+-    }
+     match lists_key(commit) {
+         Some(false) => true,
+         None => false,

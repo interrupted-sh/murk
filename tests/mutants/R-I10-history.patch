@@ -1,11 +1,11 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -421,7 +421,7 @@
-                 }
-                 by_commit
-                     .into_iter()
--                    .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
-+                    .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit) || true)
-                     .flat_map(|(_, keys)| keys.into_iter().cloned())
-                     .collect()
-             }
+@@ -608,7 +608,7 @@
+         }
+         let before = by_commit
+             .into_iter()
+-            .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
++            .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit) || true)
+             .flat_map(|(_, keys)| keys.into_iter().cloned())
+             .collect();
+         let reached = if pin.branches.contains_key(branch) {

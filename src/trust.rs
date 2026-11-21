@@ -557,66 +557,155 @@ pub fn vault_fingerprint(vault: &types::Vault) -> String {
         })
 }
 
-/// Where a load happens, as the removal rule sees it: the git HEAD state, and
+/// Where a load happens, as the removal rule sees it: the git HEAD state;
 /// the removed keys whose recorded removal commit (see
 /// [`TrustPin::removed_at_commit`]) is the commit checked out or a descendant
 /// of it, with the vault file as committed there — the vault is from before
-/// those removals.
+/// those removals; and the removed keys whose removal is in the history of
+/// the commit checked out (see [`removal_in_history`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub head: HeadState,
     before: BTreeSet<String>,
+    reached: BTreeSet<String>,
 }
 
 impl Checkout {
     /// `head` with no history information: no vault counts as from before a
-    /// removal.
+    /// removal, and no removal as reached by history alone.
     pub fn at(head: HeadState) -> Self {
         Self {
             head,
             before: BTreeSet::new(),
+            reached: BTreeSet::new(),
         }
     }
 
     /// The checkout holding `vault_path`, judged against `pin`. Asks git only
-    /// on a branch, and once per recorded removal commit.
+    /// on a branch: once per recorded removal commit, and for each removal
+    /// that does not apply on this branch by name, to find whether the
+    /// removal is in HEAD's history.
     pub fn of(vault_path: &str, pin: Option<&TrustPin>) -> Self {
+        Self::judged(vault_path, pin, true)
+    }
+
+    /// The checkout holding `vault_path` for a save's check against `pin`:
+    /// as [`Checkout::of`], except that no vault counts as from before a
+    /// removal (a save writes a vault numbered past it).
+    pub fn for_save(vault_path: &str, pin: &TrustPin) -> Self {
+        Self::judged(vault_path, Some(pin), false)
+    }
+
+    fn judged(vault_path: &str, pin: Option<&TrustPin>, with_before: bool) -> Self {
         let head = head_of(vault_path);
-        let before = match (&head, pin) {
-            (HeadState::Branch(_), Some(pin)) => {
-                let abs = absolute(vault_path);
-                let mut by_commit: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-                for (key, commit) in &pin.removed_at_commit {
-                    by_commit.entry(commit).or_default().push(key);
-                }
-                by_commit
-                    .into_iter()
-                    .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
-                    .flat_map(|(_, keys)| keys.into_iter().cloned())
-                    .collect()
-            }
-            _ => BTreeSet::new(),
+        let (HeadState::Branch(branch), Some(pin)) = (&head, pin) else {
+            return Self::at(head);
         };
-        Self { head, before }
+        let abs = absolute(vault_path);
+        let mut by_commit: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for (key, commit) in pin.removed_at_commit.iter().filter(|_| with_before) {
+            by_commit.entry(commit).or_default().push(key);
+        }
+        let before = by_commit
+            .into_iter()
+            .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
+            .flat_map(|(_, keys)| keys.into_iter().cloned())
+            .collect();
+        let reached = if pin.branches.contains_key(branch) {
+            pin.removed_on
+                .iter()
+                .filter(|(key, on)| pin.removed.contains_key(*key) && !on.contains(branch))
+                .filter(|(key, on)| removal_in_history(&abs, pin, key, on))
+                .map(|(key, _)| key.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        Self {
+            head,
+            before,
+            reached,
+        }
+    }
+}
+
+/// Whether the removal of `key` (canonical) is in the history of the commit
+/// checked out in the checkout holding `abs_vault`: a commit that holds the
+/// removal (its vault no longer lists the key) is HEAD or an ancestor of it.
+/// That commit is the recorded removal commit `C` (see
+/// [`TrustPin::removed_at_commit`]) when the vault at `C` does not list the
+/// key: a removal accepted from another signer's committed vault. When the
+/// vault at `C` still lists the key, `C` is the parent of this machine's own
+/// save that removed it, so `C` being in HEAD's history says nothing (every
+/// branch cut before the removal has it). Then the tips of the local branches
+/// the removal is recorded on (`on`) are tried: a tip that is HEAD or an
+/// ancestor of it, has `C` as an ancestor, and whose vault does not list the
+/// key holds the removal.
+///
+/// Stated limit: when git cannot tell (a shallow clone without `C`, a
+/// missing object, a git failure), or the branch the removal was saved on
+/// was deleted or rewritten since, this answers no, so the removal applies
+/// where it did by name alone.
+fn removal_in_history(
+    abs_vault: &std::path::Path,
+    pin: &TrustPin,
+    key: &str,
+    on: &BTreeSet<String>,
+) -> bool {
+    let Some(commit) = pin.removed_at_commit.get(key) else {
+        return false;
+    };
+    let Some(dir) = abs_vault.parent() else {
+        return false;
+    };
+    let lists_key = |at: &str| {
+        crate::git::vault_at_commit(abs_vault, at)
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|vault| {
+                let recipients = vault.get("recipients")?.as_array()?;
+                Some(
+                    recipients
+                        .iter()
+                        .any(|r| r.as_str().is_some_and(|r| canonical_recipient(r) == key)),
+                )
+            })
+    };
+    if !crate::git::is_ancestor(dir, commit, "HEAD") {
+        return false;
+    }
+    match lists_key(commit) {
+        Some(false) => true,
+        None => false,
+        Some(true) => on.iter().any(|branch| {
+            crate::git::branch_tip(dir, branch).is_some_and(|tip| {
+                tip != *commit
+                    && crate::git::is_ancestor(dir, &tip, "HEAD")
+                    && crate::git::is_ancestor(dir, commit, &tip)
+                    && lists_key(&tip) == Some(false)
+            })
+        }),
     }
 }
 
 /// Whether the listing part of the removal rule applies to `key` (canonical)
 /// at `checkout`: whether a vault listing the key, at any generation, is
-/// refused there. It applies on a branch whose accepted
-/// history contains the removal (see [`TrustPin::removed_on`]), on a detached
-/// HEAD, outside git, and on a branch this machine has no mark for (its
-/// history is unknown, so it may be a replay) unless its vault is from before
-/// the removal: committed at the commit this machine made or accepted the
+/// refused there. It applies on a branch whose accepted history contains the
+/// removal (see [`TrustPin::removed_on`]), on a branch whose git history
+/// holds the removal (see [`removal_in_history`]), on a detached HEAD,
+/// outside git, and on a branch this machine has no mark for (its history is
+/// unknown, so it may be a replay) unless its vault is from before the
+/// removal: committed at the commit this machine made or accepted the
 /// removal at, or an ancestor of it. On a branch this machine accepted before
 /// the removal reached it, the vault may still list the key. A vault signed
 /// by a removed key is judged by [`signed_before_removal`] instead.
 pub fn removal_applies(pin: &TrustPin, key: &str, checkout: &Checkout) -> bool {
     match &checkout.head {
-        HeadState::Branch(b) if pin.branches.contains_key(b) => pin
-            .removed_on
-            .get(key)
-            .is_none_or(|branches| branches.contains(b)),
+        HeadState::Branch(b) if pin.branches.contains_key(b) => {
+            pin.removed_on
+                .get(key)
+                .is_none_or(|branches| branches.contains(b))
+                || checkout.reached.contains(key)
+        }
         HeadState::Branch(_) => !checkout.before.contains(key),
         HeadState::Detached | HeadState::NotARepo => true,
     }
@@ -643,6 +732,7 @@ pub fn signed_before_removal(
     pin.removed.get(key).is_some_and(|&at| generation <= at)
         && checkout.before.contains(key)
         && pin.removed_on.get(key).is_none_or(|on| !on.contains(b))
+        && !checkout.reached.contains(key)
 }
 
 /// The removed keys (canonical, with the generation each was removed at)
@@ -2031,9 +2121,13 @@ pub enum Acceptance<'a> {
 /// A key the trusted set loses is recorded in `removed` with the vault's
 /// generation — when the vault is this branch's next accepted state (a
 /// branch seen here before, or outside git), the user's decision, or this
-/// machine's own save — and `commit` in `removed_at_commit`. A load never
-/// takes it out, whatever the vault's generation: only the user re-adding it
-/// (`murk trust --re-add`) or this machine's own save adding it does.
+/// machine's own save — and `commit` in `removed_at_commit`. A load that is
+/// its branch's next state but not above every counter this machine
+/// accepted (another branch saved here more) records the removals the vault
+/// holds against the branch's previous mark (see [`branch_removals`]). A
+/// load never takes a record out, whatever the vault's generation: only the
+/// user re-adding the key (`murk trust --re-add`) or this machine's own save
+/// adding it does.
 /// A registry entry for a recipient with no pinned key is pinned on the
 /// signer's word and recorded in `added_by`; when that signer leaves the
 /// trusted set the entry is dropped (see SPEC, Trust: "independently
@@ -2061,6 +2155,10 @@ pub fn accepted_pin(
     let current = match how {
         Acceptance::Load => is_current(loaded.vault, prior_v2, head),
         Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
+    };
+    let dropped_on_branch = match how {
+        Acceptance::Load if !current => branch_removals(loaded.vault, prior_v2, head),
+        _ => BTreeSet::new(),
     };
     let mut pin = prior_v2.cloned().unwrap_or_default();
     pin.v = pins::PIN_VERSION;
@@ -2096,12 +2194,9 @@ pub fn accepted_pin(
     if older_copy {
         pin.trusted.extend(std::mem::take(&mut dropped));
     }
-    let record_removals = !other_vault
-        && match how {
-            Acceptance::Load => current,
-            Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
-        };
-    if record_removals {
+    dropped.extend(dropped_on_branch);
+    // Another vault's acceptance records nothing about this one.
+    if !other_vault {
         for k in dropped {
             let at = pin.removed.entry(k.clone()).or_insert(found);
             *at = (*at).max(found);
@@ -2285,7 +2380,9 @@ fn record_pre_upgrade_acceptance(
 
 /// Raise the counters for an accepted `vault`: the overall mark (and the
 /// fingerprint of the vault at it) only for a current acceptance, the
-/// branch's mark for any. `reset_counter` lowers them to the vault's.
+/// branch's mark for any. `reset_counter` lowers them to the vault's. Where
+/// a branch's mark moves to this vault, its recipients are kept as the
+/// members at that mark (see [`pins::Sidecar::members_at_mark`]).
 fn advance_marks(
     pin: &mut TrustPin,
     vault: &types::Vault,
@@ -2316,8 +2413,51 @@ fn advance_marks(
         pin.branches.insert(b.clone(), mark);
         if reset_counter || old.is_none_or(|m| found > m) {
             pin.branch_heads.insert(b.clone(), fingerprint);
+            let members = vault
+                .recipients
+                .iter()
+                .map(|r| canonical_recipient(r).into_owned())
+                .collect();
+            pin.sidecar.members_at_mark.insert(b.clone(), members);
         }
     }
+}
+
+/// The removals a load of `vault` on branch `head` holds when it is that
+/// branch's next state (above the branch's mark) but not current (see
+/// [`is_current`]: another branch has a higher counter here): the keys
+/// `prior` trusts that the vault accepted at the branch's previous mark
+/// listed (see [`pins::Sidecar::members_at_mark`]) and `vault` no longer
+/// lists. A key added on another branch that has not reached this one is
+/// not among them. With no members recorded for the branch (a mark set by
+/// an older murk), nothing is recorded, as before.
+fn branch_removals(
+    vault: &types::Vault,
+    prior: Option<&TrustPin>,
+    head: &HeadState,
+) -> BTreeSet<String> {
+    let (HeadState::Branch(b), Some(prior)) = (head, prior.filter(|p| p.has_trust())) else {
+        return BTreeSet::new();
+    };
+    let (Some(&mark), Some(members)) =
+        (prior.branches.get(b), prior.sidecar.members_at_mark.get(b))
+    else {
+        return BTreeSet::new();
+    };
+    if vault.generation <= mark {
+        return BTreeSet::new();
+    }
+    let listed: BTreeSet<String> = vault
+        .recipients
+        .iter()
+        .map(|r| canonical_recipient(r).into_owned())
+        .collect();
+    members
+        .iter()
+        .filter(|k| prior.trusted.contains(*k) && !prior.grants.contains(*k))
+        .filter(|k| !listed.contains(*k))
+        .cloned()
+        .collect()
 }
 
 /// Set the pin's trusted set for an accepted `vault` and return the keys it

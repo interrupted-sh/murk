@@ -915,8 +915,9 @@ fn check_against_pin(
 /// would take it as the key re-added. A save that adds the key itself
 /// (`circle authorize`) re-adds it on purpose and is allowed, and so is a save
 /// on a branch this machine accepted before the removal reached it (see
-/// [`crate::trust::removal_applies`]), where the key is still a member. On a
-/// branch this machine never accepted the save is refused even when its
+/// [`crate::trust::removal_applies`]), where the key is still a member;
+/// a removal whose commit is in the branch's git history has reached it. On
+/// a branch this machine never accepted the save is refused even when its
 /// commit predates the removal: reading such a branch is history, but a
 /// save there would write the key into a vault numbered past the removal.
 /// A load refuses such a file first, so this is a second line of defence.
@@ -930,7 +931,7 @@ fn refuse_carried_removed_keys(
     let (Some(pin), Some(on_disk)) = (pin, on_disk) else {
         return Ok(());
     };
-    let checkout = crate::trust::Checkout::at(crate::trust::head_of(vault_path));
+    let checkout = crate::trust::Checkout::for_save(vault_path, pin);
     let canonical = |r: &String| crate::recipients::canonical_recipient(r).into_owned();
     let before: BTreeSet<String> = on_disk.recipients.iter().map(canonical).collect();
     let carried = vault.recipients.iter().find_map(|r| {

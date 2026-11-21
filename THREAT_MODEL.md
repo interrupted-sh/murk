@@ -355,6 +355,8 @@ A merge publishes its result under the same lock, and writes no pin. The next lo
 - the generation it was removed at
 - the branch it was made or accepted on.
 
+A machine records the removal when it accepts the branch's next vault, even when it has saved more often on another branch. It compares that vault with the one it accepted at the branch's previous mark, so a member added only on another, unmerged branch is not taken for removed.
+
 From then on, this machine refuses a vault signed by that key on every branch, on a detached HEAD and outside git. The merge driver judges removals whichever branch it merges into.
 
 The one exception is that key's own vault from before its removal. The refusal skips it only when all of these hold:
@@ -371,7 +373,7 @@ The exception fails closed. There is none:
 - when no commit was recorded (outside git, a removal accepted from an uncommitted vault file, or a pin from before this rule)
 - when git no longer has the recorded commit.
 
-murk never infers the commit from branch tips. For a removal this machine makes, the recorded commit is the one checked out when it saves, before the removal is committed. If a removal is abandoned (its branch is never merged), `murk trust --re-add` undoes it on a machine that recorded it.
+For this exception murk never infers the commit from branch tips. For a removal this machine makes, the recorded commit is the one checked out when it saves, before the removal is committed. If a removal is abandoned (its branch is never merged), `murk trust --re-add` undoes it on a machine that recorded it.
 
 A vault that passes the exception loads, and it never makes the key trusted again. On a branch this machine never accepted it is read-only: a save that keeps the key is refused.
 
@@ -379,6 +381,7 @@ A vault that lists the key is refused where the removal applies, at any generati
 
 - on the branch it was made or accepted on
 - on any branch where this machine later accepts a vault at or after the removal that no longer lists the key
+- on a branch this machine accepted before, whose git history holds the removal. For a removal accepted from another signer, that is the recorded commit: it is the commit checked out or an ancestor of it, and its vault no longer lists the key. For a removal this machine saved itself, the recorded commit still lists the key, so murk uses the tip of a local branch the removal is recorded on instead: the tip is the commit checked out or an ancestor of it, descends from the recorded commit, and its vault no longer lists the key. So a removal merged into main through a pull request applies on main even before this machine loads main. Where git cannot show this (a shallow clone that hides the commit, a missing object), or the branch the removal was saved on was deleted or rewritten, the removal applies there only once this machine accepts a vault there that no longer lists the key
 - on a detached HEAD
 - outside git
 - on any branch this machine never accepted, because that branch may be a replay.
@@ -549,7 +552,7 @@ To choose one file, review both, then run `murk trust --vault <path> --shares-id
 9. A vault last written by murk 0.13 or earlier keeps its v1 signature until its next save. Until then, its vault name, repo URL and creation time can be rewritten undetected on a branch where this machine has not seen it in 0.14 form.
 10. **Stale-fork replay.** murk compares a vault with the revision this machine last accepted on the branch by its save counter, not by its history. So a genuine revision from a branch that split off earlier loads when a current trusted signer signed it and its counter is above this machine's mark. That happens when the other branch saved more times since the split than this branch did. Anyone with repo write can commit such a revision onto any branch, the default branch included. It brings back values this branch rotated after the split, policy changes, and signers and recipients added only on that branch. A copy of this vault made outside this checkout, which then saved on its own, loads the same way. A keyed merge can take the older values too (limit 11).
 
-    Such a revision does not bring back a member that this machine recorded as removed, where that removal applies. The removal applies on the branch where this machine accepted it, on branches it has since reached, on a branch this machine has no mark for, on a detached HEAD, and outside git. There, murk refuses a vault that lists or is signed by that member, at any counter, until someone runs `murk trust --re-add <key>` on this machine. On a branch that this machine accepted before the removal reached it, a vault may still list the member: that is the branch's own history.
+    Such a revision does not bring back a member that this machine recorded as removed, where that removal applies. The removal applies on the branch where this machine accepted it, on branches where this machine has since accepted a vault without the member, on branches whose git history holds the removal (unless git cannot show it, for example in a shallow clone, or the branch the removal was saved on was deleted), on a branch this machine has no mark for, on a detached HEAD, and outside git. There, murk refuses a vault that lists or is signed by that member, at any counter, until someone runs `murk trust --re-add <key>` on this machine. On a branch that this machine accepted before the removal reached it, a vault may still list the member: that is the branch's own history.
 
     To re-add a member on purpose, a member runs `murk circle authorize`. Then each teammate machine whose trust pin recorded the removal runs `murk trust --re-add <key>` once, after review.
 

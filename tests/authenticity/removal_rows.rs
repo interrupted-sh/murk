@@ -118,6 +118,15 @@ impl Scene {
         self.cmd(who).args(args).output().unwrap()
     }
 
+    /// carol's own save of `key` in the repo, with her key; it must succeed.
+    fn carol_add(&self, key: &str, value: &str) {
+        self.cmd(&self.carol)
+            .args(["add", key])
+            .write_stdin(format!("{value}\n"))
+            .assert()
+            .success();
+    }
+
     /// `who`'s trust pin for the vault, and its sidecar (`Null` when absent).
     fn pin(&self, who: &Machine) -> (serde_json::Value, serde_json::Value) {
         let file = pin_file(who, &self.repo);
@@ -500,6 +509,339 @@ fn row_r_i10_h_record() {
         let on_main = s.run(&s.alice, &["get", "DB_URL"]);
         p.note(format!("main: {}", text(&on_main.stderr).trim()));
         p.target(!on_main.status.success(), "the file is refused on main");
+        Ok(())
+    });
+}
+
+// ── R-I10-h: a removal reaches a branch through its git history ──
+
+/// The pull-request scene: a stale fork of 10 saves from R0. alice's machine
+/// has a mark on main. She revokes bob on branch `revoke-bob` (her own save,
+/// over R0) and commits. Leaves `main` checked out, without the removal.
+/// Returns the stale fork's file.
+fn pr_flow_scene(s: &Scene) -> Vec<u8> {
+    let stale = s.stale_fork("stale", &s.r0, 10);
+    s.run_ok(&s.alice, &["get", "DB_URL"]);
+    git_ok(&s.repo, &["checkout", "-q", "-b", "revoke-bob"]);
+    s.revoke_bob();
+    git_ok(&s.repo, &["checkout", "-q", "main"]);
+    stale
+}
+
+/// The pull request is merged into main (a fast-forward), then a repo
+/// writer commits the stale fork's file on main.
+fn merge_pr_then_replay(s: &Scene, stale: &[u8]) {
+    git_ok(&s.repo, &["merge", "-q", "--ff-only", "revoke-bob"]);
+    put(&s.repo, stale, "pr: change");
+}
+
+/// `who`'s next save (`add NEW_AFTER`): whether it wrote nothing, so no
+/// vault written here lists the removed member.
+fn next_save_writes_nothing(s: &Scene, who: &Machine) -> bool {
+    let before = working(&s.repo);
+    let add = s
+        .cmd(who)
+        .args(["add", "NEW_AFTER"])
+        .write_stdin("new\n")
+        .output()
+        .unwrap();
+    !add.status.success() && working(&s.repo) == before
+}
+
+/// alice revokes bob on a topic branch; the pull request is merged into
+/// main, and a stale fork that still lists bob is then committed on main
+/// before alice's machine loads main. Her machine recorded the removal on
+/// the topic branch only, but main's history now holds it: the load is
+/// refused and the next save does not happen. A removal accepted from
+/// another signer's commit reaches a branch whose history holds that commit
+/// the same way.
+#[test]
+fn row_r_i10_h_pr_flow() {
+    check("R-I10-h:pr-flow", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = pr_flow_scene(&s);
+        let (pin, _) = s.pin(&s.alice);
+        p.require(
+            pin["removed_on"][s.bob.pubkey()] == serde_json::json!(["revoke-bob"]),
+            format!(
+                "alice's machine records the removal on revoke-bob only: {}",
+                pin["removed_on"]
+            ),
+        )?;
+        merge_pr_then_replay(&s, &stale);
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        let stderr = text(&get.stderr);
+        p.note(format!("get on main: {}", stderr.trim()));
+        p.target(!get.status.success(), "the load on main is refused");
+        p.target(
+            !text(&get.stdout).contains("prod-db"),
+            "the pre-rotation value is not printed",
+        );
+        p.target(names_re_add(&stderr), "stderr names bob and --re-add");
+        p.target(
+            next_save_writes_nothing(&s, &s.alice),
+            "the next save on main does not happen",
+        );
+
+        // carol's machine accepts alice's removal from main's commit. Its
+        // branch `next`, marked here before, is then moved onto main's tip
+        // and a stale fork is committed there.
+        let s = Scene::new();
+        let stale = s.stale_fork("stale", &s.r0, 10);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "next"]);
+        s.carol_add("NEXT_K", "next-k");
+        commit(&s.repo, "next: add NEXT_K");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.revoke_bob();
+        s.run_ok(&s.carol, &["get", "DB_URL"]);
+        p.require(
+            s.pin_on_bob(&s.carol).0,
+            "carol's machine records bob's removal",
+        )?;
+        git_ok(&s.repo, &["checkout", "-q", "-B", "next", "main"]);
+        put(&s.repo, &stale, "next: change");
+        let get = s.run(&s.carol, &["get", "DB_URL"]);
+        p.note(format!("carol on next: {}", text(&get.stderr).trim()));
+        p.target(
+            !get.status.success() && names_re_add(&text(&get.stderr)),
+            "carol's load on next, whose history holds the removal commit, is refused",
+        );
+        Ok(())
+    });
+}
+
+/// The pull-request scene, read on a detached HEAD at main's tip after the
+/// merge and the replay: refused.
+#[test]
+fn row_r_i10_h_pr_flow_detached() {
+    check("R-I10-h:pr-flow-detached", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = pr_flow_scene(&s);
+        merge_pr_then_replay(&s, &stale);
+        git_ok(&s.repo, &["checkout", "-q", "--detach"]);
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        p.note(format!("get: {}", text(&get.stderr).trim()));
+        p.target(!get.status.success(), "the load is refused");
+        p.target(
+            !text(&get.stdout).contains("prod-db"),
+            "the pre-rotation value is not printed",
+        );
+        Ok(())
+    });
+}
+
+/// Control for the own-save shape: alice's machine recorded the removal at
+/// the commit her revoke was saved over (R0, which still lists bob). main
+/// holds R0 but not the revoke, so the removal has not reached it: main
+/// still loads, and a save there is not refused.
+#[test]
+fn row_r_i10_h_pr_flow_own_save() {
+    check("R-I10-h:pr-flow-own-save", |p: &mut Probe| {
+        let s = Scene::new();
+        pr_flow_scene(&s);
+        let (pin, _) = s.pin(&s.alice);
+        p.require(
+            pin["removed_at_commit"][s.bob.pubkey()] == serde_json::json!(head_commit(&s.repo)),
+            "the removal is recorded at main's tip, the commit the revoke was saved over",
+        )?;
+        p.require(s.lists_bob(), "main's vault lists bob")?;
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        p.note(format!("get: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("prod-db"),
+            "main, which the removal has not reached, still loads",
+        );
+        let add = s
+            .cmd(&s.alice)
+            .args(["add", "MAIN_K"])
+            .write_stdin("main-k\n")
+            .output()
+            .unwrap();
+        p.note(format!("add: {}", text(&add.stderr).trim()));
+        p.target(
+            add.status.success(),
+            "a save on main, where bob is still a member, is not refused",
+        );
+        Ok(())
+    });
+}
+
+/// Control: carol's machine accepts bob's removal from main's commit. Her
+/// branch `old`, cut before it and marked here, never merges it: a vault
+/// there that lists bob still loads.
+#[test]
+fn row_r_i10_h_pr_flow_unmerged() {
+    check("R-I10-h:pr-flow-unmerged", |p: &mut Probe| {
+        let s = Scene::new();
+        git_ok(&s.repo, &["checkout", "-q", "-b", "old"]);
+        s.carol_add("OLD_K", "old-k");
+        commit(&s.repo, "old: add OLD_K");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.revoke_bob();
+        s.run_ok(&s.carol, &["get", "DB_URL"]);
+        p.require(
+            s.pin_on_bob(&s.carol).0,
+            "carol's machine records bob's removal",
+        )?;
+        git_ok(&s.repo, &["checkout", "-q", "old"]);
+        p.require(s.lists_bob(), "old's vault lists bob")?;
+        let get = s.run(&s.carol, &["get", "OLD_K"]);
+        p.reached();
+        p.note(format!("get on old: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("old-k"),
+            "old, which never merged the removal, still loads",
+        );
+        Ok(())
+    });
+}
+
+/// Stated limit: where git cannot show the removal in HEAD's history — a
+/// shallow boundary that hides it, or the branch the removal was saved on
+/// deleted since — the removal applies where it did by name alone, so the
+/// pull-request scene's replay loads on main.
+#[test]
+fn row_r_i10_h_pr_flow_unknown() {
+    check("R-I10-h:pr-flow-unknown", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = pr_flow_scene(&s);
+        merge_pr_then_replay(&s, &stale);
+        let shallow = s.repo.join(".git").join("shallow");
+        fs::write(&shallow, format!("{}\n", head_commit(&s.repo))).unwrap();
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.reached();
+        p.note(format!("shallow: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success() && text(&get.stdout).contains("prod-db"),
+            "behind a shallow boundary the replay loads (the stated limit)",
+        );
+        fs::remove_file(&shallow).unwrap();
+        p.target(
+            !s.run(&s.alice, &["get", "DB_URL"]).status.success(),
+            "with the full history the same load is refused",
+        );
+        git_ok(&s.repo, &["branch", "-q", "-D", "revoke-bob"]);
+        let get = s.run(&s.alice, &["get", "DB_URL"]);
+        p.note(format!("branch deleted: {}", text(&get.stderr).trim()));
+        p.target(
+            get.status.success(),
+            "with the revoke's branch deleted the replay loads (the stated limit)",
+        );
+        Ok(())
+    });
+}
+
+// ── R-I10-h: a load that is its branch's next state records removals ──
+
+/// carol's machine saved on `feature` more than main has since; it then
+/// loads main's revoke of bob, which is main's next state but not above
+/// carol's highest counter. It still records the removal, so a stale fork
+/// later committed on main is refused there and the next save does not
+/// happen.
+#[test]
+fn row_r_i10_h_branch_current() {
+    check("R-I10-h:branch-current", |p: &mut Probe| {
+        let s = Scene::new();
+        let stale = s.stale_fork("stale", &s.r0, 7);
+        git_ok(&s.repo, &["checkout", "-q", "-b", "feature"]);
+        for i in 1..=6 {
+            s.carol_add(&format!("F{i}"), "f");
+        }
+        commit(&s.repo, "feature: 6 saves");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.revoke_bob();
+        let main_generation = generation(&working(&s.repo));
+        p.require(
+            s.pin(&s.carol).0["generation"].as_u64() > Some(main_generation),
+            "carol's highest counter is above main's revoke",
+        )?;
+        p.require(
+            generation(&stale) > main_generation,
+            "the stale fork's generation is above main's",
+        )?;
+        let load = s.run(&s.carol, &["get", "DB_URL"]);
+        p.reached();
+        p.target(
+            load.status.success() && text(&load.stdout).contains("rotated-db"),
+            "carol loads main's revoke",
+        );
+        p.target(
+            s.pin_on_bob(&s.carol) == (true, false),
+            "carol's machine records bob's removal and does not trust him",
+        );
+        put(&s.repo, &stale, "pr: change");
+        let get = s.run(&s.carol, &["get", "DB_URL"]);
+        p.note(format!(
+            "get after the replay: {}",
+            text(&get.stderr).trim()
+        ));
+        p.target(
+            !get.status.success() && names_re_add(&text(&get.stderr)),
+            "the stale fork on main is refused and names --re-add",
+        );
+        p.target(
+            next_save_writes_nothing(&s, &s.carol),
+            "carol's next save does not happen",
+        );
+        Ok(())
+    });
+}
+
+/// carol authorizes dave on `feature`, unmerged, and saves there more than
+/// main has since. Her load of main's next state, which does not list dave
+/// yet, does not take dave for removed: main never listed him. When she then
+/// merges `feature` into main, the merge stops only on the one-sided
+/// recipient change (not on a removed key), and feature's side, taken on
+/// main, loads there.
+#[test]
+fn row_r_i10_h_branch_add() {
+    check("R-I10-h:branch-add", |p: &mut Probe| {
+        let s = Scene::new();
+        let dave = Machine::new(&s.base, "dave");
+        dave.init(&s.base.join("dave-scratch"), "dave");
+        git_ok(&s.repo, &["checkout", "-q", "-b", "feature"]);
+        s.run_ok(
+            &s.carol,
+            &["circle", "authorize", &dave.pubkey(), "--name", "dave"],
+        );
+        s.carol_add("F1", "f1");
+        s.carol_add("F2", "f2");
+        commit(&s.repo, "feature: authorize dave");
+        git_ok(&s.repo, &["checkout", "-q", "main"]);
+        s.alice.add(&s.repo, "MAIN_K", "main-k");
+        commit(&s.repo, "main: add MAIN_K");
+        p.require(
+            s.pin(&s.carol).0["generation"].as_u64() > Some(generation(&working(&s.repo))),
+            "carol's highest counter is above main's",
+        )?;
+        let get = s.run(&s.carol, &["get", "MAIN_K"]);
+        p.reached();
+        p.target(get.status.success(), "carol loads main's next state");
+        let (pin, sidecar) = s.pin(&s.carol);
+        let dave_key = dave.pubkey();
+        p.target(
+            pin["removed"].get(&dave_key).is_none() && sidecar["removals"].get(&dave_key).is_none(),
+            "carol's machine does not record dave as removed",
+        );
+        let (merged, stderr) = git_merge(&s.carol, &s.repo, "feature");
+        p.note(format!("merge: {}", stderr.trim()));
+        p.target(
+            !merged && !stderr.contains("--re-add") && !stderr.contains("removed"),
+            "the merge stops on the recipient change, not on a removed key",
+        );
+        git_ok(&s.repo, &["checkout", "--theirs", "--", ".murk"]);
+        let theirs = s.run(&s.carol, &["get", "F1"]);
+        p.note(format!(
+            "feature's side on main: {}",
+            text(&theirs.stderr).trim()
+        ));
+        p.target(
+            theirs.status.success() && lists(&working(&s.repo), &dave_key),
+            "feature's side, which lists dave, loads on main",
+        );
         Ok(())
     });
 }
