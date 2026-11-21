@@ -98,10 +98,11 @@ pub struct TrustPin {
     /// The branches whose accepted history contains each removal: the branch
     /// it was made or accepted on, and every branch where an accepted vault at
     /// or after the removal no longer lists the key. A removal also applies
-    /// outside git, on a detached HEAD and on a branch this machine has no
-    /// mark for (unless the vault is from before the removal, see
-    /// `removed_at_commit`); a key in `removed` with no entry here applies
-    /// everywhere.
+    /// on a branch whose git history holds it (see
+    /// [`crate::trust::removal_applies`]), outside git, on a detached HEAD
+    /// and on a branch this machine has no mark for (unless the vault is
+    /// from before the removal, see `removed_at_commit`); a key in `removed`
+    /// with no entry here applies everywhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub removed_on: BTreeMap<String, BTreeSet<String>>,
     /// The commit checked out when this machine made or accepted each
@@ -200,6 +201,16 @@ pub struct Sidecar {
     /// longer holds the record gives the key a revocation id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub grants_live_on: BTreeMap<String, BTreeMap<String, String>>,
+    /// The canonical recipients of the vault this machine accepted at each
+    /// branch's mark (see [`TrustPin::branches`]). A load that is the next
+    /// state of its branch but not above every counter this machine accepted
+    /// records as removed only the trusted keys this set listed and the vault
+    /// no longer does (see [`crate::trust::accepted_pin`]), so a key added
+    /// on another branch that has not reached this one is not taken for a
+    /// removal. Kept here and not in the pin file, so a murk 0.15 component
+    /// that rewrites the pin does not drop it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub members_at_mark: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One removal record as the sidecar keeps it (see [`Sidecar::removals`]).
@@ -845,7 +856,8 @@ fn read_held(vault_path: &str) -> Result<Option<TrustPin>, String> {
 ///    reads with [`read_held`] and writes with [`write`]. The only
 ///    subprocesses it runs are read-only git commands (`symbolic-ref`,
 ///    `rev-parse`, `merge-base --is-ancestor`, `cat-file -e`,
-///    `diff --quiet HEAD --`), which take no `index.lock`.
+///    `cat-file blob <commit>:<path>`, `diff --quiet HEAD --`), which take
+///    no `index.lock`.
 /// 4. The pin lock is never held across a signature, a confirmation prompt
 ///    or an editor session.
 ///

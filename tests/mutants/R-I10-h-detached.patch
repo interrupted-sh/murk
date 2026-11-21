@@ -1,0 +1,12 @@
+--- a/src/trust.rs
++++ b/src/trust.rs
+@@ -707,7 +707,8 @@
+                 || checkout.reached.contains(key)
+         }
+         HeadState::Branch(_) => !checkout.before.contains(key),
+-        HeadState::Detached | HeadState::NotARepo => true,
++        HeadState::Detached => false,
++        HeadState::NotARepo => true,
+     }
+ }
+ 

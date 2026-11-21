@@ -14,8 +14,12 @@
 //! branch or a detached HEAD, `murk diff` against an older revision, an agent
 //! grant, forgeries (a vault rebuilt from any revision the attacker could
 //! open, with a chosen generation, signed by their own key or as a recipient
-//! whose registry entry holds a key they control), and replays of old
-//! revisions.
+//! whose registry entry holds a key they control), replays of old
+//! revisions, and two composite removal shapes: a revoke on a topic branch
+//! fast-forwarded into `main` before a stale fork lands there
+//! ([`Op::PrFlow`]), and a revoke loaded on `main` below the machine's own
+//! highest counter ([`Op::BranchCurrent`]). Each counts a decisive kind
+//! with a floor in a long run.
 //!
 //! Every vault in the run is traced to who produced it and when. Each random
 //! case starts from a world with a revoke that only alice's machine has seen
@@ -505,6 +509,27 @@ enum Op {
         m: M,
         by: M,
     },
+    /// The pull-request removal (row R-I10-h:pr-flow): machine `m` syncs
+    /// and loads `main`; it revokes the n-th fitting member on a topic
+    /// branch off `main`; a teammate's machine then saves twice on a branch
+    /// off the same commit (a stale fork that still lists them); `m` merges
+    /// the topic into `main` (a fast-forward), a repo writer commits the
+    /// stale fork there, and `m` loads `main`.
+    PrFlow {
+        m: M,
+        n: usize,
+    },
+    /// A removal loaded as the branch's next state (row
+    /// R-I10-h:branch-current): machine `m` syncs and loads `main`, then
+    /// saves three times on a feature branch; a teammate's machine revokes
+    /// the n-th fitting member over the same `main` and pushes it; `m` saves
+    /// a stale fork twice off that `main`, fast-forwards its `main` to the
+    /// revoke and loads it (below its own highest counter), then a repo
+    /// writer commits the stale fork on `main` and `m` loads it.
+    BranchCurrent {
+        m: M,
+        n: usize,
+    },
 }
 
 /// The forged commit an [`Op::AncestorBranch`] puts under a genuine revision.
@@ -740,6 +765,18 @@ fn op() -> BoxedStrategy<Op> {
                 .prop_map(|(m, by)| Op::AuthorizeAgain { m, by })
                 .boxed(),
         ),
+        (
+            2,
+            (m(), 0..4usize)
+                .prop_map(|(m, n)| Op::PrFlow { m, n })
+                .boxed(),
+        ),
+        (
+            2,
+            (m(), 0..4usize)
+                .prop_map(|(m, n)| Op::BranchCurrent { m, n })
+                .boxed(),
+        ),
     ];
     let [copy, unsigned, stripped, forged, grants] = &CONSTRUCTORS;
     if copy.open() {
@@ -840,6 +877,14 @@ fn blob_id(bytes: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     h.finish()
+}
+
+/// The vault id a vault file carries (empty when it has none: murk 0.13).
+fn vault_id_of(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v["vault_id"].as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// The generation a vault file carries (0 when it has none or does not parse).
@@ -1126,6 +1171,8 @@ fn kind(op: &Op) -> &'static str {
         Op::AgentProbe { .. } => "agent-probe",
         Op::ReAdd { .. } => "re-add",
         Op::AuthorizeAgain { .. } => "authorize-again",
+        Op::PrFlow { .. } => "pr-flow",
+        Op::BranchCurrent { .. } => "branch-current",
     }
 }
 
@@ -1262,12 +1309,47 @@ enum Took<'a> {
 /// expects a removal record only where murk makes one: when the pin drops a
 /// person it trusted, on a current load (newer than the pin's counter, on a
 /// branch it has a mark for, never on a detached HEAD), on `murk trust`, or
-/// on the machine's own save that takes them out.
+/// on the machine's own save that takes them out; and on a load that is its
+/// branch's next state (above that branch's mark) but not current, for the
+/// people it trusts that the vault at the branch's mark listed and this one
+/// does not.
 #[derive(Clone, Debug)]
 struct PinModel {
     generation: u64,
-    marks: BTreeSet<String>,
+    /// Branch → its mark, and the people the vault accepted at it listed.
+    marks: BTreeMap<String, (u64, BTreeSet<usize>)>,
     trusted: BTreeSet<usize>,
+    /// The vault id it accepted (empty before any).
+    vault_id: String,
+}
+
+impl PinModel {
+    /// Move `branch`'s mark for an accepted vault at `found` listing
+    /// `listed`, as `advance_marks` does: history never gives a branch its
+    /// first mark, and the members change only where the mark moves up.
+    fn advance(
+        &mut self,
+        branch: Option<String>,
+        found: u64,
+        listed: &BTreeSet<usize>,
+        current: bool,
+    ) {
+        let Some(branch) = branch else {
+            return;
+        };
+        match self.marks.get_mut(&branch) {
+            Some((mark, members)) => {
+                if found > *mark {
+                    *mark = found;
+                    members.clone_from(listed);
+                }
+            }
+            None if current => {
+                self.marks.insert(branch, (found, listed.clone()));
+            }
+            None => {}
+        }
+    }
 }
 
 struct Agent {
@@ -1389,8 +1471,12 @@ impl<'f> World<'f> {
             let bytes = world.clone_of(&obs).vault();
             let model = PinModel {
                 generation: generation_of(&bytes),
-                marks: BTreeSet::from(["main".to_string()]),
+                marks: BTreeMap::from([(
+                    "main".to_string(),
+                    (generation_of(&bytes), world.listed(&bytes)),
+                )]),
                 trusted: world.listed(&bytes),
+                vault_id: vault_id_of(&bytes),
             };
             world.pins.insert(obs, model);
         }
@@ -1627,25 +1713,38 @@ impl<'f> World<'f> {
         let Some(origin) = self.origins.get(&blob_id(bytes)).copied() else {
             return;
         };
-        let listed = self.listed(bytes);
-        for who in 0..PEOPLE.len() {
-            if listed.contains(&who) || dropped.as_ref().is_some_and(|d| !d.contains(&who)) {
-                continue;
-            }
-            let revoke = self
-                .revokes
+        // The step a removal of `who` counts from: their latest revoke at or
+        // before this vault, unless they were authorized again since; else
+        // this vault's own step (a member's own code that drops them, or a
+        // `murk trust` of a revision without them).
+        let revoked_at = |who: usize| {
+            self.revokes
                 .iter()
                 .filter(|&&(p, v)| p == who && v <= origin.step)
                 .map(|&(_, v)| v)
-                .max();
-            if let Some(v) = revoke
-                && !self.authorized_between(who, v, origin.step)
-            {
-                let removed = self.removed.entry(obs.clone()).or_default();
-                let known = removed.entry(who).or_insert_with(|| (v, at.to_string()));
-                if v > known.0 {
-                    *known = (v, at.to_string());
-                }
+                .max()
+                .filter(|&v| !self.authorized_between(who, v, origin.step))
+        };
+        // A pinned observer records exactly whom its pin drops, as murk does;
+        // an observer with no model, whom a harness revoke took out.
+        let records: Vec<(usize, usize)> = match &dropped {
+            Some(dropped) => dropped
+                .iter()
+                .map(|&who| (who, revoked_at(who).unwrap_or(origin.step)))
+                .collect(),
+            None => {
+                let listed = self.listed(bytes);
+                (0..PEOPLE.len())
+                    .filter(|who| !listed.contains(who))
+                    .filter_map(|who| revoked_at(who).map(|v| (who, v)))
+                    .collect()
+            }
+        };
+        for (who, v) in records {
+            let removed = self.removed.entry(obs.clone()).or_default();
+            let known = removed.entry(who).or_insert_with(|| (v, at.to_string()));
+            if v > known.0 {
+                *known = (v, at.to_string());
             }
         }
         if let Some(pin) = self.pins.get_mut(&obs)
@@ -1677,30 +1776,71 @@ impl<'f> World<'f> {
                     obs.clone(),
                     PinModel {
                         generation: found,
-                        marks: branch.into_iter().collect(),
+                        marks: branch
+                            .into_iter()
+                            .map(|b| (b, (found, listed.clone())))
+                            .collect(),
                         trusted: listed,
+                        vault_id: vault_id_of(bytes),
                     },
                 );
             }
             return Some(BTreeSet::new());
         };
-        let dropped = match took {
+        let mut other_vault = false;
+        let (dropped, current) = match took {
             // murk has not read it yet: the pin is unchanged.
             Took::Custom => return Some(BTreeSet::new()),
             Took::Load => {
-                let current = found > pin.generation
-                    && branch.as_ref().is_some_and(|b| pin.marks.contains(b));
-                if !current {
-                    return Some(BTreeSet::new());
+                let mark = branch.as_ref().and_then(|b| pin.marks.get(b));
+                // `is_current`: a pin with no trust decision yet takes any
+                // load as current; a murk 0.13 vault (generation 0) is newer
+                // only while the pin has seen no 0.14 state. Every observer
+                // here loads in a git checkout, so the product's
+                // outside-git arm never applies (a detached HEAD has no
+                // branch, so no mark).
+                let newer = found > pin.generation
+                    || (found == 0 && pin.generation == 0 && pin.vault_id.is_empty());
+                let current = pin.trusted.is_empty() || (newer && mark.is_some());
+                if current {
+                    let dropped = pin.trusted.difference(&listed).copied().collect();
+                    pin.trusted.clone_from(&listed);
+                    (dropped, true)
+                } else {
+                    // The branch's next state, below another branch's
+                    // counter: only who the branch's mark listed counts.
+                    let dropped: BTreeSet<usize> = match mark {
+                        Some((m, members)) if found > *m => members
+                            .iter()
+                            .filter(|p| pin.trusted.contains(p) && !listed.contains(p))
+                            .copied()
+                            .collect(),
+                        _ => BTreeSet::new(),
+                    };
+                    pin.trusted.retain(|p| !dropped.contains(p));
+                    (dropped, false)
                 }
-                let dropped = pin.trusted.difference(&listed).copied().collect();
-                pin.trusted = listed;
-                dropped
             }
             Took::Trust => {
-                let dropped = pin.trusted.difference(&listed).copied().collect();
-                pin.trusted = listed;
-                dropped
+                let id = vault_id_of(bytes);
+                if id.is_empty() {
+                    // A murk 0.13 copy only widens trust
+                    // (`older_pre_upgrade_copy`): nobody is dropped.
+                    pin.trusted.extend(listed.iter().copied());
+                    (BTreeSet::new(), true)
+                } else if !pin.vault_id.is_empty() && id != pin.vault_id {
+                    // Another vault at this path: murk clears every removal
+                    // record and drops nobody.
+                    other_vault = true;
+                    pin.vault_id = id;
+                    pin.trusted.clone_from(&listed);
+                    (BTreeSet::new(), true)
+                } else {
+                    pin.vault_id = id;
+                    let dropped = pin.trusted.difference(&listed).copied().collect();
+                    pin.trusted.clone_from(&listed);
+                    (dropped, true)
+                }
             }
             Took::OwnSave(_) => {
                 let (was, was_generation) = before.expect("an own save has the file it replaced");
@@ -1714,11 +1854,16 @@ impl<'f> World<'f> {
                     .collect();
                 pin.trusted.retain(|p| !dropped.contains(p));
                 pin.trusted.extend(listed.difference(&was));
-                dropped
+                (dropped, true)
             }
         };
-        pin.generation = pin.generation.max(found);
-        pin.marks.extend(branch);
+        if current {
+            pin.generation = pin.generation.max(found);
+        }
+        pin.advance(branch, found, &listed, current);
+        if other_vault {
+            self.removed.remove(obs);
+        }
         Some(dropped)
     }
 
@@ -2148,12 +2293,14 @@ impl<'f> World<'f> {
             if let Some(listed) = self.merged_listing(&ours, &theirs, &ancestor) {
                 self.expected.insert(blob_id(&result), listed);
             }
+            // The driver writes no pin: murk takes the result at the next
+            // load, under the load rules.
             self.accept(
                 Obs::Machine(m),
                 &result,
                 "wrote (merge result)",
                 &head(&mach),
-                Took::OwnSave(&ours),
+                Took::Custom,
             )?;
         }
         Ok(Ran::Accepted)
@@ -2352,23 +2499,11 @@ impl<'f> World<'f> {
                 let person = MACHINES[m.0].1;
                 let w = &self.fx.people[who.0];
                 // A vouch is this member's own code (a forge with no pin), not
-                // murk on this machine. murk here refuses a vault that lists
-                // someone it recorded as removed, so it could not load the
-                // vouch; nor any vault it is built on that lists such a
-                // person where the removal has reached the checkout (a revoked
-                // member's forgery a pull fast-forwarded in, say). No vouch is
-                // drawn there.
-                let obs = Obs::Machine(m.0);
-                let at = head(&mach);
-                let listing = self.listed(&mach.vault());
-                let removals = self.removals(&obs);
-                if removals.contains_key(&who.0)
-                    || removals.iter().any(|(p, (_, commit))| {
-                        listing.contains(p) && self.reaches(&obs, commit, &at)
-                    })
-                {
-                    return None;
-                }
+                // murk on this machine, so writing it accepts nothing here.
+                // The machine then loads it, as its next command would, and
+                // that load is what is judged: murk refuses a vault that lists
+                // someone it recorded as removed where the removal applies,
+                // and loads it where the removal has not reached the checkout.
                 let forged = self.forge(
                     &mach.vault(),
                     &[
@@ -2399,16 +2534,17 @@ impl<'f> World<'f> {
                     self.authorizes.push((who.0, step));
                     self.ci_signers.insert(who.0);
                 }
-                Some(
-                    self.accept(
-                        Obs::Machine(m.0),
-                        &forged,
-                        "wrote",
-                        &head(&mach),
-                        Took::Custom,
-                    )
-                    .map(|()| Ran::Accepted),
-                )
+                // The step is the vouch's write; the load only judges. A
+                // refused load must leave the file as it is.
+                let out = mach.murk().args(["export", "--json"]).output().unwrap();
+                self.last_load = Some(Printed::of(&out));
+                if !out.status.success() {
+                    return Some(
+                        refused(&forged, &mach.vault(), "murk export (after a vouch)", &out)
+                            .map(|_| Ran::Accepted),
+                    );
+                }
+                Some(self.accepted(Obs::Machine(m.0), &forged, "loaded (after a vouch)"))
             }
             Op::Sync { m } => Some(self.sync(step, m.0)),
             Op::MergeBranch {
@@ -2657,6 +2793,9 @@ impl<'f> World<'f> {
                     .write_stdin(format!("{}\n", value(key)))
                     .output()
                     .unwrap();
+                if let Err(e) = self.write_load(Obs::Erin, &erin, &before, out.status.success()) {
+                    return Some(Err(e));
+                }
                 if !out.status.success() {
                     return Some(refused(&before, &erin.vault(), "refused write", &out));
                 }
@@ -2893,6 +3032,8 @@ impl<'f> World<'f> {
                 }
                 self.step(step, &Op::ReAdd { m: *m, who: P(who) })
             }
+            Op::PrFlow { m, n } => self.pr_flow(step, m.0, *n),
+            Op::BranchCurrent { m, n } => self.branch_current(step, m.0, *n),
             Op::AgentProbe { at, how } => {
                 let agent = self.agent.as_ref()?;
                 let secret = fs::read_to_string(&agent.key_file).ok()?;
@@ -3234,6 +3375,29 @@ impl<'f> World<'f> {
             .map(|()| Ran::Accepted)
     }
 
+    /// The load every CLI write runs first (`load_vault_locked`): murk takes
+    /// `before`, the file the write replaces, under the load rules, so the
+    /// pin can drop and record someone before the save. A write that
+    /// succeeded loaded it; for a refused one, a load of the same, unchanged
+    /// file says whether that first load was accepted (a repeat of an
+    /// accepted load changes nothing in the pin). Run before the write is
+    /// committed, so the checkout is still the commit `before` is from.
+    fn write_load(
+        &mut self,
+        obs: Obs,
+        clone: &Machine,
+        before: &[u8],
+        wrote: bool,
+    ) -> Result<(), String> {
+        if !wrote && !export(clone).ok {
+            return Ok(());
+        }
+        let at = head(clone);
+        self.check_accept(&obs, before, "loaded (before a write)", &at)?;
+        self.note_accept(obs, before, &at, Took::Load);
+        Ok(())
+    }
+
     /// After a member's write: a refusal changed nothing; an accepted write
     /// is committed, recorded, accepted by the writer's machine, passes
     /// `extra`, and loads again there.
@@ -3248,6 +3412,7 @@ impl<'f> World<'f> {
     ) -> Result<Ran, String> {
         let mach = self.machine(m);
         let now = mach.vault();
+        self.write_load(Obs::Machine(m), &mach, before, out.status.success())?;
         if !out.status.success() {
             return refused(before, &now, "refused write", &out);
         }
@@ -3281,6 +3446,185 @@ impl<'f> World<'f> {
             ));
         }
         Ok(Ran::Accepted)
+    }
+
+    /// Play `op` as one part of a composite step, at `step`. `Err` holds
+    /// what the composite step returns when the part did not apply or was
+    /// not accepted.
+    fn part(&mut self, step: usize, op: &Op) -> Result<(), Option<Result<Ran, String>>> {
+        match self.step(step, op) {
+            Some(Ok(Ran::Accepted)) => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    /// For a composite removal step on machine `m`, at the vault it has
+    /// checked out: the n-th (wrapping) pair of a teammate's machine and a
+    /// member to remove. Both people are listed and trusted by `m`'s pin, the
+    /// member is neither `m`'s person nor the teammate's, and the
+    /// teammate's clone has `m`'s commit. `None` when no pair fits.
+    fn removal_pair(&self, m: usize, n: usize) -> Option<(usize, usize)> {
+        let trusted = &self.pins.get(&Obs::Machine(m))?.trusted;
+        let mach = self.machine(m);
+        let listed = self.listed(&mach.vault());
+        let base = head(&mach);
+        let person = MACHINES[m].1;
+        let pairs: Vec<(usize, usize)> = (0..MACHINES.len())
+            .filter(|&b| {
+                b != m && trusted.contains(&MACHINES[b].1) && listed.contains(&MACHINES[b].1)
+            })
+            .flat_map(|b| {
+                listed
+                    .iter()
+                    .copied()
+                    .filter(move |&p| p != person && p != MACHINES[b].1 && trusted.contains(&p))
+                    .map(move |p| (b, p))
+            })
+            .collect();
+        let (by, who) = *pairs.get(n % pairs.len().max(1))?;
+        let fork = self.machine(by);
+        fork.git_ok(&["fetch", "-q", "origin"]);
+        fork.git(&["cat-file", "-e", &format!("{base}^{{commit}}")])
+            .status
+            .success()
+            .then_some((by, who))
+    }
+
+    /// [`Op::PrFlow`]. Counts [`PR_FLOW_DECISIVE`] when `m` holds the record
+    /// and refuses the replay.
+    fn pr_flow(&mut self, step: usize, m: usize, n: usize) -> Option<Result<Ran, String>> {
+        let mach = self.machine(m);
+        if let Err(r) = self.part(step, &Op::Sync { m: M(m) }) {
+            return r;
+        }
+        if let Err(r) = self.part(
+            step + 1,
+            &Op::Load {
+                m: M(m),
+                at: At::Main,
+            },
+        ) {
+            return r;
+        }
+        let (by, who) = self.removal_pair(m, n)?;
+        let base = head(&mach);
+        let topic = format!("pr{step}");
+        mach.git_ok(&["checkout", "-q", "-f", "-B", &topic, &base]);
+        let revoke = Op::Revoke {
+            m: M(m),
+            who: Target::Person(P(who)),
+        };
+        if let Err(r) = self.part(step + 2, &revoke) {
+            return r;
+        }
+        // A teammate who has not seen the revoke saves on a branch off the
+        // same commit: a stale fork, still listing the member.
+        let fork = self.machine(by);
+        fork.git_ok(&["checkout", "-q", "-f", "-B", &format!("stale{step}"), &base]);
+        for key in [K(0), K(1)] {
+            if let Err(r) = self.part(step + 3 + key.0, &Op::Save { m: M(by), key }) {
+                return r;
+            }
+        }
+        let stale = fork.vault();
+        // The pull request merges (a fast-forward); a repo writer then
+        // commits the stale fork on main.
+        mach.git_ok(&["checkout", "-q", "-f", "main"]);
+        mach.git_ok(&["merge", "-q", "--ff-only", &topic]);
+        fs::write(mach.dir.join(".murk"), &stale).unwrap();
+        mach.commit(&format!("s{step} replay"));
+        let decisive = self.removals(&Obs::Machine(m)).contains_key(&who);
+        let loaded = self.step(
+            step + 5,
+            &Op::Load {
+                m: M(m),
+                at: At::Main,
+            },
+        )?;
+        if decisive && matches!(loaded, Ok(Ran::Refused(_))) {
+            self.stats.count(PR_FLOW_DECISIVE, true);
+        }
+        mach.git_ok(&["reset", "-q", "--hard", &topic]);
+        Some(loaded)
+    }
+
+    /// [`Op::BranchCurrent`]. Counts [`BRANCH_CURRENT_DECISIVE`] when `m`
+    /// loaded the revoke below its highest counter, holds the record, and
+    /// refuses the replay.
+    fn branch_current(&mut self, step: usize, m: usize, n: usize) -> Option<Result<Ran, String>> {
+        let mach = self.machine(m);
+        if let Err(r) = self.part(step, &Op::Sync { m: M(m) }) {
+            return r;
+        }
+        if let Err(r) = self.part(
+            step + 1,
+            &Op::Load {
+                m: M(m),
+                at: At::Main,
+            },
+        ) {
+            return r;
+        }
+        let (by, who) = self.removal_pair(m, n)?;
+        let base = head(&mach);
+        let revoked = format!("rv{step}");
+        let revoker = self.machine(by);
+        revoker.git_ok(&["checkout", "-q", "-f", "-B", &revoked, &base]);
+        // m saves ahead on a feature branch.
+        mach.git_ok(&["checkout", "-q", "-f", "-B", &format!("feat{step}"), &base]);
+        for key in [K(0), K(1), K(2)] {
+            if let Err(r) = self.part(step + 2 + key.0, &Op::Save { m: M(m), key }) {
+                return r;
+            }
+        }
+        // The teammate revokes over the same main and pushes it.
+        let revoke = Op::Revoke {
+            m: M(by),
+            who: Target::Person(P(who)),
+        };
+        if let Err(r) = self.part(step + 5, &revoke) {
+            return r;
+        }
+        revoker.git_ok(&["push", "-q", "-f", "origin", &revoked]);
+        // m saves a stale fork off main before it has seen the revoke.
+        mach.git_ok(&["checkout", "-q", "-f", "-B", &format!("stale{step}"), &base]);
+        for key in [K(0), K(1)] {
+            if let Err(r) = self.part(step + 6 + key.0, &Op::Save { m: M(m), key }) {
+                return r;
+            }
+        }
+        let stale = mach.vault();
+        // m fast-forwards main to the revoke and loads it: main's next
+        // state, below m's highest counter.
+        mach.git_ok(&["checkout", "-q", "-f", "main"]);
+        mach.git_ok(&["fetch", "-q", "origin"]);
+        mach.git_ok(&["merge", "-q", "--ff-only", &format!("origin/{revoked}")]);
+        let below = self.pins.get(&Obs::Machine(m)).map(|p| p.generation)
+            > Some(generation_of(&mach.vault()));
+        if let Err(r) = self.part(
+            step + 8,
+            &Op::Load {
+                m: M(m),
+                at: At::Main,
+            },
+        ) {
+            return r;
+        }
+        fs::write(mach.dir.join(".murk"), &stale).unwrap();
+        mach.commit(&format!("s{step} replay"));
+        let decisive = below && self.removals(&Obs::Machine(m)).contains_key(&who);
+        let loaded = self.step(
+            step + 9,
+            &Op::Load {
+                m: M(m),
+                at: At::Main,
+            },
+        )?;
+        if decisive && matches!(loaded, Ok(Ran::Refused(_))) {
+            self.stats.count(BRANCH_CURRENT_DECISIVE, true);
+        }
+        mach.git_ok(&["reset", "-q", "--hard", &format!("origin/{revoked}")]);
+        Some(loaded)
     }
 
     /// Fetch, merge `origin/main` into `main`, push.
@@ -3325,12 +3669,14 @@ impl<'f> World<'f> {
             if let Some(listed) = self.merged_listing(&ours, &theirs, &ancestor) {
                 self.expected.insert(blob_id(&result), listed);
             }
+            // The driver writes no pin: murk takes the result at the next
+            // load, under the load rules.
             self.accept(
                 Obs::Machine(m),
                 &result,
                 "wrote (merge result)",
                 &head(&mach),
-                Took::OwnSave(&ours),
+                Took::Custom,
             )?;
         }
         if push {
@@ -3709,10 +4055,20 @@ impl Run {
     /// should not. `None`: the step did not apply, and did not run.
     fn play(&mut self, op: &Op) -> Option<Result<Ran, String>> {
         self.steps += 1;
-        let result = self.world.step(self.steps, op);
+        let result = self.world.step(self.world_step(), op);
         self.world.stats.count(kind(op), result.is_some());
         let result = result?;
         Some(result.and_then(|ran| self.world.check_all_reads().map(|()| ran)))
+    }
+
+    /// The world's step for the step last played (see [`SUBSTEPS`]).
+    fn world_step(&self) -> usize {
+        self.steps * SUBSTEPS
+    }
+
+    /// The world's step the next step will play at.
+    fn next_world_step(&self) -> usize {
+        (self.steps + 1) * SUBSTEPS
     }
 
     /// Everything this run ran and skipped.
@@ -4411,6 +4767,33 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                 .decisive(),
             ],
         ),
+        // R-I10-h:pr-flow: bob revokes carol on a topic branch; it merges
+        // into main and a stale fork is committed there before bob's
+        // machine loads main. main's history holds the removal: refused.
+        (
+            "a pull-request removal holds against a stale fork committed on main",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                refuses(Op::PrFlow { m: bob_m, n: 0 }).decisive(),
+            ],
+        ),
+        // R-I10-h:branch-current: bob's machine saved ahead on a feature
+        // branch, then loads main's revoke of carol below its highest
+        // counter; it still records the removal, so the stale fork later
+        // committed on main is refused.
+        (
+            "a removal loaded as main's next state below the machine's counter holds",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                refuses(Op::BranchCurrent { m: bob_m, n: 0 }).decisive(),
+            ],
+        ),
     ]
 }
 
@@ -4433,6 +4816,25 @@ const DECISIVE_READD: &str = "re-add:decisive";
 /// From this many random cases, at least one must reach [`DECISIVE_READD`]
 /// (the `AuthorizeAgain` step builds it).
 const DECISIVE_READD_FROM_CASES: u32 = 64;
+
+/// The stats kind of a pull-request removal that ran in full: the machine
+/// that revoked on a topic branch holds the record and refuses the stale
+/// fork committed on `main` after the fast-forward (see [`Op::PrFlow`]).
+const PR_FLOW_DECISIVE: &str = "pr-flow:decisive";
+/// The stats kind of a removal loaded as its branch's next state below the
+/// machine's highest counter, then held against a stale fork on that branch
+/// (see [`Op::BranchCurrent`]).
+const BRANCH_CURRENT_DECISIVE: &str = "branch-current:decisive";
+/// The fewest of each composite removal shape per random case, in a run of
+/// [`FLOOR_FROM_CASES`] cases or more: about a third of the rate a
+/// twenty-case run reached (pr-flow 4, branch-current 3).
+const DECISIVE_FLOORS: [(&str, f64); 2] =
+    [(PR_FLOW_DECISIVE, 0.05), (BRANCH_CURRENT_DECISIVE, 0.05)];
+
+/// The world clock advances this much per step, so the parts of a
+/// composite step ([`Op::PrFlow`], [`Op::BranchCurrent`]) each have their
+/// own step, in order, before the next step's.
+const SUBSTEPS: usize = 16;
 
 /// The fewest cases per random case each oracle must have judged where it
 /// could fail (see [`Stats::judged`]), in a run of [`FLOOR_FROM_CASES`] cases
@@ -4552,6 +4954,20 @@ fn trust_invariants_hold_across_machines() {
             cases(),
             totals.report()
         ));
+    }
+    if cases() >= FLOOR_FROM_CASES {
+        for (shape, per_case) in DECISIVE_FLOORS {
+            let floor = (per_case * f64::from(cases())).ceil() as usize;
+            if totals.ran_of(shape) < floor {
+                report.push(format!(
+                    "{shape} ran {} times in {} random cases (seed {seed}), below the floor of \
+                     {floor}: the generator no longer reaches that removal shape\n{}",
+                    totals.ran_of(shape),
+                    cases(),
+                    totals.report()
+                ));
+            }
+        }
     }
     if cases() >= FLOOR_FROM_CASES {
         for (oracle, per_case) in FLOORS {
@@ -5788,7 +6204,7 @@ fn row_r_l_merge() {
         merge_teammate(&mut run, &fork)?;
         let alice1 = run.world.machine(0);
         let ours = alice1.vault();
-        let step = run.steps + 1;
+        let step = run.next_world_step();
         let branch = run.world.push_branch_off(&fork.parent, &fork.stale, step);
         let probe = merge_probe(&alice1, &format!("origin/{branch}"));
         p.require(
@@ -6016,7 +6432,7 @@ fn row_r_l_unsigned() {
         )?;
         let after_save = reference(&erin);
         erin.git_ok(&["push", "-q", "origin", "HEAD:main"]);
-        let step = run.steps + 1;
+        let step = run.next_world_step();
         run.world.record(&erin.vault(), None, step, false);
         run.setup(&[
             accepts(Op::Sync { m: M(0) }),
@@ -6146,7 +6562,7 @@ fn readers_oracle_follows_the_harness_history_not_the_vault() {
     run.setup(&[accepts(Op::Save { m: M(0), key: K(0) })])
         .unwrap();
     let saved = run.world.machine(0).vault();
-    let value = format!("s{}-K1", run.steps);
+    let value = format!("s{}-K1", run.world_step());
     let blob = blob_id(&saved);
     let history = run.world.expected.get(&blob).cloned();
     assert_eq!(
@@ -6174,12 +6590,12 @@ fn readers_oracle_follows_the_harness_history_not_the_vault() {
 /// A revoked member's forgery, signed with their own key, that a pull on
 /// alice's machine fast-forwards in (no merge driver runs, so murk judges
 /// nothing): murk on her machine refuses to load it or write over it, since
-/// it is signed by and lists someone it recorded as removed. A vouch, which is
-/// a member's own code and not murk, is not drawn over it: murk here could
-/// never load the result. Seeds 1794831267910282368 and 1794858455667855160
-/// drew it and failed the oracle as murk's own write.
+/// it is signed by and lists someone it recorded as removed. A vouch over it
+/// is drawn: it is a member's own code, so its write is not judged as murk's
+/// (seeds 1794831267910282368 and 1794858455667855160 once failed that way),
+/// and the load that follows it on her machine is refused.
 #[test]
-fn no_vouch_is_drawn_over_a_vault_murk_here_refuses() {
+fn a_vouch_over_a_vault_murk_here_refuses_is_judged_by_the_load() {
     let mut run = Run::seasoned();
     run.setup(&[
         runs(Op::Forge {
@@ -6197,14 +6613,18 @@ fn no_vouch_is_drawn_over_a_vault_murk_here_refuses() {
         run.world.listed(&alice.vault()).contains(&3),
         "the pull brought in the forgery, which lists dave"
     );
+    let vouched = run.play(&Op::Vouch {
+        m: M(0),
+        who: P(0),
+        key: Planted::Sock,
+    });
     assert!(
-        run.play(&Op::Vouch {
-            m: M(0),
-            who: P(0),
-            key: Planted::Sock,
-        })
-        .is_none(),
-        "a vouch over a vault murk here refuses is not drawn"
+        matches!(vouched, Some(Ok(Ran::Accepted))),
+        "the vouch is drawn, and its write is not judged as murk's: {vouched:?}"
+    );
+    assert!(
+        run.world.last_load.as_ref().is_some_and(|l| !l.ok),
+        "murk here refuses to load the vouch"
     );
     run.setup(&[
         refuses(Op::Load {

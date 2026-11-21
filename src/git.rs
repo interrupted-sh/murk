@@ -1387,6 +1387,43 @@ pub fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
         )
 }
 
+/// The commit local branch `branch` points at, as a full id, in the
+/// repository holding the directory `dir`. `None` when there is no such
+/// branch (deleted, say) or git fails. Read-only: takes no `index.lock`.
+pub fn branch_tip(dir: &Path, branch: &str) -> Option<String> {
+    let spec = format!("refs/heads/{branch}^{{commit}}");
+    let id = git_output(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ],
+    )?;
+    is_commit_id(&id).then_some(id)
+}
+
+/// The vault file `abs_vault` as committed at `commit` (a full commit id),
+/// read with `git cat-file blob <commit>:./<name>` from the vault's
+/// directory. `None` when the file is not in that commit, the commit is
+/// missing here (a shallow clone, say), or git fails. Read-only: takes no
+/// `index.lock`.
+pub fn vault_at_commit(abs_vault: &Path, commit: &str) -> Option<Vec<u8>> {
+    let (dir, name) = (abs_vault.parent()?, abs_vault.file_name()?.to_str()?);
+    if !is_commit_id(commit) {
+        return None;
+    }
+    let out = git_command()
+        .args(["cat-file", "blob", &format!("{commit}:./{name}")])
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
 /// A path naming a vault the same way from every worktree of its repository:
 /// the repository's common git directory joined with the vault's path inside
 /// the checkout. `None` when the vault is not inside a git checkout.

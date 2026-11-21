@@ -1,6 +1,6 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -2059,7 +2059,14 @@
+@@ -2153,7 +2153,14 @@
      // the vault outside git) is current (see `is_current`): history only
      // narrows the pin.
      let current = match how {
@@ -15,4 +15,4 @@
 +        ),
          Acceptance::Trust { .. } | Acceptance::OwnSave { .. } => true,
      };
-     let mut pin = prior_v2.cloned().unwrap_or_default();
+     let dropped_on_branch = match how {
