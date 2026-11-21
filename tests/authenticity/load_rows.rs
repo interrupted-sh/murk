@@ -1928,7 +1928,14 @@ fn row_r_i5_home_key_in_checkout() {
             "with HOME at the checkout root, the committed key file is not read",
         );
         p.target(
-            get.stderr.matches("git tracks .config/murk/keys/").count() == 1,
+            get.stderr
+                .lines()
+                .filter(|l| {
+                    l.starts_with("warn a git repository tracks ")
+                        && l.contains(".config/murk/keys/")
+                })
+                .count()
+                == 1,
             "one warning names the tracked key file",
         );
         Ok(())
@@ -1945,14 +1952,29 @@ fn row_r_i5_home_key_work_tree_untracked() {
     rows::check("R-I5-home:key-work-tree-untracked", |p| {
         let base = TempDir::new().unwrap();
         let alice = Machine::new(base.path(), "alice");
-        let proj = alice.home.join("proj");
-        alice.init(&proj, "alice");
-        alice.add(&proj, "DB_URL", "prod-db");
-        let (entry, _) = alice.signer_entry(&proj);
-        // HOME becomes a dotfiles repository, which keeps murk's own files
-        // out of git.
+        // HOME is a dotfiles repository, which keeps murk's own files out
+        // of git, before murk has made any directory under it: `murk init`
+        // must still store the key.
         git_ok(&alice.home, &["init", "-q", "-b", "main"]);
         fs::write(alice.home.join(".gitignore"), ".config/murk/\n").unwrap();
+        let proj = alice.home.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        let init = out({
+            let mut cmd = alice.murk(&proj);
+            cmd.arg("init").write_stdin("alice\n");
+            cmd
+        });
+        p.reached();
+        p.note(init.said());
+        p.target(
+            init.ok && !init.stderr.contains("key directory"),
+            "murk init stores the key with no warning about the key store",
+        );
+        if !init.ok {
+            return Ok(());
+        }
+        alice.add(&proj, "DB_URL", "prod-db");
+        let (entry, _) = alice.signer_entry(&proj);
         commit(&alice.home, "dotfiles and the vault, not the key");
         let tracked = git(&alice.home, &["ls-files", "--", ".config/murk/keys"]);
         p.require(
@@ -1966,7 +1988,6 @@ fn row_r_i5_home_key_work_tree_untracked() {
                 .args(["get", "DB_URL"]);
             cmd
         });
-        p.reached();
         p.note(get.said());
         p.target(
             get.ok && get.stdout == "prod-db\n",
@@ -2058,55 +2079,149 @@ fn row_r_i5_home_relative() {
     });
 }
 
-/// With an absolute `HOME` equal to the checkout root (a container with
-/// `HOME=/workspace`, say), the pin directory is inside the checkout, so a
-/// repository can commit a pin there. A pin that git tracks is never used:
-/// a planted pin that trusts Mallory does not let her vault load. It is
-/// refused as on a machine with no pin, with one warning that names the
-/// tracked file.
-#[test]
-fn row_r_i5_home_in_checkout() {
-    rows::check("R-I5-home:in-checkout", |p| {
+/// Where a repository commits the pin that `HOME` then reads, relative to
+/// the vault.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinLayout {
+    /// `HOME` is the vault's checkout, which commits the pin.
+    Checkout,
+    /// As `Checkout`, with `GIT_INDEX_FILE` naming an index that does not
+    /// exist in the environment.
+    IndexFile,
+    /// `HOME` is an outer checkout that commits the pin; the vault is in a
+    /// repository nested inside it.
+    Nested,
+    /// `HOME` is a main checkout that commits the pin; the vault is in a
+    /// linked worktree of the same repository, outside `HOME`.
+    Linked,
+    /// `HOME` is the vault's checkout, and `.config` is a submodule that
+    /// commits the pin: the checkout itself tracks only the gitlink.
+    Submodule,
+}
+
+/// With an absolute `HOME` at or above a checkout (a container with
+/// `HOME=/workspace`, say), a repository can commit a file in the pin
+/// directory. A pin that a git repository tracks is never used, whichever
+/// repository tracks it (see [`PinLayout`]): a planted pin that trusts
+/// Mallory does not let her vault load. It is refused as on a machine with
+/// no pin, with one warning that names the tracked file.
+fn committed_pin_refused(id: &str, layout: PinLayout) {
+    rows::check(id, |p| {
         let base = TempDir::new().unwrap();
-        let (machine, repo) = alice_repo(base.path());
+        let outer = base.path().join("repo");
+        fs::create_dir_all(&outer).unwrap();
+        git_ok(&outer, &["init", "-q", "-b", "main"]);
+        let vault_dir = match layout {
+            PinLayout::Checkout | PinLayout::IndexFile | PinLayout::Submodule => outer.clone(),
+            PinLayout::Nested => {
+                let sub = outer.join("sub");
+                fs::create_dir_all(&sub).unwrap();
+                git_ok(&sub, &["init", "-q", "-b", "main"]);
+                sub
+            }
+            PinLayout::Linked => {
+                git_ok(
+                    &outer,
+                    &[
+                        "-c",
+                        "commit.gpgsign=false",
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        "start",
+                    ],
+                );
+                let wt = base.path().join("wt");
+                git_ok(
+                    &outer,
+                    &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt"],
+                );
+                wt
+            }
+        };
+        let machine = Machine::new(base.path(), "alice");
+        machine.init(&vault_dir, "alice");
         let alice = Person::of(machine);
-        commit(&repo, "alice's vault");
 
         // Mallory's vault lists alice; the pin a normal HOME would write for
-        // it (the file name depends only on the repository) is committed in
-        // the checkout, where HOME=<checkout> reads it.
+        // it (the file name depends only on where the vault is) is committed
+        // where HOME reads it.
         let forged = mallory_vault(
             base.path(),
             &[("alice", alice.machine.pubkey())],
             &[("DB_URL", "evil")],
         );
-        fs::copy(&forged, repo.join(".murk")).unwrap();
+        fs::copy(&forged, vault_dir.join(".murk")).unwrap();
         let planter = Person::new(base.path(), "planter", &alice.key);
-        let planted = planter.trust(&repo, ".murk");
+        let planted = planter.trust(&vault_dir, ".murk");
         p.require(planted.ok, format!("the pin to plant: {}", planted.said()))?;
-        let planted_dir = repo.join(".config").join("murk").join("signer-pins");
-        fs::create_dir_all(&planted_dir).unwrap();
-        for entry in fs::read_dir(pin_dir(&planter.machine)).unwrap() {
-            let path = entry.unwrap().path();
-            fs::copy(&path, planted_dir.join(path.file_name().unwrap())).unwrap();
+        let pins_in = |root: &Path| {
+            let dir = root.join("murk").join("signer-pins");
+            fs::create_dir_all(&dir).unwrap();
+            for entry in fs::read_dir(pin_dir(&planter.machine)).unwrap() {
+                let path = entry.unwrap().path();
+                fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+            }
+        };
+        if layout == PinLayout::Submodule {
+            let source = base.path().join("config-source");
+            fs::create_dir_all(&source).unwrap();
+            git_ok(&source, &["init", "-q", "-b", "main"]);
+            pins_in(&source);
+            commit(&source, "the pin");
+            git_ok(
+                &outer,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "-q",
+                    source.to_str().unwrap(),
+                    ".config",
+                ],
+            );
+        } else {
+            pins_in(&outer.join(".config"));
         }
-        commit(&repo, "mallory's vault and pin");
-        let control = planter.get(&repo, ".murk", "DB_URL");
+        // Commit only the pin: a nested repository's vault stays its own.
+        git_ok(&outer, &["add", "--", ".config"]);
+        git_ok(
+            &outer,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "the pin",
+            ],
+        );
+        let tracked = git(&outer, &["ls-files", "--", ".config"]);
+        p.require(
+            !tracked.stdout.is_empty(),
+            "a repository at HOME tracks the planted pin or its submodule",
+        )?;
+        let control = planter.get(&vault_dir, ".murk", "DB_URL");
         p.require(
             control.stdout.contains("evil"),
             "the planted pin trusts Mallory where it is read",
         )?;
 
         let get = {
-            let mut cmd = alice.murk(&repo);
-            cmd.env("HOME", &repo).args(["get", "DB_URL"]);
+            let mut cmd = alice.murk(&vault_dir);
+            cmd.env("HOME", &outer).args(["get", "DB_URL"]);
+            if layout == PinLayout::IndexFile {
+                cmd.env("GIT_INDEX_FILE", base.path().join("no-such-index"));
+            }
             out(cmd)
         };
         p.reached();
         p.note(get.said());
         p.target(
             !get.ok && !get.stdout.contains("evil"),
-            "with HOME at the checkout root, Mallory's vault is refused",
+            "with HOME at or above the vault's checkout, Mallory's vault is refused",
         );
         p.target(
             get.stderr.contains("not trusted on this machine"),
@@ -2114,13 +2229,42 @@ fn row_r_i5_home_in_checkout() {
         );
         p.target(
             get.stderr
-                .matches("git tracks .config/murk/signer-pins/")
+                .lines()
+                .filter(|l| {
+                    l.starts_with("warn a git repository tracks ")
+                        && l.contains(".config/murk/signer-pins/")
+                })
                 .count()
                 == 1,
             "one warning names the tracked pin file",
         );
         Ok(())
     });
+}
+
+#[test]
+fn row_r_i5_home_in_checkout() {
+    committed_pin_refused("R-I5-home:in-checkout", PinLayout::Checkout);
+}
+
+#[test]
+fn row_r_i5_home_in_checkout_index_file() {
+    committed_pin_refused("R-I5-home:in-checkout-index-file", PinLayout::IndexFile);
+}
+
+#[test]
+fn row_r_i5_home_nested_repo() {
+    committed_pin_refused("R-I5-home:nested-repo", PinLayout::Nested);
+}
+
+#[test]
+fn row_r_i5_home_linked_worktree() {
+    committed_pin_refused("R-I5-home:linked-worktree", PinLayout::Linked);
+}
+
+#[test]
+fn row_r_i5_home_submodule() {
+    committed_pin_refused("R-I5-home:submodule", PinLayout::Submodule);
 }
 
 /// A HOME that is itself a git work tree (a dotfiles repository) with a

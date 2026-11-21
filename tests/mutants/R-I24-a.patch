@@ -7,6 +7,6 @@
 +    if pin_writes_off() {
 +        return Vec::new();
 +    }
-     let Some(dir) = pin_dir(vault_path) else {
+     let Some(dir) = pin_dir() else {
          return Vec::new();
      };

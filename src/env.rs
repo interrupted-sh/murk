@@ -446,7 +446,7 @@ fn vault_hash(abs_path: &Path) -> String {
 /// also accepts the key stored for the same vault in a sibling git worktree.
 pub fn key_file_path(vault_path: &str) -> Result<std::path::PathBuf, String> {
     let abs_path = key_naming_path(&absolute_vault_path(vault_path)?);
-    Ok(dirs_path(vault_path)?.join(vault_hash(&abs_path)))
+    Ok(dirs_path()?.join(vault_hash(&abs_path)))
 }
 
 /// Find a stored key for `vault_path`, or `None` when the operator has none.
@@ -471,7 +471,7 @@ pub fn discover_key_file(vault_path: &str) -> Option<std::path::PathBuf> {
         return Some(own);
     }
     let as_spelled = absolute_vault_path(vault_path).ok()?;
-    let keys_dir = dirs_path(vault_path).ok()?;
+    let keys_dir = dirs_path().ok()?;
     let legacy = keys_dir.join(vault_hash(&as_spelled));
     if legacy != own && legacy.exists() {
         return Some(legacy);
@@ -550,7 +550,7 @@ pub fn stored_keys_for_neighbour_vaults(vault_path: &str) -> Vec<(String, std::p
 /// grant named the same across two vaults from colliding.
 pub fn agent_key_file_path(vault_path: &str, name: &str) -> Result<std::path::PathBuf, String> {
     let short_hash = vault_hash(&key_naming_path(&absolute_vault_path(vault_path)?));
-    Ok(agent_keys_dir(vault_path)?.join(format!("{short_hash}-{name}")))
+    Ok(agent_keys_dir()?.join(format!("{short_hash}-{name}")))
 }
 
 /// The home directory: `HOME`, else `USERPROFILE`. `None` when neither is
@@ -610,18 +610,17 @@ fn shorten_home(path: &str, home: &str) -> String {
     }
 }
 
-/// Return `~/.config/murk/agent-keys/` for the vault at `vault_path`,
-/// creating it if needed (dir `0700`). An error when git tracks a file in it
-/// (see [`config_subdir`]).
-pub fn agent_keys_dir(vault_path: &str) -> Result<std::path::PathBuf, String> {
-    config_subdir("agent-keys", "agent key directory", vault_path)
+/// Return `~/.config/murk/agent-keys/`, creating it if needed (dir `0700`).
+/// An error when a git repository tracks a file in it (see
+/// [`config_subdir`]).
+pub fn agent_keys_dir() -> Result<std::path::PathBuf, String> {
+    config_subdir("agent-keys", "agent key directory")
 }
 
-/// Return `~/.config/murk/keys/` for the vault at `vault_path`, creating it
-/// if needed (dir `0700`). An error when git tracks a file in it (see
-/// [`config_subdir`]).
-fn dirs_path(vault_path: &str) -> Result<std::path::PathBuf, String> {
-    config_subdir("keys", "key directory", vault_path)
+/// Return `~/.config/murk/keys/`, creating it if needed (dir `0700`). An
+/// error when a git repository tracks a file in it (see [`config_subdir`]).
+fn dirs_path() -> Result<std::path::PathBuf, String> {
+    config_subdir("keys", "key directory")
 }
 
 /// Whether `~/.config/murk/keys/` exists, without creating it. Lookups that
@@ -633,22 +632,21 @@ pub(crate) fn has_key_store() -> bool {
 
 /// Return `~/.config/murk/<name>/`, creating it if needed. On Unix both it and
 /// `~/.config/murk` are set to `0700`. `what` names the directory in the
-/// errors. An error, before anything is created, when the directory is
-/// inside the work tree of the vault at `vault_path` and git tracks a file
-/// in it (see [`crate::pins::committed_dir`]): a key file that a repository
-/// commits is never read or replaced.
-fn config_subdir(name: &str, what: &str, vault_path: &str) -> Result<std::path::PathBuf, String> {
+/// errors. An error, before anything is created, when a git repository
+/// tracks a file in it, or murk cannot ask git (see
+/// [`crate::pins::committed_dir`]): a key file that a repository commits is
+/// never read or replaced.
+fn config_subdir(name: &str, what: &str) -> Result<std::path::PathBuf, String> {
     let home = home_dir()
         .ok_or("cannot determine home directory: HOME is unset, empty or not an absolute path")?;
     let dir = home.join(".config").join("murk").join(name);
     if crate::pins::committed_dir(
-        vault_path,
         &dir,
         &format!("the {what}"),
-        "murk reads and stores no key there for this vault: set MURK_KEY or MURK_KEY_FILE",
+        "murk reads and stores no key there. Set MURK_KEY or MURK_KEY_FILE",
     ) {
         return Err(format!(
-            "the {what} {} is inside the repository, and git tracks a file in it or murk cannot ask git (see the warning above), so murk does not use it for this vault. Set MURK_KEY or MURK_KEY_FILE, or set HOME to a directory outside the repository",
+            "murk does not use the {what} {}: a git repository tracks a file in it, or murk cannot ask git (see the warning above). Set MURK_KEY or MURK_KEY_FILE, or set HOME to a directory outside the repository",
             dir.display()
         ));
     }
@@ -1851,7 +1849,7 @@ mod tests {
 
         let key_path = key_file_path("/project/.murk").unwrap();
         let agent_path = agent_key_file_path("/project/.murk", "cursor").unwrap();
-        let agent_dir = agent_keys_dir("/project/.murk").unwrap();
+        let agent_dir = agent_keys_dir().unwrap();
 
         unsafe {
             match &prev_home {

@@ -748,7 +748,7 @@ impl InspectedVault {
                 return Err(MurkError::Trust(msg));
             }
             trust::Verdict::Trusted if self.grant => {}
-            trust::Verdict::Trusted if crate::pins::signer_pin_available(vault_path) => {
+            trust::Verdict::Trusted if crate::pins::signer_pin_available() => {
                 let loaded = self.loaded();
                 let mut refused = None;
                 let written = crate::pins::update(vault_path, |fresh| {

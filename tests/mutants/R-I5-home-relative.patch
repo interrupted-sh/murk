@@ -1,9 +1,9 @@
 --- a/src/pins.rs
 +++ b/src/pins.rs
-@@ -743,7 +743,7 @@
- /// absolute `HOME` inside the checkout allows. murk then reads and writes
- /// no pin, as with no `HOME` at all.
- fn pin_dir(vault_path: &str) -> Option<PathBuf> {
+@@ -742,7 +742,7 @@
+ /// (see [`committed_dir`]), which an absolute `HOME` at or above a checkout
+ /// allows. murk then reads and writes no pin, as with no `HOME` at all.
+ fn pin_dir() -> Option<PathBuf> {
 -    let dir = crate::env::home_dir()?
 +    let dir = PathBuf::from(std::env::var_os("HOME")?)
          .join(".config")

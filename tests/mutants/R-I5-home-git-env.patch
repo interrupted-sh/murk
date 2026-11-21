@@ -1,0 +1,13 @@
+--- a/src/pins.rs
++++ b/src/pins.rs
+@@ -871,7 +871,9 @@
+     };
+     let mut cmd = crate::git::git_command();
+     for name in GIT_DISCOVERY_ENV {
+-        cmd.env_remove(name);
++        if name != "GIT_INDEX_FILE" {
++            cmd.env_remove(name);
++        }
+     }
+     let out = cmd
+         .env("GIT_LITERAL_PATHSPECS", "1")

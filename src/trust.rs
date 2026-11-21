@@ -1333,7 +1333,7 @@ pub fn shared_identity(
             out.refused.push(other.clone());
         }
     }
-    for (_, sidecar) in pins::peek_sidecars(vault_path) {
+    for (_, sidecar) in pins::peek_sidecars() {
         if sidecar.repo_dir != repo_dir
             || sidecar.vault_id != id
             || sidecar.path == path
