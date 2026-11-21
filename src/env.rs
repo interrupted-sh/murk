@@ -553,14 +553,44 @@ pub fn agent_key_file_path(vault_path: &str, name: &str) -> Result<std::path::Pa
     Ok(agent_keys_dir()?.join(format!("{short_hash}-{name}")))
 }
 
+/// The home directory: `HOME`, else `USERPROFILE`. `None` when neither is
+/// set, or when the one set is empty or a relative path: such a path would
+/// resolve against the working directory, often inside a checkout, so a
+/// file a repository commits there would pass for this machine's trust pin,
+/// stored key or config. murk then warns once and uses no home directory.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let (name, home) = [
+        ("HOME", std::env::var_os("HOME")),
+        ("USERPROFILE", std::env::var_os("USERPROFILE")),
+    ]
+    .into_iter()
+    .find_map(|(name, value)| Some((name, value?)))?;
+    let home = std::path::PathBuf::from(home);
+    if home.is_absolute() {
+        return Some(home);
+    }
+    WARNED.call_once(|| {
+        let shown = if home.as_os_str().is_empty() {
+            "empty".to_string()
+        } else {
+            format!("\"{}\"", home.display())
+        };
+        eprintln!(
+            "warn {name} is {shown}, not an absolute path, so murk uses no home directory: it keeps no trust pin (every signed vault is refused unless MURK_TRUSTED_SIGNERS names its signer) and reads no stored key (set MURK_KEY or MURK_KEY_FILE). Set {name} to your home directory"
+        );
+    });
+    None
+}
+
 /// Collapse a leading `$HOME` in `path` to `~` for display. Grant key paths live
 /// under `~/.config/murk/agent-keys/`, so the absolute form eats 30+ columns of
 /// every line that prints one — and a shell expands `~` back, so a printed
 /// command stays copy-pasteable.
 pub fn home_short(path: &str) -> String {
-    match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        Ok(home) => shorten_home(path, &home),
-        Err(_) => path.to_string(),
+    match home_dir() {
+        Some(home) => shorten_home(path, &home.to_string_lossy()),
+        None => path.to_string(),
     }
 }
 
@@ -594,22 +624,16 @@ fn dirs_path() -> Result<std::path::PathBuf, String> {
 /// only ask "is a key stored?" check this first, so asking never leaves an
 /// empty key store behind.
 pub(crate) fn has_key_store() -> bool {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .is_ok_and(|home| Path::new(&home).join(".config/murk/keys").is_dir())
+    home_dir().is_some_and(|home| home.join(".config/murk/keys").is_dir())
 }
 
 /// Return `~/.config/murk/<name>/`, creating it if needed. On Unix both it and
 /// `~/.config/murk` are set to `0700`. `what` names the directory in the
 /// creation error.
 fn config_subdir(name: &str, what: &str) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "cannot determine home directory")?;
-    let dir = std::path::Path::new(&home)
-        .join(".config")
-        .join("murk")
-        .join(name);
+    let home = home_dir()
+        .ok_or("cannot determine home directory: HOME is unset, empty or not an absolute path")?;
+    let dir = home.join(".config").join("murk").join(name);
     fs::create_dir_all(&dir).map_err(|e| format!("creating {what}: {e}"))?;
 
     #[cfg(unix)]

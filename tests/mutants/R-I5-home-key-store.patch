@@ -1,0 +1,20 @@
+--- a/src/env.rs
++++ b/src/env.rs
+@@ -624,15 +624,14 @@
+ /// only ask "is a key stored?" check this first, so asking never leaves an
+ /// empty key store behind.
+ pub(crate) fn has_key_store() -> bool {
+-    home_dir().is_some_and(|home| home.join(".config/murk/keys").is_dir())
++    std::env::var_os("HOME").is_some_and(|home| Path::new(&home).join(".config/murk/keys").is_dir())
+ }
+ 
+ /// Return `~/.config/murk/<name>/`, creating it if needed. On Unix both it and
+ /// `~/.config/murk` are set to `0700`. `what` names the directory in the
+ /// creation error.
+ fn config_subdir(name: &str, what: &str) -> Result<std::path::PathBuf, String> {
+-    let home = home_dir()
+-        .ok_or("cannot determine home directory: HOME is unset, empty or not an absolute path")?;
++    let home = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("cannot determine home directory")?);
+     let dir = home.join(".config").join("murk").join(name);
+     fs::create_dir_all(&dir).map_err(|e| format!("creating {what}: {e}"))?;
+ 

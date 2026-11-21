@@ -647,6 +647,39 @@ fn row_r_i16_f_fork_main() {
     check("R-I16-f:fork-main", |p: &mut Probe| other_branch(p, true));
 }
 
+/// alice revokes grant G on `revoke-bot`, not merged yet. Back on main,
+/// where G's grant record still stands, her save is refused, and the
+/// refusal says the revocation came from another revision and to merge the
+/// branch that revokes the grant first. `--re-add` appears only as the undo
+/// of a revoke made by mistake.
+#[test]
+fn a_revoke_on_an_unmerged_branch_says_to_merge_it_first() {
+    let s = Scene::new();
+    let (g, _) = s.grant("bot");
+    commit(&s.repo, "grant bot");
+    s.add(&s.alice, "Y");
+    commit(&s.repo, "save on main");
+    s.git(&["checkout", "-q", "-b", "revoke-bot"]);
+    s.ok(&s.alice, &["agent", "revoke", "bot"], "");
+    commit(&s.repo, "revoke bot");
+    s.git(&["checkout", "-q", "main"]);
+
+    let before = s.vault();
+    let refused = s.run(&s.alice, &["add", "Q"], "value\n");
+    let stderr = text(&refused.stderr);
+    assert!(!refused.status.success() && s.vault() == before, "{stderr}");
+    assert!(
+        stderr.contains("does not record the revocation")
+            && stderr.contains("Merge the branch that revokes the grant first"),
+        "the refusal names merging the revoking branch: {stderr}"
+    );
+    assert!(
+        stderr.contains("only to undo a revoke made by mistake")
+            && names_key_and_re_add(&stderr, &g),
+        "--re-add is named as the undo of a mistaken revoke: {stderr}"
+    );
+}
+
 /// alice sees G live on `fix` at a commit of its own. She renames `fix` to
 /// `fix-old`, main moves, and she cuts a new `fix` from main and saves on
 /// it. The sighting's commit and the commit checked out are not related, so
