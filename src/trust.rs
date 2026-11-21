@@ -561,13 +561,18 @@ pub fn vault_fingerprint(vault: &types::Vault) -> String {
 /// the removed keys whose recorded removal commit (see
 /// [`TrustPin::removed_at_commit`]) is the commit checked out or a descendant
 /// of it, with the vault file as committed there — the vault is from before
-/// those removals; and the removed keys whose removal is in the history of
-/// the commit checked out (see [`removal_in_history`]).
+/// those removals; and, asked per key and remembered, whether a removal is
+/// in the history of the commit checked out (see [`Checkout::reached`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub head: HeadState,
     before: BTreeSet<String>,
-    reached: BTreeSet<String>,
+    /// The vault file, absolute, when git history may be asked: on a branch,
+    /// with a pin.
+    vault: Option<std::path::PathBuf>,
+    /// Removed key (canonical) → whether its removal is in the history of the
+    /// commit checked out, for each key asked so far.
+    reached: std::cell::RefCell<BTreeMap<String, bool>>,
 }
 
 impl Checkout {
@@ -577,14 +582,15 @@ impl Checkout {
         Self {
             head,
             before: BTreeSet::new(),
-            reached: BTreeSet::new(),
+            vault: None,
+            reached: std::cell::RefCell::default(),
         }
     }
 
     /// The checkout holding `vault_path`, judged against `pin`. Asks git only
-    /// on a branch: once per recorded removal commit, and for each removal
-    /// that does not apply on this branch by name, to find whether the
-    /// removal is in HEAD's history.
+    /// on a branch: once per recorded removal commit here, and later, for a
+    /// removal that does not apply on this branch by name and a vault that
+    /// lists its key, whether the removal is in HEAD's history.
     pub fn of(vault_path: &str, pin: Option<&TrustPin>) -> Self {
         Self::judged(vault_path, pin, true)
     }
@@ -598,7 +604,7 @@ impl Checkout {
 
     fn judged(vault_path: &str, pin: Option<&TrustPin>, with_before: bool) -> Self {
         let head = head_of(vault_path);
-        let (HeadState::Branch(branch), Some(pin)) = (&head, pin) else {
+        let (HeadState::Branch(_), Some(pin)) = (&head, pin) else {
             return Self::at(head);
         };
         let abs = absolute(vault_path);
@@ -611,80 +617,156 @@ impl Checkout {
             .filter(|(commit, _)| crate::git::committed_vault_at_or_before(&abs, commit))
             .flat_map(|(_, keys)| keys.into_iter().cloned())
             .collect();
-        let reached = if pin.branches.contains_key(branch) {
-            pin.removed_on
-                .iter()
-                .filter(|(key, on)| pin.removed.contains_key(*key) && !on.contains(branch))
-                .filter(|(key, on)| removal_in_history(&abs, pin, key, on))
-                .map(|(key, _)| key.clone())
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
         Self {
             head,
             before,
-            reached,
+            vault: Some(abs),
+            reached: std::cell::RefCell::default(),
         }
+    }
+
+    /// Whether the removal of `key` (canonical) that `pin` records is in the
+    /// history of the commit checked out (see [`removal_in_history`]), on a
+    /// branch `pin` has a mark for whose name the removal is not recorded
+    /// on. Asks git once per key. When git cannot tell, says so on stderr
+    /// once per vault, branch and key, and answers no.
+    fn reached(&self, pin: &TrustPin, key: &str) -> bool {
+        let (HeadState::Branch(branch), Some(vault)) = (&self.head, &self.vault) else {
+            return false;
+        };
+        let Some(on) = pin.removed_on.get(key) else {
+            return false;
+        };
+        if !pin.branches.contains_key(branch)
+            || !pin.removed.contains_key(key)
+            || on.contains(branch)
+        {
+            return false;
+        }
+        if let Some(&known) = self.reached.borrow().get(key) {
+            return known;
+        }
+        let reached = match removal_in_history(vault, pin, key, on) {
+            crate::git::HistoryCheck::Found => true,
+            crate::git::HistoryCheck::NotFound => false,
+            unknown => {
+                warn_history_unchecked(vault, branch, key, unknown);
+                false
+            }
+        };
+        self.reached.borrow_mut().insert(key.to_string(), reached);
+        reached
     }
 }
 
+/// Say once per process, vault, branch and key that git could not show
+/// whether the removal of `key` is in the branch's history (see
+/// [`crate::git::HistoryCheck`]), so it was not applied there.
+fn warn_history_unchecked(
+    vault: &std::path::Path,
+    branch: &str,
+    key: &str,
+    why: crate::git::HistoryCheck,
+) {
+    static WARNED: std::sync::Mutex<BTreeSet<(std::path::PathBuf, String, String)>> =
+        std::sync::Mutex::new(BTreeSet::new());
+    let first = WARNED.lock().map_or(true, |mut w| {
+        w.insert((vault.to_path_buf(), branch.to_string(), key.to_string()))
+    });
+    if !first {
+        return;
+    }
+    let cause = match why {
+        crate::git::HistoryCheck::TooLong => format!(
+            "history too long to check (more than {} revisions of the vault file)",
+            crate::git::VAULT_HISTORY_CAP
+        ),
+        _ => "history not available to check (a shallow clone, a missing object or a git failure)"
+            .to_string(),
+    };
+    eprintln!(
+        "warn {}: {cause}; the removal of {key} was not applied on this branch ({branch}). If this branch merged that removal, a vault here that lists them may be a stale fork: review it (`murk diff`)",
+        vault.display()
+    );
+}
+
 /// Whether the removal of `key` (canonical) is in the history of the commit
-/// checked out in the checkout holding `abs_vault`: a commit that holds the
-/// removal (its vault no longer lists the key) is HEAD or an ancestor of it.
-/// That commit is the recorded removal commit `C` (see
-/// [`TrustPin::removed_at_commit`]) when the vault at `C` does not list the
-/// key: a removal accepted from another signer's committed vault. When the
-/// vault at `C` still lists the key, `C` is the parent of this machine's own
-/// save that removed it, so `C` being in HEAD's history says nothing (every
-/// branch cut before the removal has it). Then the tips of the local branches
-/// the removal is recorded on (`on`) are tried: a tip that is HEAD or an
-/// ancestor of it, has `C` as an ancestor, and whose vault does not list the
-/// key holds the removal.
+/// checked out in the checkout holding `abs_vault`. Three arms, cheapest
+/// first, each keyed on the recorded removal commit `C` (see
+/// [`TrustPin::removed_at_commit`]):
 ///
-/// Stated limit: when git cannot tell (a shallow clone without `C`, a
-/// missing object, a git failure), or the branch the removal was saved on
-/// was deleted or rewritten since, this answers no, so the removal applies
-/// where it did by name alone.
+/// 1. `C` is HEAD or an ancestor of it and the vault at `C` does not list the
+///    key: a removal accepted from another signer's committed vault.
+/// 2. The vault at `C` still lists the key: `C` is the parent of this
+///    machine's own save that removed it, so `C` being in HEAD's history says
+///    nothing (every branch cut before the removal has it). Then the tips of
+///    the local branches the removal is recorded on (`on`) are tried: a tip
+///    that is HEAD or an ancestor of it, has `C` as an ancestor, and whose
+///    vault does not list the key holds the removal.
+/// 3. By content, for every other way the removal can reach HEAD (a squash
+///    or rebase merge, a branch deleted, renamed or moved on since, a
+///    teammate's removal accepted on a merge or squash commit of another
+///    branch): the first-parent history of the vault file from HEAD, back
+///    to a commit whose vault still lists the key (`C`, or for an accepted
+///    removal the newest such revision on `C`'s own first-parent path), at
+///    most the newest [`crate::git::VAULT_HISTORY_CAP`] revisions, holds a
+///    revision that does not list the key while its first parent's does (see
+///    [`crate::git::vault_history_drops`]). Only the key's presence in the
+///    recipient list counts: what else the revision changes (values, other
+///    recipients) does not matter. A key added on a branch that never listed
+///    it is not a removal, and a drop already in the bound's history (one
+///    undone before this removal) does not count. Recipients are read
+///    without verifying any signature: the arm only ever applies to a key
+///    this machine already recorded as removed, so a forged revision can at
+///    most keep out a key this machine itself saw removed; it cannot lock
+///    anyone new out. A re-add later on the branch by another machine does
+///    not undo it (only this machine's own `circle authorize` or `murk trust
+///    --re-add` does).
+///
+/// Stated limit: when git cannot tell (no recorded commit, a shallow clone
+/// that hides `C` or the drop's parent, a missing object, a git failure, or
+/// a drop further back than the cap), this answers
+/// [`crate::git::HistoryCheck::TooLong`] or
+/// [`crate::git::HistoryCheck::Unavailable`]: the removal applies where it
+/// did by name alone, and [`Checkout::reached`] warns.
 fn removal_in_history(
     abs_vault: &std::path::Path,
     pin: &TrustPin,
     key: &str,
     on: &BTreeSet<String>,
-) -> bool {
-    let Some(commit) = pin.removed_at_commit.get(key) else {
-        return false;
+) -> crate::git::HistoryCheck {
+    use crate::git::HistoryCheck;
+    let (Some(commit), Some(dir)) = (pin.removed_at_commit.get(key), abs_vault.parent()) else {
+        return HistoryCheck::Unavailable;
     };
-    let Some(dir) = abs_vault.parent() else {
-        return false;
+    let lists = |bytes: &[u8]| {
+        let vault = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let recipients = vault.get("recipients")?.as_array()?;
+        Some(
+            recipients
+                .iter()
+                .any(|r| r.as_str().is_some_and(|r| canonical_recipient(r) == key)),
+        )
     };
-    let lists_key = |at: &str| {
-        crate::git::vault_at_commit(abs_vault, at)
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|vault| {
-                let recipients = vault.get("recipients")?.as_array()?;
-                Some(
-                    recipients
-                        .iter()
-                        .any(|r| r.as_str().is_some_and(|r| canonical_recipient(r) == key)),
-                )
-            })
-    };
-    if !crate::git::is_ancestor(dir, commit, "HEAD") {
-        return false;
+    let lists_key =
+        |at: &str| crate::git::vault_at_commit(abs_vault, at).and_then(|bytes| lists(&bytes));
+    let by_ancestry = crate::git::is_ancestor(dir, commit, "HEAD")
+        && match lists_key(commit) {
+            Some(false) => true,
+            None => false,
+            Some(true) => on.iter().any(|branch| {
+                crate::git::branch_tip(dir, branch).is_some_and(|tip| {
+                    tip != *commit
+                        && crate::git::is_ancestor(dir, &tip, "HEAD")
+                        && crate::git::is_ancestor(dir, commit, &tip)
+                        && lists_key(&tip) == Some(false)
+                })
+            }),
+        };
+    if by_ancestry {
+        return HistoryCheck::Found;
     }
-    match lists_key(commit) {
-        Some(false) => true,
-        None => false,
-        Some(true) => on.iter().any(|branch| {
-            crate::git::branch_tip(dir, branch).is_some_and(|tip| {
-                tip != *commit
-                    && crate::git::is_ancestor(dir, &tip, "HEAD")
-                    && crate::git::is_ancestor(dir, commit, &tip)
-                    && lists_key(&tip) == Some(false)
-            })
-        }),
-    }
+    crate::git::vault_history_drops(abs_vault, commit, lists)
 }
 
 /// Whether the listing part of the removal rule applies to `key` (canonical)
@@ -704,7 +786,7 @@ pub fn removal_applies(pin: &TrustPin, key: &str, checkout: &Checkout) -> bool {
             pin.removed_on
                 .get(key)
                 .is_none_or(|branches| branches.contains(b))
-                || checkout.reached.contains(key)
+                || checkout.reached(pin, key)
         }
         HeadState::Branch(_) => !checkout.before.contains(key),
         HeadState::Detached | HeadState::NotARepo => true,
@@ -732,7 +814,7 @@ pub fn signed_before_removal(
     pin.removed.get(key).is_some_and(|&at| generation <= at)
         && checkout.before.contains(key)
         && pin.removed_on.get(key).is_none_or(|on| !on.contains(b))
-        && !checkout.reached.contains(key)
+        && !checkout.reached(pin, key)
 }
 
 /// The removed keys (canonical, with the generation each was removed at)

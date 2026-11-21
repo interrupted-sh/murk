@@ -1,12 +1,11 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -670,9 +670,6 @@
-                 )
-             })
+@@ -684,7 +684,7 @@
      };
--    if !crate::git::is_ancestor(dir, commit, "HEAD") {
--        return false;
--    }
-     match lists_key(commit) {
-         Some(false) => true,
-         None => false,
+     let lists_key =
+         |at: &str| crate::git::vault_at_commit(abs_vault, at).and_then(|bytes| lists(&bytes));
+-    let by_ancestry = crate::git::is_ancestor(dir, commit, "HEAD")
++    let by_ancestry = true
+         && match lists_key(commit) {
+             Some(false) => true,
+             None => false,

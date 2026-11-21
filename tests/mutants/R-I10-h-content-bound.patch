@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1600,7 +1600,7 @@
+             })
+             .unwrap_or_else(|| since.to_string()),
+     };
+-    let Some((revisions, more)) = first_parent_revisions(dir, name, &format!("{bound}..HEAD"))
++    let Some((revisions, more)) = first_parent_revisions(dir, name, "HEAD")
+     else {
+         return HistoryCheck::Unavailable;
+     };

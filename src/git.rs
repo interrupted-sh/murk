@@ -1424,6 +1424,211 @@ pub fn vault_at_commit(abs_vault: &Path, commit: &str) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// The most vault revisions [`vault_history_drops`] reads on each
+/// first-parent path it walks. A removal further back counts as unknown
+/// history ([`HistoryCheck::TooLong`]).
+pub const VAULT_HISTORY_CAP: usize = 1000;
+
+/// What [`vault_history_drops`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryCheck {
+    /// A revision in the walk dropped the key.
+    Found,
+    /// The whole walk was read and no revision dropped the key.
+    NotFound,
+    /// No drop in the newest [`VAULT_HISTORY_CAP`] revisions, and there are
+    /// more.
+    TooLong,
+    /// git could not show the history: a git failure, the bound commit
+    /// missing here, or a revision hidden by a shallow boundary.
+    Unavailable,
+}
+
+/// One `git cat-file --batch` process, reading blobs by name.
+struct BlobBatch {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    output: std::io::BufReader<std::process::ChildStdout>,
+    /// Set once a read failed part-way: the stream is out of step, so every
+    /// later read answers `None`.
+    broken: bool,
+}
+
+impl BlobBatch {
+    fn start(dir: &Path) -> Option<Self> {
+        let mut child = git_command()
+            .args(["cat-file", "--batch"])
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        if let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) {
+            return Some(Self {
+                child,
+                input,
+                output: std::io::BufReader::new(output),
+                broken: false,
+            });
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
+
+    /// The blob `spec` names (`<rev>:./<file>`), or `None` when git cannot
+    /// read it (no such file at that revision, a missing object).
+    fn read(&mut self, spec: &str) -> Option<Vec<u8>> {
+        use std::io::{BufRead, Read, Write};
+        if self.broken {
+            return None;
+        }
+        // One answer per request: `<oid> blob <size>\n<bytes>\n`, or one
+        // line ending in ` missing` (or ` ambiguous`).
+        let mut header = String::new();
+        let ok = writeln!(self.input, "{spec}").is_ok()
+            && self.input.flush().is_ok()
+            && self.output.read_line(&mut header).is_ok_and(|n| n > 0);
+        if !ok {
+            self.broken = true;
+            return None;
+        }
+        let mut fields = header.split_whitespace();
+        let (Some(_), Some("blob"), Some(size)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let Ok(size) = size.parse::<usize>() else {
+            self.broken = true;
+            return None;
+        };
+        let mut bytes = vec![0; size + 1];
+        if self.output.read_exact(&mut bytes).is_err() {
+            self.broken = true;
+            return None;
+        }
+        bytes.pop();
+        Some(bytes)
+    }
+}
+
+impl Drop for BlobBatch {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The commits on the first-parent path of `range` (a `git rev-list` range)
+/// that change the vault file `name` in `dir`, newest first, at most
+/// [`VAULT_HISTORY_CAP`], and whether there are more. `None` when git fails.
+fn first_parent_revisions(dir: &Path, name: &str, range: &str) -> Option<(Vec<String>, bool)> {
+    let out = git_output(
+        dir,
+        &[
+            "rev-list",
+            "--first-parent",
+            &format!("--max-count={}", VAULT_HISTORY_CAP + 1),
+            range,
+            "--",
+            &format!("./{name}"),
+        ],
+    )?;
+    let mut revisions: Vec<String> = out
+        .lines()
+        .filter(|r| is_commit_id(r))
+        .map(str::to_string)
+        .collect();
+    let more = revisions.len() > VAULT_HISTORY_CAP;
+    revisions.truncate(VAULT_HISTORY_CAP);
+    Some((revisions, more))
+}
+
+/// Whether the repository holding `dir` is a shallow clone.
+fn is_shallow(dir: &Path) -> bool {
+    git_output(dir, &["rev-parse", "--is-shallow-repository"]).is_none_or(|s| s != "false")
+}
+
+/// Whether the first-parent history of the vault file `abs_vault` from HEAD
+/// holds a revision whose vault `lists` answers `Some(false)` for while the
+/// vault at its first parent answers `Some(true)`: a commit that dropped
+/// what `lists` looks for.
+///
+/// The walk is bounded below by a commit `B` that still lists it: `since`
+/// (a full commit id) when its vault does, else the newest revision on
+/// `since`'s own first-parent path whose vault does (for a removal accepted
+/// at `since`, the vault just before the drop that `since` holds), else
+/// `since`. It reads `git rev-list --first-parent B..HEAD -- <vault>`: back
+/// to `B`, or to its merge base with HEAD when `B` is not an ancestor, so a
+/// drop already in `B`'s history (an older removal, undone before `since`)
+/// does not count. Each path reads the newest [`VAULT_HISTORY_CAP`]
+/// revisions at most, through one `git cat-file --batch`, and the walk
+/// stops at the first drop. Read-only: takes no `index.lock`.
+pub fn vault_history_drops(
+    abs_vault: &Path,
+    since: &str,
+    lists: impl Fn(&[u8]) -> Option<bool>,
+) -> HistoryCheck {
+    let (Some(dir), Some(name)) = (
+        abs_vault.parent(),
+        abs_vault.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return HistoryCheck::Unavailable;
+    };
+    if !is_commit_id(since) {
+        return HistoryCheck::Unavailable;
+    }
+    let Some(mut batch) = BlobBatch::start(dir) else {
+        return HistoryCheck::Unavailable;
+    };
+    let listing = |batch: &mut BlobBatch, rev: &str| {
+        batch
+            .read(&format!("{rev}:./{name}"))
+            .and_then(|b| lists(&b))
+    };
+    let bound = match listing(&mut batch, since) {
+        Some(true) => since.to_string(),
+        None => return HistoryCheck::Unavailable,
+        Some(false) => first_parent_revisions(dir, name, since)
+            .and_then(|(revisions, _)| {
+                revisions
+                    .into_iter()
+                    .find(|r| listing(&mut batch, r) == Some(true))
+            })
+            .unwrap_or_else(|| since.to_string()),
+    };
+    let Some((revisions, more)) = first_parent_revisions(dir, name, &format!("{bound}..HEAD"))
+    else {
+        return HistoryCheck::Unavailable;
+    };
+    let Some(oldest) = revisions.last() else {
+        return HistoryCheck::NotFound;
+    };
+    let parent = format!("{oldest}^");
+    let mut unread = false;
+    let mut newer: Option<bool> = None;
+    for rev in revisions
+        .iter()
+        .map(String::as_str)
+        .chain([parent.as_str()])
+    {
+        let older = listing(&mut batch, rev);
+        unread |= older.is_none();
+        if newer == Some(false) && older == Some(true) {
+            return HistoryCheck::Found;
+        }
+        newer = older;
+    }
+    if more {
+        HistoryCheck::TooLong
+    } else if unread && (batch.broken || is_shallow(dir)) {
+        HistoryCheck::Unavailable
+    } else {
+        HistoryCheck::NotFound
+    }
+}
+
 /// A path naming a vault the same way from every worktree of its repository:
 /// the repository's common git directory joined with the vault's path inside
 /// the checkout. `None` when the vault is not inside a git checkout.

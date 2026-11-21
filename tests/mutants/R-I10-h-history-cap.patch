@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1540,7 +1540,7 @@
+         .filter(|r| is_commit_id(r))
+         .map(str::to_string)
+         .collect();
+-    let more = revisions.len() > VAULT_HISTORY_CAP;
++    let more = false;
+     revisions.truncate(VAULT_HISTORY_CAP);
+     Some((revisions, more))
+ }

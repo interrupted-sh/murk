@@ -185,6 +185,19 @@ impl fmt::Debug for K {
     }
 }
 
+/// How [`Op::PrFlow`]'s pull request merges into `main`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrMerge {
+    /// A fast-forward; the topic branch is kept.
+    FastForward,
+    /// A squash merge; the topic branch is then deleted.
+    Squash,
+    /// GitHub's rebase merge: `main` moves on with a commit that leaves the
+    /// vault alone, the topic's commits are replayed onto it with new ids,
+    /// and the topic branch is then deleted.
+    Rebase,
+}
+
 /// What a machine checks out before it loads.
 #[derive(Clone, Copy, Debug)]
 enum At {
@@ -509,15 +522,17 @@ enum Op {
         m: M,
         by: M,
     },
-    /// The pull-request removal (row R-I10-h:pr-flow): machine `m` syncs
-    /// and loads `main`; it revokes the n-th fitting member on a topic
-    /// branch off `main`; a teammate's machine then saves twice on a branch
-    /// off the same commit (a stale fork that still lists them); `m` merges
-    /// the topic into `main` (a fast-forward), a repo writer commits the
-    /// stale fork there, and `m` loads `main`.
+    /// The pull-request removal (rows R-I10-h:pr-flow and
+    /// R-I10-h:soak-squash): machine `m` syncs and loads `main`; it revokes
+    /// the n-th fitting member on a topic branch off `main`; a teammate's
+    /// machine then saves twice on a branch off the same commit (a stale
+    /// fork that still lists them); `m` merges the topic into `main` as
+    /// `merge` says, a repo writer commits the stale fork there, and `m`
+    /// loads `main`.
     PrFlow {
         m: M,
         n: usize,
+        merge: PrMerge,
     },
     /// A removal loaded as the branch's next state (row
     /// R-I10-h:branch-current): machine `m` syncs and loads `main`, then
@@ -767,8 +782,12 @@ fn op() -> BoxedStrategy<Op> {
         ),
         (
             2,
-            (m(), 0..4usize)
-                .prop_map(|(m, n)| Op::PrFlow { m, n })
+            (m(), 0..4usize, 0..3usize)
+                .prop_map(|(m, n, how)| Op::PrFlow {
+                    m,
+                    n,
+                    merge: [PrMerge::FastForward, PrMerge::Squash, PrMerge::Rebase][how],
+                })
                 .boxed(),
         ),
         (
@@ -1368,6 +1387,11 @@ struct World<'f> {
     /// Per observer: person → the revoke step whose removal it accepted, and
     /// the commit holding the vault it accepted it in.
     removed: BTreeMap<Obs, BTreeMap<usize, (usize, String)>>,
+    /// Removal commit → the commits that carry its change by content and not
+    /// by ancestry: a squash merge of the branch whose tip it is, or its
+    /// rebase onto `main`. A removal reaches a commit whose history holds
+    /// either.
+    carried: BTreeMap<String, BTreeSet<String>>,
     /// Per pinned observer (a machine, erin): what its trust pin holds (see
     /// [`PinModel`]). dave's machine has no pin until it first accepts.
     pins: BTreeMap<Obs, PinModel>,
@@ -1430,6 +1454,7 @@ impl<'f> World<'f> {
             revokes: Vec::new(),
             authorizes: Vec::new(),
             removed: BTreeMap::new(),
+            carried: BTreeMap::new(),
             ci_signers: BTreeSet::from([0, 1, 2]),
             agent: None,
             written: fixture_values.into_iter().collect(),
@@ -1596,12 +1621,21 @@ impl<'f> World<'f> {
     }
 
     /// Whether the removal `obs` accepted in commit `removal` has reached
-    /// commit `at`: `at`'s history contains it.
+    /// commit `at`: `at`'s history contains it, or a commit that carries it
+    /// (see [`World::carried`]).
     fn reaches(&self, obs: &Obs, removal: &str, at: &str) -> bool {
-        self.clone_of(obs)
-            .git(&["merge-base", "--is-ancestor", removal, at])
-            .status
-            .success()
+        let clone = self.clone_of(obs);
+        let holds = |c: &str| {
+            clone
+                .git(&["merge-base", "--is-ancestor", c, at])
+                .status
+                .success()
+        };
+        holds(removal)
+            || self
+                .carried
+                .get(removal)
+                .is_some_and(|carriers| carriers.iter().any(|c| holds(c)))
     }
 
     /// Whether accepting `bytes`, the vault at commit `at`, on `obs` breaks
@@ -3032,7 +3066,7 @@ impl<'f> World<'f> {
                 }
                 self.step(step, &Op::ReAdd { m: *m, who: P(who) })
             }
-            Op::PrFlow { m, n } => self.pr_flow(step, m.0, *n),
+            Op::PrFlow { m, n, merge } => self.pr_flow(step, m.0, *n, *merge),
             Op::BranchCurrent { m, n } => self.branch_current(step, m.0, *n),
             Op::AgentProbe { at, how } => {
                 let agent = self.agent.as_ref()?;
@@ -3490,9 +3524,17 @@ impl<'f> World<'f> {
             .then_some((by, who))
     }
 
-    /// [`Op::PrFlow`]. Counts [`PR_FLOW_DECISIVE`] when `m` holds the record
-    /// and refuses the replay.
-    fn pr_flow(&mut self, step: usize, m: usize, n: usize) -> Option<Result<Ran, String>> {
+    /// [`Op::PrFlow`]. Counts [`PR_FLOW_DECISIVE`], and for a squash or
+    /// rebase merge [`PR_FLOW_SQUASH_DECISIVE`] or
+    /// [`PR_FLOW_REBASE_DECISIVE`] too, when `m` holds the record, the
+    /// oracle sees it reach `main`, and `m` refuses the replay.
+    fn pr_flow(
+        &mut self,
+        step: usize,
+        m: usize,
+        n: usize,
+        merge: PrMerge,
+    ) -> Option<Result<Ran, String>> {
         let mach = self.machine(m);
         if let Err(r) = self.part(step, &Op::Sync { m: M(m) }) {
             return r;
@@ -3527,13 +3569,38 @@ impl<'f> World<'f> {
             }
         }
         let stale = fork.vault();
-        // The pull request merges (a fast-forward); a repo writer then
+        // The pull request merges as `merge` says; a repo writer then
         // commits the stale fork on main.
         mach.git_ok(&["checkout", "-q", "-f", "main"]);
-        mach.git_ok(&["merge", "-q", "--ff-only", &topic]);
+        let revoked = mach.git_ok(&["rev-parse", &topic]).trim().to_string();
+        match merge {
+            PrMerge::FastForward => {
+                mach.git_ok(&["merge", "-q", "--ff-only", &topic]);
+            }
+            PrMerge::Squash => {
+                mach.git_ok(&["merge", "-q", "--squash", &topic]);
+                mach.commit(&format!("s{step} squash {topic}"));
+            }
+            PrMerge::Rebase => {
+                fs::write(mach.dir.join("NOTES"), format!("s{step}\n")).unwrap();
+                mach.commit(&format!("s{step} main moves on"));
+                mach.git_ok(&["cherry-pick", &format!("{base}..{topic}")]);
+            }
+        }
+        if merge != PrMerge::FastForward {
+            // The topic branch is deleted: nothing but content ties main to
+            // the revoke now.
+            mach.git_ok(&["branch", "-q", "-D", &topic]);
+            self.carried.entry(revoked).or_default().insert(head(&mach));
+        }
+        let merged = head(&mach);
         fs::write(mach.dir.join(".murk"), &stale).unwrap();
         mach.commit(&format!("s{step} replay"));
-        let decisive = self.removals(&Obs::Machine(m)).contains_key(&who);
+        let obs = Obs::Machine(m);
+        let decisive = self
+            .removals(&obs)
+            .get(&who)
+            .is_some_and(|(_, commit)| self.reaches(&obs, commit, &head(&mach)));
         let loaded = self.step(
             step + 5,
             &Op::Load {
@@ -3543,8 +3610,13 @@ impl<'f> World<'f> {
         )?;
         if decisive && matches!(loaded, Ok(Ran::Refused(_))) {
             self.stats.count(PR_FLOW_DECISIVE, true);
+            match merge {
+                PrMerge::FastForward => {}
+                PrMerge::Squash => self.stats.count(PR_FLOW_SQUASH_DECISIVE, true),
+                PrMerge::Rebase => self.stats.count(PR_FLOW_REBASE_DECISIVE, true),
+            }
         }
-        mach.git_ok(&["reset", "-q", "--hard", &topic]);
+        mach.git_ok(&["reset", "-q", "--hard", &merged]);
         Some(loaded)
     }
 
@@ -4777,7 +4849,48 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                     m: bob_m,
                     at: At::Main,
                 }),
-                refuses(Op::PrFlow { m: bob_m, n: 0 }).decisive(),
+                refuses(Op::PrFlow {
+                    m: bob_m,
+                    n: 0,
+                    merge: PrMerge::FastForward,
+                })
+                .decisive(),
+            ],
+        ),
+        // R-I10-h:pr-flow-squash: the same pull request squash-merged into
+        // main and its branch deleted. No commit of the revoke is in main's
+        // history, but main's vault history drops carol: refused.
+        (
+            "a squash-merged pull-request removal holds against a stale fork committed on main",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                refuses(Op::PrFlow {
+                    m: bob_m,
+                    n: 0,
+                    merge: PrMerge::Squash,
+                })
+                .decisive(),
+            ],
+        ),
+        // The same pull request rebase-merged: main moved on, the revoke is
+        // replayed onto it with a new id and the branch deleted. main's
+        // vault history drops carol: refused.
+        (
+            "a rebase-merged pull-request removal holds against a stale fork committed on main",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                refuses(Op::PrFlow {
+                    m: bob_m,
+                    n: 0,
+                    merge: PrMerge::Rebase,
+                })
+                .decisive(),
             ],
         ),
         // R-I10-h:branch-current: bob's machine saved ahead on a feature
@@ -4818,9 +4931,17 @@ const DECISIVE_READD: &str = "re-add:decisive";
 const DECISIVE_READD_FROM_CASES: u32 = 64;
 
 /// The stats kind of a pull-request removal that ran in full: the machine
-/// that revoked on a topic branch holds the record and refuses the stale
-/// fork committed on `main` after the fast-forward (see [`Op::PrFlow`]).
+/// that revoked on a topic branch holds the record, the oracle sees it reach
+/// `main`, and the machine refuses the stale fork committed on `main` after
+/// the merge, whichever [`PrMerge`] it was (see [`Op::PrFlow`]).
 const PR_FLOW_DECISIVE: &str = "pr-flow:decisive";
+/// The squash-merge part of [`PR_FLOW_DECISIVE`]. Printed, not floored: at
+/// twenty cases it is too rare to demand (2 in one run); the stored sequence
+/// and row R-I10-h:soak-squash build it every run.
+const PR_FLOW_SQUASH_DECISIVE: &str = "pr-flow-squash:decisive";
+/// The rebase-merge part of [`PR_FLOW_DECISIVE`]. Printed, not floored, as
+/// [`PR_FLOW_SQUASH_DECISIVE`]; a stored sequence builds it every run.
+const PR_FLOW_REBASE_DECISIVE: &str = "pr-flow-rebase:decisive";
 /// The stats kind of a removal loaded as its branch's next state below the
 /// machine's highest counter, then held against a stale fork on that branch
 /// (see [`Op::BranchCurrent`]).
@@ -5165,6 +5286,38 @@ fn row_r_i10_h_soak() {
             .listed(&run.world.machine(carol.0).vault())
             .contains(&bob.0);
         p.target(listed, "carol's save lists bob");
+        Ok(())
+    });
+}
+
+/// Stored sequence: the pull-request removal squash-merged into `main`,
+/// its topic branch deleted (see [`Op::PrFlow`]). bob's machine revoked
+/// carol on the topic branch; a stale fork that still lists her is then
+/// committed on `main`. No commit of the revoke is in main's history, but
+/// main's vault history drops her: bob's load is refused, and the oracle,
+/// which takes the squash commit as carrying the removal, judges it.
+#[test]
+fn row_r_i10_h_soak_squash() {
+    common::rows::check("R-I10-h:soak-squash", |p| {
+        let bob_m = M(2);
+        let mut run = Run::new();
+        run.setup(&[accepts(load_main(bob_m))])?;
+        let refused = run.decisive(
+            p,
+            &Op::PrFlow {
+                m: bob_m,
+                n: 0,
+                merge: PrMerge::Squash,
+            },
+        )?;
+        p.target(
+            refused.refused(),
+            format!("bob's load of main is refused: {}", refused.why()),
+        );
+        p.target(
+            refused.why().contains("carol") && refused.why().contains("--re-add"),
+            "the refusal names carol and --re-add",
+        );
         Ok(())
     });
 }

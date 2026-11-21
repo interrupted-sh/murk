@@ -1,7 +1,7 @@
 --- a/src/trust.rs
 +++ b/src/trust.rs
-@@ -707,7 +707,8 @@
-                 || checkout.reached.contains(key)
+@@ -787,7 +787,8 @@
+                 || checkout.reached(pin, key)
          }
          HeadState::Branch(_) => !checkout.before.contains(key),
 -        HeadState::Detached | HeadState::NotARepo => true,
