@@ -616,7 +616,7 @@ fn warn_divergence(vault_path: &str, pin_file: &Path, key: &str) {
         w.insert((pin_file.to_path_buf(), key.to_string()))
     }) {
         eprintln!(
-            "warn the trust pin for {vault_path} no longer records {} as removed, but the copy of this release does. An older murk component (0.15 or earlier) under this HOME probably accepted a vault that lists them: a murk CLI earlier on PATH, the merge driver that git runs, or a binding. murk keeps them removed. Upgrade every murk component on this machine. If you re-added them on purpose with the older component, run `murk trust --vault {vault_path} --re-add {key}` with this release",
+            "warn the trust pin for {vault_path} no longer records {} as removed, but the copy of this release does. An older murk component (0.15.2 or earlier) under this HOME probably accepted a vault that lists them: a murk CLI earlier on PATH, the merge driver that git runs, or a binding. murk keeps them removed. Upgrade every murk component on this machine. If you re-added them on purpose with the older component, run `murk trust --vault {vault_path} --re-add {key}` with this release",
             crate::truncate_pubkey(key)
         );
     }

@@ -2224,11 +2224,11 @@ fn row_r_i10_h_driver_home() {
 }
 
 /// Release checklist, stated limit: an older murk component under the same
-/// HOME (`MURK_OLDER_BIN`, a murk 0.15.x binary) loads the stale fork,
+/// HOME (`MURK_OLDER_BIN`, a murk 0.15.2 or earlier binary) loads the stale fork,
 /// prints the old value and saves a vault bob reads. It leaves the sidecar
 /// as it was, and this release then refuses the vault.
 #[test]
-#[ignore = "release checklist: set MURK_OLDER_BIN to a murk 0.15.x binary"]
+#[ignore = "release checklist: set MURK_OLDER_BIN to a murk 0.15.2 or earlier binary"]
 fn row_r_i10_h_older_exposure() {
     check("R-I10-h:older-exposure", |p: &mut Probe| {
         let older = std::env::var("MURK_OLDER_BIN")

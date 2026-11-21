@@ -6,7 +6,7 @@ sidebar:
 ---
 
 murk now keeps a removed member removed, and a revoked agent grant revoked,
-on each machine that recorded the removal or the revocation. murk 0.15 and
+on each machine that recorded the removal or the revocation. murk 0.15.2 and
 earlier do not check these records. An older component on the same machine
 can load a stale revision that lists a removed member, trust that member
 again, and encrypt new values to them. So the protection holds in full only
@@ -37,7 +37,7 @@ Do these steps on each machine that uses murk.
    removal record into a file that older components do not touch. Unset
    `MURK_NO_SIGNER_PIN` for this step: when it is set, `murk verify` copies
    nothing.
-9. If you re-added a removed member with murk 0.15 or earlier, run
+9. If you re-added a removed member with murk 0.15.2 or earlier, run
    `murk trust --vault P --re-add KEY` again with the new release. A re-add
    made with an older component does not count.
 

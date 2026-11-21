@@ -314,7 +314,7 @@ Verifies vault integrity (MAC and signature), reports whether this machine trust
 
 **Shared vault ids.** verify and `murk doctor` report, under `identity`, another vault file in the checkout that has the same vault id, and say whether this machine refuses this path or the other one (see `--shares-identity-with` under [`murk trust`](#murk-trust)).
 
-**Removal records.** verify reads this machine's trust pin, so it also copies the pin's removal records into the pin's sidecar file, which murk 0.15 and earlier do not write. After you upgrade, run `murk verify` once in each checkout before an older murk component runs again (see the [threat model](/security/threat-model/#vault-signatures), limit 10).
+**Removal records.** verify reads this machine's trust pin, so it also copies the pin's removal records into the pin's sidecar file, which murk 0.15.2 and earlier do not write. After you upgrade, run `murk verify` once in each checkout before an older murk component runs again (see the [threat model](/security/threat-model/#vault-signatures), limit 10).
 
 **Commit check.** Only when the vault has git history. A signed commit proves nothing about who the signer is: git vouches for any key it is told about, an attacker's throwaway key included.
 
@@ -372,7 +372,7 @@ Shows who signed the vault, then asks before it records the vault in the local t
 - **A revoked agent grant.** murk shows the key, the vault's signer, and each revocation id this machine holds for the key, marked "in the vault's revoked grant set" or "seen on this machine". After you confirm, it re-admits exactly those ids. A later revocation of the same key gets a new id, which counts again. When the vault lists the key and its own revoked grant set holds an id for it, murk signs the vault again without those ids, so commit the result. A key that cannot sign is refused there.
 - A name that is neither is an error: "KEY is not a key this machine recorded as removed or as a revoked agent grant".
 
-A re-add of a removed key made with murk 0.15 or earlier does not count for this release. Run `--re-add` again with this release.
+A re-add of a removed key made with murk 0.15.2 or earlier does not count for this release. Run `--re-add` again with this release.
 
 `--shares-identity-with OTHER` settles two vault files in one checkout with the same vault id, which murk refuses because it cannot tell them apart. OTHER must be a vault file in the same checkout with that vault id. Review both files first. murk then trusts the vault at `--vault` only, refuses OTHER on this machine from then on, and prints "this machine trusts the vault at .murk only, and refuses OTHER from now on". When OTHER has its own trust pin for that vault id, murk deletes that pin and its sidecar. The removal records they hold are lost, and murk does not warn about it. It does not delete the file OTHER.
 

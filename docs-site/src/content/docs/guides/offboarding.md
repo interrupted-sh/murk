@@ -114,7 +114,7 @@ gives the full removal rule, its one exception and its limits.
 
 This protection is per machine. A fresh clone, a runner without a trust pin,
 a runner that loads only with `MURK_TRUSTED_SIGNERS`, and an agent grant have
-no record of the removal. An older murk component (0.15 or earlier) on the
+no record of the removal. An older murk component (0.15.2 or earlier) on the
 same machine, for example the merge driver git runs or a Python or Node
 binding, doesn't check the record at all. Upgrade every murk component on
 each machine together (see [Upgrading](/guides/upgrading/)). See the

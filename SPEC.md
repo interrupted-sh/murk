@@ -297,7 +297,7 @@ The `expires_at` TTL is enforced by the murk binary at read time, though not cry
 
 `github_pins` maps a GitHub username to the SHA-256 fingerprints of the keys that `circle authorize github:USER` fetched. On the next authorize for that user, murk compares them and stops if the set changed (unless you pass `--force`). The signature covers `github_pins`, and the MAC does not. The field is omitted when empty.
 
-`revoked_grants` maps a canonical grant key to its revocation ids: each id is 16 random bytes as 32 lowercase hex characters. It records that the key was an agent grant in this vault and its grant record left. The signature covers it (through the meta ciphertext), and the MAC does not, so the MAC prefix stays `blake3v8:`. murk 0.15 and earlier parse the meta without it and drop it on their next save. The field is omitted when empty. Rule 10 under [Trust](#trust) says how loads use it. Writes follow these rules:
+`revoked_grants` maps a canonical grant key to its revocation ids: each id is 16 random bytes as 32 lowercase hex characters. It records that the key was an agent grant in this vault and its grant record left. The signature covers it (through the meta ciphertext), and the MAC does not, so the MAC prefix stays `blake3v8:`. murk 0.15.2 and earlier parse the meta without it and drop it on their next save. The field is omitted when empty. Rule 10 under [Trust](#trust) says how loads use it. Writes follow these rules:
 
 - **Events.** A write gives a key a new id when (1) a save drops its grant record (`agent revoke`, the pruning of an expired grant, the old key of `agent grant --renew`), (2) a clean keyed merge drops a grant record that ours or theirs held, or (3) a save on branch B holds no grant record for a key that this machine saw live on B (`grants_live_on`), and the commit checked out and the sighting's commit are related by ancestry in either direction. Event 3 then removes that sighting. A sighting of `""`, or no commit checked out, counts as related. A git failure counts as not related.
 - **The id rule.** An event mints an id for a key only when no input of the write already holds an id for that key that this machine has not re-admitted. The inputs are the parent's set (both sides' sets for a merge) and the sidecar's `revoked_grants_seen`.
@@ -498,7 +498,7 @@ A vault without both `vault_id` and `generation` (written by murk 0.13 or older)
     - **A grant.** A vault that holds a grant record (with its recipient entry) or an `agents` entry for a tombstoned key is refused on a current load, by `murk trust`, by every save and by the keyed merge result check. `circle authorize` refuses a tombstoned key.
     - **History.** A history load of such a vault, which lists no tombstoned plain recipient, succeeds with a warning on stderr: "P holds a grant for K, which this machine holds as revoked (revocation ids …). It was read as history. A save, a merge or `murk trust` that keeps this grant is refused." It records no revocation id and no sighting.
     - **Recovery.** Only `murk trust --re-add KEY` lifts these refusals (see [Accepting a vault: `murk trust`](#accepting-a-vault-murk-trust)). Plain `murk trust` does not accept them.
-    - Rule 5 still applies: a key in the pin's `grants` that is listed as a recipient without a current grant record is refused, so a save by murk 0.15 or earlier that dropped the set is still refused on a machine that saw the grant.
+    - Rule 5 still applies: a key in the pin's `grants` that is listed as a recipient without a current grant record is refused, so a save by murk 0.15.2 or earlier that dropped the set is still refused on a machine that saw the grant.
 
 ### Current and history loads
 
@@ -576,7 +576,7 @@ The pin has these fields:
 
 ### The sidecar
 
-Next to each pin, murk keeps a sidecar file, `<hash>.lineage.json`, under the pin's lock. murk 0.15 and earlier never open it, so an older murk that rewrites the pin cannot drop what it holds. Every pin write writes the sidecar first and the pin second, both atomically. The sidecar has these fields:
+Next to each pin, murk keeps a sidecar file, `<hash>.lineage.json`, under the pin's lock. murk 0.15.2 and earlier never open it, so an older murk that rewrites the pin cannot drop what it holds. Every pin write writes the sidecar first and the pin second, both atomically. The sidecar has these fields:
 
 - `v`: the sidecar version, 1
 - `vault_id`: the pin's vault id when this release last wrote the sidecar
@@ -592,7 +592,7 @@ These rules apply to the sidecar:
 
 - **Copy on read.** When the pin file holds a removal record that the sidecar's `removals` lacks, or holds one with a larger generation, a wider or absent `on`, or another `at_commit`, a read of the pin takes the pin lock and writes the sidecar. The pin file stays as it is. A read that finds nothing to copy takes no lock and writes nothing. Under `MURK_NO_SIGNER_PIN` there is no copy. When the sidecar cannot be written, murk warns once ("cannot copy the removal records for P into F: E. An older murk component under this HOME can still erase them") and the command goes on.
 - **Overlay.** Every read of the pin lays `removals` over the pin file before any rule sees it. A key the pin file lacks gets the sidecar's record. For a key in both, the generation is the larger of the two, `removed_on` is the union of both sets (no entry on either side means every branch), and the pin file's `removed_at_commit` is kept when it has one. Then every key in `removed` leaves `trusted`. The overlay only narrows: it never removes a record and never adds trust.
-- **Divergence.** When the overlay restores a key that the pin file no longer records as removed, murk keeps it removed and warns once: "the trust pin for P no longer records K as removed, but the copy of this release does. An older murk component (0.15 or earlier) under this HOME probably accepted a vault that lists them". The warning names the components to look for and `murk trust --re-add`. The next pin write mirrors the record back into the pin file. The recovery when the re-add was not deliberate (restore, `murk trust`, rotate) is in [Upgrading from murk 0.15](https://murk.interrupted.sh/guides/upgrading/#when-murk-says-the-pin-no-longer-records-a-removal).
+- **Divergence.** When the overlay restores a key that the pin file no longer records as removed, murk keeps it removed and warns once: "the trust pin for P no longer records K as removed, but the copy of this release does. An older murk component (0.15.2 or earlier) under this HOME probably accepted a vault that lists them". The warning names the components to look for and `murk trust --re-add`. The next pin write mirrors the record back into the pin file. The recovery when the re-add was not deliberate (restore, `murk trust`, rotate) is in [Upgrading from murk 0.15](https://murk.interrupted.sh/guides/upgrading/#when-murk-says-the-pin-no-longer-records-a-removal).
 - **Another vault.** A sidecar whose `vault_id` differs from the pin's is ignored, with a warning, and the next write replaces it.
 - **No pin file.** A sidecar whose pin file is missing applies when it holds any record (removals, revocation ids, re-admissions, sightings, deleted groups, retired paths or members at a mark) and the vault at the path has the sidecar's `vault_id`. It then counts as a pin with those records and no trust decision, so a load still needs `murk trust`. So deleting a corrupt pin file, as its error says, keeps the sidecar's records.
 
@@ -881,7 +881,7 @@ The driver also takes git's merge base as given and cannot tell that ours alread
 - Fine-grained audit logging: use a secrets server for regulated environments.
 - Malicious recipients: any authorized recipient can decrypt all shared secrets.
 - A genuine revision from a stale fork with a higher counter, and a merge or cherry-pick that applies again a change ours already undid ([THREAT_MODEL.md](THREAT_MODEL.md#vault-signatures), what it does not prevent, items 8, 10 and 11). On a machine that recorded a removal, or saw a grant revoked, such a revision does not bring that member or grant back.
-- An older murk component (0.15 or earlier) on the same machine: it does not check removal records or revoked grants, and its saves drop the vault's record of revoked grants.
+- An older murk component (0.15.2 or earlier) on the same machine: it does not check removal records or revoked grants, and its saves drop the vault's record of revoked grants.
 - A process that runs as your OS user. It can read your key store and edit your trust pin. Only OS isolation contains it.
 
 **Treat your key like your SSH private key.** Never commit it. Never share it. This holds for a key file and for `MURK_KEY`.
