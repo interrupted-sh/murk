@@ -469,7 +469,8 @@ fn refuse_unsafe_recipients(vault: &types::Vault) -> Result<(), MurkError> {
 /// snapshot of the pin, the vault file, the branch and the commit, and
 /// renames the result over the vault file only if none of them changed. When
 /// the trust state changed, it starts again from `vault` as the caller
-/// passed it, up to [`crate::pins::PUBLISH_ATTEMPTS`] times. When the vault
+/// passed it, up to [`crate::pins::PUBLISH_ATTEMPTS`] times with a short
+/// random wait before each new attempt ([`crate::pins::backoff`]). When the vault
 /// file changed, it stops. Either way a failed save writes nothing. The
 /// caller may hold the vault lock, never the pin lock.
 pub fn save_vault(
@@ -484,6 +485,7 @@ pub fn save_vault(
     let loaded = vault.clone();
     for attempt in 1..=crate::pins::PUBLISH_ATTEMPTS {
         if attempt > 1 {
+            crate::pins::backoff(attempt);
             *vault = loaded.clone();
         }
         let snapshot = crate::pins::Snapshot::take(vault_path, Path::new(vault_path))
@@ -521,10 +523,11 @@ pub fn save_vault(
 }
 
 /// The error when the trust state for `vault_path` changed on every attempt
-/// of a save or merge (`doing`).
+/// of a save or merge (`doing`). The usual cause is sibling worktrees: each
+/// save there rewrites the shared pin.
 pub(crate) fn trust_state_changed(vault_path: &str, doing: &str) -> String {
     format!(
-        "the trust state for {vault_path} changed {} times while murk was {doing}. Nothing was written. Run the command again.",
+        "nothing was written: the trust state for {vault_path} changed {} times while murk was {doing}, because other murk processes on this machine (for example in other worktrees of this repository) were saving at the same time. Running the command again is safe.",
         crate::pins::PUBLISH_ATTEMPTS
     )
 }
@@ -2435,8 +2438,8 @@ mod tests {
 
     #[test]
     fn row_r_i5_race_limit() {
-        // The trust state changes before every publish: after three
-        // attempts the save stops and writes nothing.
+        // The trust state changes before every publish: after
+        // PUBLISH_ATTEMPTS attempts the save stops and writes nothing.
         let (alice_secret, alice) = generate_keypair();
         let _env = murk_key_env(&alice_secret);
         let dir = tempfile::tempdir().unwrap();
@@ -2445,8 +2448,8 @@ mod tests {
 
         let pin_file = crate::pins::pin_path(&ps).unwrap();
         let runs = before_publish(move |run| {
-            // Stop after ten, so a save that never gives up still ends.
-            if run <= 10 {
+            // Stop after twenty, so a save that never gives up still ends.
+            if run <= 20 {
                 let mut bytes = fs::read(&pin_file).unwrap();
                 bytes.push(b'\n');
                 fs::write(&pin_file, bytes).unwrap();
@@ -2455,9 +2458,11 @@ mod tests {
         let err = save_vault(&ps, &mut vault.clone(), &state, &changed)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("changed 3 times"), "{err}");
-        assert!(err.contains("Nothing was written"), "{err}");
-        assert_eq!(runs.get(), 3);
+        let attempts = crate::pins::PUBLISH_ATTEMPTS;
+        assert!(err.contains("changed 16 times"), "{err}");
+        assert!(err.contains("Running the command again is safe"), "{err}");
+        assert!(err.contains("nothing was written"), "{err}");
+        assert_eq!(runs.get(), attempts);
         assert_eq!(
             fs::read(&ps).unwrap(),
             before,

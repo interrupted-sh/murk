@@ -4,7 +4,7 @@
      vault: &mut types::Vault,
      saver: &crypto::MurkIdentity,
  ) -> Result<vault::Staged, MurkError> {
-+    let held = crate::pins::lock(vault_path).map_err(MurkError::Trust)?;
++    let held = crate::pins::lock(vault_path).map_err(|e| MurkError::Trust(e.into()))?;
      #[cfg(test)]
      crate::pins::test_hooks::run(&crate::pins::test_hooks::BEFORE_SIGN);
      vault.sig = None;

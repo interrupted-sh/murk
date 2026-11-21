@@ -883,24 +883,56 @@ impl Drop for PinLock {
     }
 }
 
+/// Why the pin lock could not be taken.
+#[derive(Debug)]
+pub(crate) struct LockError {
+    message: String,
+    /// The pin directory or the lock file cannot be created or opened for
+    /// writing: permission denied, or a read-only file system.
+    read_only: bool,
+}
+
+impl From<LockError> for String {
+    fn from(e: LockError) -> Self {
+        e.message
+    }
+}
+
+impl LockError {
+    fn io(what: &str, path: &Path, e: &std::io::Error) -> Self {
+        Self {
+            message: format!("cannot {what} {}: {e}", path.display()),
+            read_only: matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ),
+        }
+    }
+}
+
 /// Take the pin lock for `vault_path`. Errors when there is no home
 /// directory, or when this thread already holds a pin lock.
-pub(crate) fn lock(vault_path: &str) -> Result<PinLock, String> {
-    let path = pin_path(vault_path)
-        .ok_or_else(|| "no home directory to keep the trust pin in".to_string())?;
+pub(crate) fn lock(vault_path: &str) -> Result<PinLock, LockError> {
+    let path = pin_path(vault_path).ok_or_else(|| LockError {
+        message: "no home directory to keep the trust pin in".to_string(),
+        read_only: false,
+    })?;
     open_lock(&path)
 }
 
 /// Open and take the exclusive lock of the pin file `path`: `<pin>.lock`.
-fn open_lock(path: &Path) -> Result<PinLock, String> {
+fn open_lock(path: &Path) -> Result<PinLock, LockError> {
     use fs2::FileExt;
 
-    check_lock_order()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("invalid trust pin path {}", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    check_lock_order().map_err(|message| LockError {
+        message,
+        read_only: false,
+    })?;
+    let parent = path.parent().ok_or_else(|| LockError {
+        message: format!("invalid trust pin path {}", path.display()),
+        read_only: false,
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| LockError::io("create", parent, &e))?;
     let lock_path = path.with_extension("lock");
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).truncate(false).write(true);
@@ -911,16 +943,32 @@ fn open_lock(path: &Path) -> Result<PinLock, String> {
     }
     let file = opts
         .open(&lock_path)
-        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
-    file.lock_exclusive()
-        .map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
+        .map_err(|e| LockError::io("open", &lock_path, &e))?;
+    file.lock_exclusive().map_err(|e| LockError {
+        message: format!("cannot lock {}: {e}", lock_path.display()),
+        read_only: false,
+    })?;
     PIN_LOCKS_HELD.with(|n| n.set(n.get() + 1));
     Ok(PinLock { file })
 }
 
 /// How many times a save or a merge prepares its result when the trust
-/// state changes before it can publish (see [`Snapshot`]).
-pub const PUBLISH_ATTEMPTS: u32 = 3;
+/// state changes before it can publish (see [`Snapshot`]). Sibling
+/// worktrees share one pin, and each save there rewrites it, so with
+/// several worktrees saving at once an attempt often loses the race; the
+/// wait before the next one ([`backoff`]) spreads the attempts out.
+pub const PUBLISH_ATTEMPTS: u32 = 16;
+
+/// Wait before publish attempt `next` (2 to [`PUBLISH_ATTEMPTS`]) after the
+/// trust state changed: a random time up to 25 ms × 2^(next − 2), at most
+/// 400 ms. The waits of one save or merge add up to at most 4.8 s. A full
+/// random range spreads the waiting saves apart best. The caller holds no
+/// pin lock while it waits.
+pub fn backoff(next: u32) {
+    let cap_ms: u64 = (25 << next.saturating_sub(2).min(4)).min(400);
+    let ms = rand::random_range(0..=cap_ms);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
 
 /// What a save, a keyed merge or a `murk trust` re-sign decided against:
 /// the pin and sidecar bytes, the target file's bytes, and the branch and
@@ -995,6 +1043,12 @@ impl Snapshot {
     /// is already written. Without a pin and without pin writes there is no
     /// pin lock: only the target file is compared.
     ///
+    /// When the pin directory is not writable (permission denied, or a
+    /// read-only file system) and no pin or sidecar exists for the vault,
+    /// the publish goes on without the pin lock, writes no pin and no
+    /// sidecar, and warns once the target is written. When a pin or sidecar
+    /// exists, it fails and writes nothing.
+    ///
     /// The rename is the only write to the target, so a crash leaves the
     /// old file or the new one. A crash before the pin write leaves the pin
     /// as it was, which records nothing that was not published.
@@ -1008,12 +1062,45 @@ impl Snapshot {
     {
         #[cfg(test)]
         test_hooks::run(&test_hooks::BEFORE_LOCK);
-        let writes = signer_pin_available();
+        let mut writes = signer_pin_available();
         let needs_lock = pin_path(&self.vault_path).is_some()
             && (writes || self.token.pin.file.is_some() || self.token.pin.sidecar.is_some());
         // Lock order: the caller may hold the vault lock; this takes the
         // pin lock after it, and nothing below takes another lock.
-        let _lock = needs_lock.then(|| lock(&self.vault_path)).transpose()?;
+        let mut unlocked = None;
+        let _lock = match needs_lock.then(|| lock(&self.vault_path)).transpose() {
+            Ok(lock) => lock,
+            // No pin and no sidecar for this vault: the decision rests on no
+            // recorded trust state, so no concurrent writer (a host process
+            // sharing a read-only bind mount, say) can change what it was
+            // made against. Publish as murk 0.15.2 did, without the lock and
+            // without a pin write. The comparison below still refuses a
+            // target, or a pin or sidecar, that appeared since the snapshot.
+            Err(e)
+                if e.read_only
+                    && self.token.pin.file.is_none()
+                    && self.token.pin.sidecar.is_none() =>
+            {
+                unlocked = Some((e.message, writes && record.is_some()));
+                writes = false;
+                None
+            }
+            // A pin or sidecar exists: another process that shares the
+            // directory may still write it (a revocation from the host of a
+            // read-only bind mount), so the publish needs the lock.
+            Err(e) if e.read_only => {
+                let dir = pin_path(&self.vault_path)
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "{}. The trust pin directory {} is read-only, and it holds a trust pin for {}, so murk cannot write the vault under the pin's lock. Nothing was written. Run murk with a writable HOME. (MURK_NO_SIGNER_PIN helps only on a machine that has no pin for this vault.)",
+                    e.message,
+                    dir.display(),
+                    self.vault_path
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
         if read_target(&self.target)? != self.token.target {
             return Ok(Publish::TargetChanged);
         }
@@ -1026,6 +1113,17 @@ impl Snapshot {
         #[cfg(test)]
         test_hooks::run(&test_hooks::UNDER_LOCK);
         staged.persist(&self.target).map_err(|e| e.to_string())?;
+        match unlocked {
+            Some((cause, true)) => eprintln!(
+                "warn {cause}. {} is written, but the trust pin is not updated: the trusted signers, groups, grants, rollback mark, branch and commit of this save are not recorded",
+                self.target.display()
+            ),
+            Some((cause, false)) => eprintln!(
+                "warn {cause}. {} is written without the trust pin lock",
+                self.target.display()
+            ),
+            None => {}
+        }
         if let Some(record) = record.filter(|_| writes) {
             let pin = record(self.pin.as_ref(), &head, commit.as_deref());
             if let Err(e) = write(&self.vault_path, &pin) {

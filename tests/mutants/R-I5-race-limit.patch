@@ -1,11 +1,11 @@
 --- a/src/pins.rs
 +++ b/src/pins.rs
-@@ -683,7 +683,7 @@
- 
- /// How many times a save or a merge prepares its result when the trust
- /// state changes before it can publish (see [`Snapshot`]).
--pub const PUBLISH_ATTEMPTS: u32 = 3;
+@@ -957,7 +957,7 @@
+ /// worktrees share one pin, and each save there rewrites it, so with
+ /// several worktrees saving at once an attempt often loses the race; the
+ /// wait before the next one ([`backoff`]) spreads the attempts out.
+-pub const PUBLISH_ATTEMPTS: u32 = 16;
 +pub const PUBLISH_ATTEMPTS: u32 = u32::MAX;
  
- /// What a save, a keyed merge or a `murk trust` re-sign decided against:
- /// the pin and sidecar bytes, the target file's bytes, and the branch and
+ /// Wait before publish attempt `next` (2 to [`PUBLISH_ATTEMPTS`]) after the
+ /// trust state changed: a random time up to 25 ms × 2^(next − 2), at most
