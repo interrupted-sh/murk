@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1600,7 +1600,7 @@
-             })
-             .unwrap_or_else(|| since.to_string()),
+@@ -1737,7 +1737,7 @@
+         }
+         Listing::Unreadable => return HistoryCheck::Unavailable,
      };
--    let Some((revisions, more)) = first_parent_revisions(dir, name, &format!("{bound}..HEAD"))
-+    let Some((revisions, more)) = first_parent_revisions(dir, name, "HEAD")
-     else {
+-    let range = format!("{bound}..HEAD");
++    let range = format!("HEAD");
+     let Some((revisions, more)) = vault_revisions(dir, name, &["--full-history", &range]) else {
          return HistoryCheck::Unavailable;
      };

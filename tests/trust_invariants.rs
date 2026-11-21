@@ -204,6 +204,11 @@ enum PrMerge {
     /// vault alone, the topic's commits are replayed onto it with new ids,
     /// and the topic branch is then deleted.
     Rebase,
+    /// A squash merge, topic branch deleted; then the stale fork arrives on
+    /// a branch off the same base that merges `main` with `-s ours` (its
+    /// vault stays the fork's), and `main` fast-forwards to it: the drop is
+    /// only a second-parent ancestor of `main`'s tip.
+    OursFastForward,
 }
 
 /// What a machine checks out before it loads.
@@ -790,11 +795,16 @@ fn op() -> BoxedStrategy<Op> {
         ),
         (
             2,
-            (m(), 0..4usize, 0..3usize)
+            (m(), 0..4usize, 0..4usize)
                 .prop_map(|(m, n, how)| Op::PrFlow {
                     m,
                     n,
-                    merge: [PrMerge::FastForward, PrMerge::Squash, PrMerge::Rebase][how],
+                    merge: [
+                        PrMerge::FastForward,
+                        PrMerge::Squash,
+                        PrMerge::Rebase,
+                        PrMerge::OursFastForward,
+                    ][how],
                 })
                 .boxed(),
         ),
@@ -3590,7 +3600,7 @@ impl<'f> World<'f> {
             PrMerge::FastForward => {
                 mach.git_ok(&["merge", "-q", "--ff-only", &topic]);
             }
-            PrMerge::Squash => {
+            PrMerge::Squash | PrMerge::OursFastForward => {
                 mach.git_ok(&["merge", "-q", "--squash", &topic]);
                 mach.commit(&format!("s{step} squash {topic}"));
             }
@@ -3607,8 +3617,19 @@ impl<'f> World<'f> {
             self.carried.entry(revoked).or_default().insert(head(&mach));
         }
         let merged = head(&mach);
-        fs::write(mach.dir.join(".murk"), &stale).unwrap();
-        mach.commit(&format!("s{step} replay"));
+        if merge == PrMerge::OursFastForward {
+            let ours = format!("ours{step}");
+            mach.git_ok(&["checkout", "-q", "-f", "-B", &ours, &base]);
+            fs::write(mach.dir.join(".murk"), &stale).unwrap();
+            mach.commit(&format!("s{step} stale fork"));
+            mach.git_ok(&["merge", "-q", "-s", "ours", "--no-edit", "main"]);
+            mach.git_ok(&["checkout", "-q", "-f", "main"]);
+            mach.git_ok(&["merge", "-q", "--ff-only", &ours]);
+            mach.git_ok(&["branch", "-q", "-D", &ours]);
+        } else {
+            fs::write(mach.dir.join(".murk"), &stale).unwrap();
+            mach.commit(&format!("s{step} replay"));
+        }
         let obs = Obs::Machine(m);
         let decisive = self
             .removals(&obs)
@@ -3627,6 +3648,7 @@ impl<'f> World<'f> {
                 PrMerge::FastForward => {}
                 PrMerge::Squash => self.stats.count(PR_FLOW_SQUASH_DECISIVE, true),
                 PrMerge::Rebase => self.stats.count(PR_FLOW_REBASE_DECISIVE, true),
+                PrMerge::OursFastForward => self.stats.count(PR_FLOW_OURS_FF_DECISIVE, true),
             }
         }
         mach.git_ok(&["reset", "-q", "--hard", &merged]);
@@ -4906,6 +4928,24 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                 .decisive(),
             ],
         ),
+        // The same pull request squash-merged, then the stale fork's branch
+        // merges main with `-s ours` and main fast-forwards to it: the drop
+        // is only a second-parent ancestor of main's tip. Refused.
+        (
+            "a squash-merged removal holds after an ours-merge fast-forward brings the stale fork onto main",
+            vec![
+                accepts(Op::Load {
+                    m: bob_m,
+                    at: At::Main,
+                }),
+                refuses(Op::PrFlow {
+                    m: bob_m,
+                    n: 0,
+                    merge: PrMerge::OursFastForward,
+                })
+                .decisive(),
+            ],
+        ),
         // R-I10-h:branch-current: bob's machine saved ahead on a feature
         // branch, then loads main's revoke of carol below its highest
         // counter; it still records the removal, so the stale fork later
@@ -4955,6 +4995,10 @@ const PR_FLOW_SQUASH_DECISIVE: &str = "pr-flow-squash:decisive";
 /// The rebase-merge part of [`PR_FLOW_DECISIVE`]. Printed, not floored, as
 /// [`PR_FLOW_SQUASH_DECISIVE`]; a stored sequence builds it every run.
 const PR_FLOW_REBASE_DECISIVE: &str = "pr-flow-rebase:decisive";
+/// The `-s ours` then fast-forward part of [`PR_FLOW_DECISIVE`]. Printed,
+/// not floored, as [`PR_FLOW_SQUASH_DECISIVE`]; a stored sequence builds it
+/// every run.
+const PR_FLOW_OURS_FF_DECISIVE: &str = "pr-flow-ours-ff:decisive";
 /// The stats kind of a removal loaded as its branch's next state below the
 /// machine's highest counter, then held against a stale fork on that branch
 /// (see [`Op::BranchCurrent`]).

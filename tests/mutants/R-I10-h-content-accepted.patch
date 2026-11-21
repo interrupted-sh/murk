@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1596,7 +1596,7 @@
-             .and_then(|(revisions, _)| {
-                 revisions
-                     .into_iter()
--                    .find(|r| listing(&mut batch, r) == Some(true))
-+                    .find(|_| false)
-             })
-             .unwrap_or_else(|| since.to_string()),
+@@ -1712,7 +1712,7 @@
+         broken: false,
      };
+     let bound = match reader.at(since) {
+-        Listing::Lists(true) => since.to_string(),
++        Listing::Lists(_) | Listing::Absent => since.to_string(),
+         Listing::Lists(false) | Listing::Absent => {
+             let Some((revisions, more)) = vault_revisions(dir, name, &["--first-parent", since])
+             else {

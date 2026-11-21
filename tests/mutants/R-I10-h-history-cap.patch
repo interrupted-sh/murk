@@ -1,6 +1,6 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1540,7 +1540,7 @@
+@@ -1607,7 +1607,7 @@
          .filter(|r| is_commit_id(r))
          .map(str::to_string)
          .collect();
