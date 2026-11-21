@@ -1,11 +1,11 @@
 --- a/src/commands/trust.rs
 +++ b/src/commands/trust.rs
-@@ -60,6 +60,8 @@
-             .into_iter()
-             .partition(|k| removed.contains_key(k));
-     if !unlisted.is_empty() {
+@@ -90,6 +90,8 @@
+             .iter()
+             .map(|k| murk_cli::canonical_recipient(k).into_owned())
+             .collect();
 +        die(&"not listed", 1);
 +        #[allow(unreachable_code)]
-         clear_removal_records(yes, vault_path, &unlisted);
+         clear_removal_records(yes, vault_path, &unlisted, &listed);
          if readmit.is_empty() && shares_with.is_none() {
              // Consent given before the vault lists them: nothing else to do.

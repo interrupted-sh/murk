@@ -1060,7 +1060,9 @@ fn read_held(vault_path: &str) -> Result<Option<TrustPin>, String> {
 ///    `cat-file --batch-check`, `rev-list --first-parent <commit> -- <path>`,
 ///    `rev-list --full-history <commit>..HEAD -- <path>`,
 ///    `rev-list --no-walk --parents --stdin`, `config --get`,
-///    `diff --quiet HEAD --`), which take no `index.lock`.
+///    `config --get-regexp`, `diff --quiet HEAD --`), which take no
+///    `index.lock`. It also reads the shallow file `rev-parse --git-path
+///    shallow` names.
 /// 4. The pin lock is never held across a signature, a confirmation prompt
 ///    or an editor session.
 ///

@@ -258,7 +258,7 @@ pub enum Refusal {
         removed_at: u64,
         found: u64,
         signer: bool,
-        unchecked: Option<String>,
+        unchecked: Option<crate::git::HistoryCheck>,
     },
     /// A different vault with the generation this machine accepted on the
     /// branch (or outside git): the branch was rewritten, or another save
@@ -652,30 +652,27 @@ impl Checkout {
         {
             return None;
         }
-        if let Some(&known) = self.reached.borrow().get(key) {
-            return Some(known);
+        if let Some(known) = self.reached.borrow().get(key) {
+            return Some(known.clone());
         }
         let found = removal_in_history(vault, pin, key, on);
-        self.reached.borrow_mut().insert(key.to_string(), found);
+        self.reached
+            .borrow_mut()
+            .insert(key.to_string(), found.clone());
         Some(found)
     }
 
     /// Why git could not show whether `key`'s removal is in this branch's
-    /// history, when that is why the removal applies here: the history is
-    /// past [`crate::git::VAULT_HISTORY_CAP`], or not all of it is available.
-    /// `None` when the removal applies by name or by history, or not at all.
-    pub fn history_unchecked(&self, pin: &TrustPin, key: &str) -> Option<String> {
-        match self.history(pin, key)? {
-            crate::git::HistoryCheck::TooLong => Some(format!(
-                "its history is too long to check (more than {} revisions of the vault file)",
-                crate::git::VAULT_HISTORY_CAP
-            )),
-            crate::git::HistoryCheck::Unavailable => Some(
-                "its history could not be checked (a shallow or partial clone, a missing object, a vault revision that does not parse, or a git failure)"
-                    .to_string(),
-            ),
-            crate::git::HistoryCheck::Found | crate::git::HistoryCheck::NotFound => None,
-        }
+    /// history, when that is why the removal applies here (see
+    /// [`crate::git::HistoryCheck`]). `None` when the removal applies by name
+    /// or by history, or not at all.
+    pub fn history_unchecked(&self, pin: &TrustPin, key: &str) -> Option<crate::git::HistoryCheck> {
+        self.history(pin, key).filter(|h| {
+            !matches!(
+                h,
+                crate::git::HistoryCheck::Found | crate::git::HistoryCheck::NotFound
+            )
+        })
     }
 }
 
@@ -713,13 +710,10 @@ impl Checkout {
 ///    does not undo it (only this machine's own `circle authorize` or `murk
 ///    trust --re-add` does).
 ///
-/// When git cannot tell (no recorded commit, a shallow or partial clone, a
-/// missing object, a vault revision that does not parse, a git failure, a
-/// history past the cap), this answers
-/// [`crate::git::HistoryCheck::TooLong`] or
-/// [`crate::git::HistoryCheck::Unavailable`], and the removal applies: a
-/// repo writer who pads the history or commits junk gets a refusal, never a
-/// load.
+/// When git cannot tell (see [`crate::git::vault_history_drops`]; also no
+/// recorded commit, [`crate::git::HistoryCheck::Gone`]), the answer is one of
+/// the undecided kinds and the removal applies: a repo writer who pads the
+/// history or commits junk gets a refusal, never a load.
 fn removal_in_history(
     abs_vault: &std::path::Path,
     pin: &TrustPin,
@@ -728,7 +722,7 @@ fn removal_in_history(
 ) -> crate::git::HistoryCheck {
     use crate::git::HistoryCheck;
     let (Some(commit), Some(dir)) = (pin.removed_at_commit.get(key), abs_vault.parent()) else {
-        return HistoryCheck::Unavailable;
+        return HistoryCheck::Gone;
     };
     let lists = |bytes: &[u8]| {
         let vault = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
@@ -2051,7 +2045,7 @@ fn merge_side_counter_or_removal(
                 ));
             }
             return Some(format!(
-                "it lists {}, who was removed from this vault at generation {at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them. To accept a deliberate re-add, abort the merge (`git merge --abort`) and review the change with `murk diff`. Then do one of these: merge again, keep this side (`git checkout --theirs -- {vault_path}`), run `murk trust --vault {vault_path} --re-add {canonical}`, and make the other side's vault changes again with murk. Or run `murk circle authorize` for them on this branch, commit, and merge again",
+                "it lists {}, who was removed from this vault at generation {at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them. To accept a deliberate re-add, abort the merge (`git merge --abort`) and review the change with `murk diff`. Then do one of these: merge again, keep this side (`git checkout --theirs -- {vault_path}`), run `murk trust --vault {vault_path} --re-add {canonical}` ({READD_SCOPE}), and make the other side's vault changes again with murk. Or run `murk circle authorize` for them on this branch, commit, and merge again",
                 label(side.names, r)
             ));
         }
@@ -3043,6 +3037,18 @@ fn unsigned_refusal_message(
     )
 }
 
+/// What `murk trust --re-add` does, for every message that offers it: the
+/// removal record goes for every branch on this machine, not only this one.
+pub const READD_SCOPE: &str = "it trusts them again on every branch on this machine, including branches that did merge the removal";
+
+/// How to re-add `key` (canonical) on purpose after review, with what that
+/// does on this machine.
+fn readd_way(vault_path: &str, key: &str) -> String {
+    format!(
+        "review it (`murk diff`), then run `murk trust --vault {vault_path} --re-add {key}` ({READD_SCOPE}), or `murk circle authorize {key}` to re-add them in the vault"
+    )
+}
+
 /// The message for [`Refusal::RemovedKey`] when the removal applies only
 /// because git could not show whether this branch's history holds it.
 pub fn unchecked_removal_message(
@@ -3050,23 +3056,60 @@ pub fn unchecked_removal_message(
     loaded: &Loaded<'_>,
     key: &str,
     removed_at: u64,
-    why: &str,
+    why: &crate::git::HistoryCheck,
 ) -> String {
     unchecked_removal_text(vault_path, &label(loaded.names, key), key, removed_at, why)
 }
 
 /// The text of [`unchecked_removal_message`], for a caller with the label of
-/// `key` (canonical) already made.
+/// `key` (canonical) already made. The way out names what helps in each
+/// case: fetching the missing history first where that can help, and only
+/// then a deliberate re-add.
 pub fn unchecked_removal_text(
     vault_path: &str,
     who: &str,
     key: &str,
     removed_at: u64,
-    why: &str,
+    why: &crate::git::HistoryCheck,
 ) -> String {
+    use crate::git::HistoryCheck;
     let key = canonical_recipient(key);
+    let readd = readd_way(vault_path, &key);
+    let after = format!(
+        "if it is still refused because this branch never merged the removal, or to re-add them on purpose, {readd}"
+    );
+    let (cause, way) = match why {
+        HistoryCheck::TooLong => (
+            format!(
+                "its history is too long to check (more than {} revisions of the vault file)",
+                crate::git::VAULT_HISTORY_CAP
+            ),
+            format!("fetching more history cannot help. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+        HistoryCheck::Shallow => (
+            "this is a shallow clone, and the history murk needs is past its boundary".to_string(),
+            format!("fetch the full history with `git fetch --unshallow`, then try again; {after}"),
+        ),
+        HistoryCheck::Partial { remote } => (
+            format!("this is a partial clone of {remote}, and vault revisions murk needs were not downloaded"),
+            format!(
+                "download them with `git fetch --refetch --no-filter {remote}`, then stop filtering later fetches with `git config --unset remote.{remote}.promisor` and `git config --unset remote.{remote}.partialclonefilter`, and try again; {after}"
+            ),
+        ),
+        HistoryCheck::Gone => (
+            "the commit this machine recorded the removal at is not in this repository (the history was rewritten and garbage-collected, or no commit was recorded)".to_string(),
+            format!("fetching cannot bring it back. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+        HistoryCheck::Unreadable | HistoryCheck::Found | HistoryCheck::NotFound => (
+            format!(
+                "a vault revision in its history cannot be read (not a vault, recipients that do not parse, over {} MiB, a missing object, or a git failure)",
+                crate::git::VAULT_BLOB_LIMIT / (1024 * 1024)
+            ),
+            format!("fetching cannot fix a revision committed that way. If this branch never merged the removal, or to re-add them on purpose, {readd}"),
+        ),
+    };
     format!(
-        "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine, and murk cannot tell whether this branch merged that removal: {why}. It may be a stale fork that brings them back, so murk refuses it\nfetch the full history (`git fetch --unshallow`, or without a filter) and try again; if this branch never merged the removal, or to re-add them on purpose, review it (`murk diff`) and run `murk trust --vault {vault_path} --re-add {key}`, or `murk circle authorize {key}`"
+        "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine, and murk cannot tell whether this branch merged that removal: {cause}. It may be a stale fork that brings them back, so murk refuses it\n{way}"
     )
 }
 
@@ -3087,7 +3130,7 @@ fn removed_key_message(
         )
     } else if found > removed_at {
         return format!(
-            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). To trust them again on this machine, run `murk trust --vault {vault_path} --re-add {}`",
+            "vault {vault_path} lists {who}, who was removed from this vault at generation {removed_at} on this machine. This revision (generation {found}) may re-add them on purpose, or it may be a stale fork that still lists them\nreview it (`murk diff`). To trust them again on this machine, run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
             canonical_recipient(key)
         );
     } else {
@@ -3096,7 +3139,7 @@ fn removed_key_message(
         )
     };
     format!(
-        "vault {vault_path} rolled back: {what}; to re-add them on purpose, review it and run `murk trust --vault {vault_path} --re-add {}`",
+        "vault {vault_path} rolled back: {what}; to re-add them on purpose, review it and run `murk trust --vault {vault_path} --re-add {}` ({READD_SCOPE})",
         canonical_recipient(key)
     )
 }

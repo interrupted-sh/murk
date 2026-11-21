@@ -1,0 +1,11 @@
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -1450,7 +1450,7 @@
+ /// exhaust memory. Such a revision counts as unreadable, so the answer is
+ /// [`HistoryCheck::Unreadable`] (a refusal), never a load. A real vault is
+ /// far smaller.
+-pub const VAULT_BLOB_LIMIT: u64 = 8 * 1024 * 1024;
++pub const VAULT_BLOB_LIMIT: u64 = u64::MAX;
+ 
+ /// What [`vault_history_drops`] found.
+ #[derive(Debug, Clone, PartialEq, Eq)]

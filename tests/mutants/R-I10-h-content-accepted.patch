@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1712,7 +1712,7 @@
-         broken: false,
-     };
-     let bound = match reader.at(since) {
--        Listing::Lists(true) => since.to_string(),
-+        Listing::Lists(_) | Listing::Absent => since.to_string(),
-         Listing::Lists(false) | Listing::Absent => {
-             let Some((revisions, more)) = vault_revisions(dir, name, &["--first-parent", since])
-             else {
+@@ -1793,7 +1793,7 @@
+     boundary: &[String],
+ ) -> Result<String, HistoryCheck> {
+     match reader.at(since) {
+-        Listing::Lists(true) => return Ok(since.to_string()),
++        Listing::Lists(_) | Listing::Absent => return Ok(since.to_string()),
+         Listing::Missing => return Err(missing_object(dir)),
+         Listing::Unreadable => return Err(HistoryCheck::Unreadable),
+         Listing::Lists(false) | Listing::Absent => {}

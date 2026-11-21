@@ -1,11 +1,11 @@
 --- a/src/git.rs
 +++ b/src/git.rs
-@@ -1753,7 +1753,7 @@
+@@ -1916,7 +1916,7 @@
          }
          for parent in parents {
              match reader.at(parent) {
 -                Listing::Lists(true) => return HistoryCheck::Found,
 +                Listing::Lists(_) | Listing::Absent => return HistoryCheck::Found,
-                 Listing::Unreadable => unread = true,
-                 Listing::Lists(false) | Listing::Absent => {}
+                 other => note(other),
              }
+         }
