@@ -342,9 +342,21 @@ It exits 0 and prints `ok signature verified by trusted signer <key>` only when 
 - **Signer not trusted.** The signer is not in `MURK_TRUSTED_SIGNERS`.
 - **Signature does not verify.** The vault's content changed after it was signed, or an age signer's entry has a different verifying key. The hint names the merge cause and the local merge.
 
-It does not decrypt, so it does not check the MAC over the values, grant expiry, rollback against earlier saves, the last commit's signature, or the safety checks above. `murk verify` with a key checks those. All lines go to stderr.
+It checks only this: the file parses as a vault, `MURK_TRUSTED_SIGNERS` is set and valid, the vault has a top-level signature, its signer is in the variable, and the signature verifies under the key the variable gives for that signer. These are trust rules 1, 3 and 4 in [SPEC.md](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules), with the variable in place of the trust pin.
 
-It also does not read the trust pin, so it does not apply the [removal and group rules](https://github.com/interrupted-sh/murk/blob/main/SPEC.md#rules). A vault signed by a teammate you removed passes while their entry is in `MURK_TRUSTED_SIGNERS`. A group membership change signed by someone outside the group also passes. When someone leaves, remove their entry from `MURK_TRUSTED_SIGNERS` too. See [offboarding](/guides/offboarding/#what-stops-a-revoked-teammate-coming-back).
+It does not decrypt, so it does not check the MAC over the values, grant expiry, the last commit's signature, or the safety checks above. It reads no trust pin and no sidecar, so it skips trust rules 2 and 5 to 10:
+
+- a stripped signature (rule 2),
+- agent grants (rule 5),
+- the vault id, two files with one vault id, rollback against earlier saves, and `MURK_EXPECTED_VAULT` (rule 6),
+- group membership changes (rule 7),
+- removed keys (rule 8),
+- the counter bounds (rule 9),
+- revoked agent grants (rule 10).
+
+It ignores `MURK_EXPECTED_VAULT` completely, even when the variable is set but empty or does not parse. `murk verify` with a key checks all of these. All lines go to stderr.
+
+So an older revision signed by a trusted signer passes, and so does a vault from another repository that a trusted signer signed. A vault signed by a teammate you removed passes while their entry is in `MURK_TRUSTED_SIGNERS`. A group membership change signed by someone outside the group also passes. When someone leaves, remove their entry from `MURK_TRUSTED_SIGNERS` too. See [offboarding](/guides/offboarding/#what-stops-a-revoked-teammate-coming-back).
 
 ## `murk trust`
 
@@ -354,15 +366,15 @@ Shows who signed the vault, then asks before it records the vault in the local t
 
 `--print-key` prints your own trusted-signer entry to stdout (`age1…:<verifying key>`, or the ssh-ed25519 key line) and your fingerprint to stderr, then exits.
 
-`--re-add KEY` (repeatable; a public key, or a name in the vault) trusts again a key this machine holds as removed or as a revoked agent grant.
+`--re-add KEY` (repeatable) trusts again a key this machine holds as removed or as a revoked agent grant. KEY is a public key, or the name of a recipient that the vault lists. For a key the vault no longer lists, give its public key: the refusal prints it.
 
 - **A removed key.** A vault signed by or listing a key this machine recorded as removed is refused until you name it. murk then asks "trust this vault and re-add the named keys on this machine?" and takes the key out of the removal record. When the vault does not list the key, murk says so, asks, clears the record and writes nothing: "KEY can be listed again in .murk on this machine. The vault file is unchanged". Run it on each machine that recorded the removal, after a member re-adds the key with `murk circle authorize`, or before.
 - **A revoked agent grant.** murk shows the key, the vault's signer, and each revocation id this machine holds for the key, marked "in the vault's revoked grant set" or "seen on this machine". After you confirm, it re-admits exactly those ids. A later revocation of the same key gets a new id, which counts again. When the vault lists the key and its own revoked grant set holds an id for it, murk signs the vault again without those ids, so commit the result. A key that cannot sign is refused there.
 - A name that is neither is an error: "KEY is not a key this machine recorded as removed or as a revoked agent grant".
 
-A re-add made with murk 0.15 or earlier does not count for this release. Run `--re-add` again with this release.
+A re-add of a removed key made with murk 0.15 or earlier does not count for this release. Run `--re-add` again with this release.
 
-`--shares-identity-with OTHER` settles two vault files in one checkout with the same vault id, which murk refuses because it cannot tell them apart. OTHER must be a vault file in the same checkout with that vault id. Review both files first. murk then trusts the vault at `--vault` only, refuses OTHER on this machine from then on, and prints "this machine trusts the vault at .murk only, and refuses OTHER from now on". When OTHER has its own trust pin for that vault id, murk deletes that pin. It does not delete the file OTHER.
+`--shares-identity-with OTHER` settles two vault files in one checkout with the same vault id, which murk refuses because it cannot tell them apart. OTHER must be a vault file in the same checkout with that vault id. Review both files first. murk then trusts the vault at `--vault` only, refuses OTHER on this machine from then on, and prints "this machine trusts the vault at .murk only, and refuses OTHER from now on". When OTHER has its own trust pin for that vault id, murk deletes that pin and its sidecar. The removal records they hold are lost, and murk does not warn about it. It does not delete the file OTHER.
 
 `murk trust` never accepts a vault that `MURK_EXPECTED_VAULT` refuses, two files with one vault id (use `--shares-identity-with`), or a revoked agent grant (use `--re-add`). For these it prints "refusing to trust it".
 
