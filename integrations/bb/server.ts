@@ -32,6 +32,9 @@ function deliveryFilename(threadId: string): string {
 }
 
 const PRIMARY_HOST_TTL_MS = 60_000;
+/** Backoff for a failed provider-coverage call: first retry, then doubling to the cap. */
+const COVER_RETRY_FIRST_MS = 1_000;
+const COVER_RETRY_MAX_MS = 30_000;
 
 const TOOL_IDS = ["murk_plan", "murk_get"];
 const SKILL_IDS = ["murk"];
@@ -401,26 +404,55 @@ export default async function plugin(bb: BbPluginApi) {
     },
   ];
   const coveredProviders = new Set<string>();
+  const coverRetry: { timer: NodeJS.Timeout | null; delayMs: number; failing: boolean; disposed: boolean } = {
+    timer: null,
+    delayMs: COVER_RETRY_FIRST_MS,
+    failing: false,
+    disposed: false,
+  };
 
   // Env contributions are keyed by exact provider id, so cover every provider
   // in the catalog: at load, and again whenever a thread is created, which
   // picks up providers registered after this plugin (boot order, a new custom
-  // ACP agent).
+  // ACP agent). Never rejects. A failed call retries on its own with backoff,
+  // because a thread resumed after a bb restart fires no thread.created.
   async function coverProviders(): Promise<void> {
-    let ids: string[];
     try {
-      ids = (await bb.sdk.providers.catalog()).map((provider) => provider.id);
+      const ids = (await bb.sdk.providers.catalog()).map((provider) => provider.id);
+      for (const id of ids) {
+        if (coveredProviders.has(id)) continue;
+        bb.providers.experimental_contributeEnv(id, () => agentContextEnv);
+        coveredProviders.add(id);
+      }
     } catch (error) {
-      bb.log.warn(`could not list providers for murk agent context: ${error instanceof Error ? error.message : String(error)}`);
+      if (coverRetry.disposed) return;
+      if (!coverRetry.failing) {
+        coverRetry.failing = true;
+        bb.log.warn(
+          `could not cover providers for murk agent context, retrying: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (coverRetry.timer === null) {
+        coverRetry.timer = setTimeout(() => {
+          coverRetry.timer = null;
+          void coverProviders();
+        }, coverRetry.delayMs);
+        coverRetry.delayMs = Math.min(coverRetry.delayMs * 2, COVER_RETRY_MAX_MS);
+      }
       return;
     }
-    for (const id of ids) {
-      if (coveredProviders.has(id)) continue;
-      coveredProviders.add(id);
-      bb.providers.experimental_contributeEnv(id, () => agentContextEnv);
-    }
+    clearTimeout(coverRetry.timer ?? undefined);
+    coverRetry.timer = null;
+    coverRetry.delayMs = COVER_RETRY_FIRST_MS;
+    if (coverRetry.failing) bb.log.info("covered every provider for murk agent context");
+    coverRetry.failing = false;
   }
   bb.events.on("thread.created", () => coverProviders());
+  bb.onDispose(() => {
+    coverRetry.disposed = true;
+    clearTimeout(coverRetry.timer ?? undefined);
+    coverRetry.timer = null;
+  });
 
   // ---- delivered-file cleanup ----------------------------------------------
   bb.events.on("thread.idle", async ({ thread }) => {
@@ -810,9 +842,11 @@ export default async function plugin(bb: BbPluginApi) {
   // already knows the primary host (bb binds bb.sdk before loading plugins).
   void primaryHostId();
 
-  // Start every provider as a murk agent context (see coverProviders). Awaited
-  // so no thread launches before the contributions exist.
-  await coverProviders();
+  // Start every provider as a murk agent context (see coverProviders). Not
+  // awaited: during bb's boot the catalog answers only once every plugin has
+  // loaded (or bb's 30 s settle timeout fires), so awaiting it here holds this
+  // load until the loader times out.
+  void coverProviders();
 
   bb.log.info("murk plugin loaded");
 }

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { PluginAgentConfigurationContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { createFakePluginHost, makeThreadResponse, type FakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { GRANT_MIGRATIONS, GrantStore, isExpired } from "./lib/grants";
 import { renderDotenv } from "./lib/dotenv";
@@ -254,28 +254,85 @@ describe("agent context env", () => {
     expect(await contributedEnv("acp-late")).toMatchObject({ MURK_AGENT: "1" });
   });
 
-  it("contributes before load resolves, even when the catalog answers late", async () => {
-    const slow = createFakePluginHost({
+  it("finishes loading while the catalog is pending, then covers every provider once it answers", async () => {
+    // During bb's boot the catalog answers only after every plugin has loaded,
+    // so a load that waits on it never finishes.
+    const { promise: pending, resolve: answer } = Promise.withResolvers<Array<{ id: string }>>();
+    const booting = createFakePluginHost({
       pluginId: "murk",
-      dataDir: path.join(tmpRoot, "bb-data-slow"),
+      dataDir: path.join(tmpRoot, "bb-data-booting"),
+      agentSkillIds: ["murk"],
+      sdk: {
+        system: { config: async () => ({ primaryHostId: LOCAL_HOST }) },
+        providers: { catalog: () => pending },
+      },
+    });
+    try {
+      await plugin(booting.bb);
+
+      const ids = ["acp-omp", "claude-code", "codex"];
+      answer(ids.map((id) => ({ id })));
+      await vi.waitFor(async () => {
+        for (const id of ids) {
+          const entries = await booting.harness.behavior.resolveProviderEnv(id, envContext);
+          expect(entries.map(({ name }) => name).sort()).toEqual(["MURK_AGENT", "MURK_KEY", "MURK_KEY_FILE"]);
+        }
+      });
+    } finally {
+      await booting.harness.lifecycle.dispose();
+    }
+  });
+
+  it("retries a failed catalog with backoff until every provider is covered, with no thread.created", async () => {
+    vi.useFakeTimers();
+    const ids = ["acp-omp", "claude-code"];
+    let calls = 0;
+    const flaky = createFakePluginHost({
+      pluginId: "murk",
+      dataDir: path.join(tmpRoot, "bb-data-flaky"),
       agentSkillIds: ["murk"],
       sdk: {
         system: { config: async () => ({ primaryHostId: LOCAL_HOST }) },
         providers: {
-          // Answers after other load work has had several turns to finish.
           catalog: async () => {
-            for (let turn = 0; turn < 20; turn++) await Promise.resolve();
-            return [{ id: "acp-slow" }];
+            calls += 1;
+            if (calls <= 3) throw new Error("catalog unavailable");
+            return ids.map((id) => ({ id }));
           },
         },
       },
     });
     try {
-      await plugin(slow.bb);
-      const entries = await slow.harness.behavior.resolveProviderEnv("acp-slow", envContext);
-      expect(entries.map(({ name }) => name)).toContain("MURK_AGENT");
+      await plugin(flaky.bb);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toBe(1);
+
+      // Retries after 1 s, then 2 s, then 4 s; never two at once.
+      await vi.advanceTimersByTimeAsync(999);
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls).toBe(2);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(calls).toBe(3);
+      expect(await flaky.harness.behavior.resolveProviderEnv("acp-omp", envContext)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(calls).toBe(4);
+
+      for (const id of ids) {
+        const entries = await flaky.harness.behavior.resolveProviderEnv(id, envContext);
+        expect(entries.map(({ name }) => name).sort()).toEqual(["MURK_AGENT", "MURK_KEY", "MURK_KEY_FILE"]);
+      }
+      const warnings = flaky.harness.inspection.logEntries.filter(
+        (entry) => entry.level === "warn" && entry.message.includes("could not cover providers"),
+      );
+      expect(warnings).toHaveLength(1);
+
+      // Covered: no further retries.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(calls).toBe(4);
     } finally {
-      await slow.harness.lifecycle.dispose();
+      vi.useRealTimers();
+      await flaky.harness.lifecycle.dispose();
     }
   });
 });
