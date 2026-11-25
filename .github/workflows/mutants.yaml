@@ -8,9 +8,10 @@ name: Mutants
 #   suites, because many of its guards are held only by the integration tests.
 # Weekly (and on demand) both run in full, sharded so every job stays under two
 # hours, far inside GitHub's 6-hour limit. Nightly and on pull requests the
-# trust profile runs on the code the recent diff touched. Every sharded section
-# goes through scripts/mutants-step.sh, which fails a shard that selected no
-# mutants. .github/workflows/watchdog.yaml opens or updates the tracking issue
+# trust profile runs on the code the recent diff touched, in as many shards as
+# that diff needs. Every sharded section goes through scripts/mutants-step.sh,
+# which fails a shard that selected no mutants.
+# .github/workflows/watchdog.yaml opens or updates the tracking issue
 # when a scheduled run fails, is cancelled, times out or never runs.
 on:
   schedule:
@@ -32,6 +33,12 @@ on:
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels that pull request's earlier run (all of
+# its shards at once); scheduled and manual runs never cancel each other.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('mutants-pr-{0}', github.ref) || format('mutants-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -195,15 +202,62 @@ jobs:
 
   # The trust profile on the code a diff touched: on a pull request, its diff
   # against the base branch; nightly, the last week of main. A diff that
-  # touches no trust-profile code selects no mutant, which is fine here.
-  trust-diff:
-    name: trust profile on changed code
+  # touches no trust-profile code selects no mutant, which is fine here: the
+  # plan job then starts no shard. A big diff is too much for one job (the
+  # 0.15.3 week was 646 mutants at about 105 s each, 19 hours), so the plan
+  # job lists the selected mutants and asks for one shard per 30. A shard is
+  # then about 50 minutes of mutants plus 7 of setup and baseline.
+  trust-diff-plan:
+    name: trust profile on changed code (plan)
     if: github.event_name == 'pull_request' || github.event.schedule == '30 3 * * *'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      shards: ${{ steps.plan.outputs.shards }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version 25.3.1
+      - name: Diff to test and shards to run
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PER_SHARD: 30
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            base="$(git merge-base "origin/$BASE_REF" HEAD)"
+          else
+            base="$(git rev-list -1 --before='7 days ago' HEAD)"
+          fi
+          git diff "$base" HEAD -- src >target-diff.patch
+          count=$(cargo mutants --list --config .cargo/mutants-trust.toml \
+            --in-diff target-diff.patch | wc -l)
+          shards=$(( (count + PER_SHARD - 1) / PER_SHARD ))
+          echo "Diff against $base: $(grep -c '^@@' target-diff.patch || true) hunks, $count mutants, $shards shards"
+          {
+            echo "base=$base"
+            echo "shards=$shards"
+            echo "matrix=$(seq 0 $((shards - 1)) | jq -sc .)"
+          } >>"$GITHUB_OUTPUT"
+
+  trust-diff:
+    name: trust profile on changed code ${{ matrix.shard }}/${{ needs.trust-diff-plan.outputs.shards }}
+    needs: trust-diff-plan
+    if: needs.trust-diff-plan.outputs.shards != '0'
+    runs-on: ubuntu-latest
     timeout-minutes: 120
-    concurrency:
-      group: mutants-diff-${{ github.ref }}
-      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.trust-diff-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,34 +267,23 @@ jobs:
       - uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked --version 25.3.1
-      - name: Diff to test
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" = pull_request ]; then
-            base="$(git merge-base "origin/$BASE_REF" HEAD)"
-          else
-            base="$(git rev-list -1 --before='7 days ago' HEAD)"
-          fi
-          git diff "$base" HEAD -- src >target-diff.patch
-          echo "Diff against $base: $(grep -c '^@@' target-diff.patch || true) hunks"
       - name: Mutation test
+        env:
+          BASE: ${{ needs.trust-diff-plan.outputs.base }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ needs.trust-diff-plan.outputs.shards }}
         run: |
           set -euo pipefail
-          mkdir -p target/mutants
-          if [ ! -s target-diff.patch ]; then
-            echo "No source change to test."
-            exit 0
-          fi
-          cargo mutants --output target/mutants/diff \
-            --config .cargo/mutants-trust.toml --in-diff target-diff.patch
+          git diff "$BASE" HEAD -- src >target-diff.patch
+          scripts/mutants-step.sh "trust profile on changed code $SHARD/$SHARDS" \
+            "target/mutants/diff-$SHARD" \
+            --config .cargo/mutants-trust.toml --in-diff target-diff.patch \
+            --shard "$SHARD/$SHARDS"
       - name: Upload mutation reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutants-diff
+          name: mutants-diff-${{ matrix.shard }}
           path: target/mutants/
 
   # The invariant rows (tests/invariant_rows.tsv) whose guards live in code the
