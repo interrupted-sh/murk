@@ -105,7 +105,17 @@ pub(crate) fn cmd_trust(yes: bool, re_add: &[String], shares_with: Option<&str>,
         ));
     }
 
-    print_summary(vault_path, &inspected);
+    // `decide` leaves a vault that already loads here as it is (with
+    // `--shares-identity-with` it only retires the other path), so the
+    // recipient changes the summary shows are not recorded: say so on each.
+    let already_trusted = readmit.is_empty()
+        && matches!(inspected.assessment.verdict, Verdict::Trusted)
+        && !murk_cli::trust::pre_upgrade_read_only(
+            inspected.assessment.pin.as_ref(),
+            &murk_cli::trust::head_of(vault_path),
+            &inspected.vault,
+        );
+    print_summary(vault_path, &inspected, already_trusted);
     // `murk trust` accepts the vault as current, so a revoked grant it holds
     // is refused here even where a load reads it as history.
     if let Some(refusal) = murk_cli::trust::tombstone_refusal(
@@ -771,11 +781,17 @@ pub(crate) fn cmd_trust_print_key(vault_path: &str) {
 /// Show what the user is being asked to trust: the vault's identity and
 /// counter, the signer's full key (its name is chosen by whoever wrote the
 /// file), and every recipient with its change since this machine last trusted
-/// the vault.
-fn print_summary(vault_path: &str, inspected: &murk_cli::InspectedVault) {
+/// the vault. With `already_trusted` (the vault already loads here, so
+/// `murk trust` records nothing), each change is marked as not recorded.
+fn print_summary(vault_path: &str, inspected: &murk_cli::InspectedVault, already_trusted: bool) {
     let vault = &inspected.vault;
     let murk = &inspected.murk;
     let pin = inspected.assessment.pin.as_ref().filter(|p| p.has_trust());
+    let unrecorded = if already_trusted {
+        format!(" {}", "(not recorded: already trusted)".dimmed())
+    } else {
+        String::new()
+    };
 
     eprintln!("{} {}", "vault".bold(), vault_path);
     eprintln!(
@@ -857,7 +873,7 @@ fn print_summary(vault_path: &str, inspected: &murk_cli::InspectedVault) {
         if grants.contains(&canon) {
             eprintln!("    {label} (agent grant, never a signer)");
         } else if pin.is_some_and(|p| !p.trusted.contains(&canon)) {
-            eprintln!("  {} {label}{fp}", "+".magenta().bold());
+            eprintln!("  {} {label}{fp}{unrecorded}", "+".magenta().bold());
         } else {
             eprintln!("    {label}{fp}");
         }
@@ -883,7 +899,11 @@ fn print_summary(vault_path: &str, inspected: &murk_cli::InspectedVault) {
                     "(not in this copy; stays trusted)".dimmed()
                 );
             } else {
-                eprintln!("  {} {}", "-".red().bold(), murk_cli::truncate_pubkey(gone));
+                eprintln!(
+                    "  {} {}{unrecorded}",
+                    "-".red().bold(),
+                    murk_cli::truncate_pubkey(gone)
+                );
             }
         }
     }

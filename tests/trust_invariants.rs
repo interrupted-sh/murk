@@ -1359,6 +1359,10 @@ struct PinModel {
     trusted: BTreeSet<usize>,
     /// The vault id it accepted (empty before any).
     vault_id: String,
+    /// Branch → the murk 0.13 file `murk trust` accepted there
+    /// (`accepted_pre_upgrade`, SPEC B6). A current acceptance of a 0.14
+    /// vault on the branch supersedes it.
+    accepted_copies: BTreeMap<String, u64>,
 }
 
 impl PinModel {
@@ -1521,6 +1525,7 @@ impl<'f> World<'f> {
                 )]),
                 trusted: world.listed(&bytes),
                 vault_id: vault_id_of(&bytes),
+                accepted_copies: BTreeMap::new(),
             };
             world.pins.insert(obs, model);
         }
@@ -1827,6 +1832,12 @@ impl<'f> World<'f> {
             Took::OwnSave(before) => Some((self.listed(before), generation_of(before))),
             _ => None,
         };
+        // `murk trust` of a murk 0.13 file records it as the copy accepted on
+        // the branch checked out (none on a detached HEAD).
+        let pre_014 = vault_id_of(bytes).is_empty() && found == 0;
+        let copy = (matches!(took, Took::Trust) && pre_014)
+            .then(|| branch.clone())
+            .flatten();
         let Some(pin) = self.pins.get_mut(obs) else {
             // A first acceptance trusts the vault's recipients and drops nobody.
             if !matches!(took, Took::Custom) {
@@ -1840,6 +1851,7 @@ impl<'f> World<'f> {
                             .collect(),
                         trusted: listed,
                         vault_id: vault_id_of(bytes),
+                        accepted_copies: copy.into_iter().map(|b| (b, blob_id(bytes))).collect(),
                     },
                 );
             }
@@ -1917,6 +1929,15 @@ impl<'f> World<'f> {
         };
         if current {
             pin.generation = pin.generation.max(found);
+        }
+        match (copy, &branch) {
+            (Some(b), _) => {
+                pin.accepted_copies.insert(b, blob_id(bytes));
+            }
+            (None, Some(b)) if current && !pre_014 => {
+                pin.accepted_copies.remove(b);
+            }
+            _ => {}
         }
         pin.advance(branch, found, &listed, current);
         if other_vault {
@@ -2626,6 +2647,22 @@ impl<'f> World<'f> {
                 let mach = self.machine(m.0);
                 let bytes = mach.vault();
                 let origin = self.origins.get(&blob_id(&bytes)).copied()?;
+                // `murk trust` leaves a vault that already loads here as it
+                // is. Whether it loads is asked of a load in a throwaway copy
+                // of the machine's HOME, so the real pin is untouched; murk's
+                // trust write is then checked against that load's verdict,
+                // and an accepted probe is judged like any load.
+                let loads = probe_load(&mach, &self.root.join("probe-home")).ok;
+                if loads
+                    && let Err(e) = self.check_accept(
+                        &Obs::Machine(m.0),
+                        &bytes,
+                        "loaded (a probe before murk trust)",
+                        &head(&mach),
+                    )
+                {
+                    return Some(Err(e));
+                }
                 // A reviewer accepts only what no rule here forbids.
                 if (origin.forged && !forgery)
                     || self
@@ -2634,7 +2671,51 @@ impl<'f> World<'f> {
                 {
                     return None;
                 }
+                let pins_before = pin_files(&mach);
                 let out = mach.murk().args(["trust", "--yes"]).output().unwrap();
+                let said_already = stderr(&out).contains("is already trusted on this machine");
+                if said_already && !loads {
+                    return Some(Err(format!(
+                        "murk trust said a vault a load refuses here is already trusted: {}",
+                        stderr(&out)
+                    )));
+                }
+                // A murk 0.13 file is SPEC's B6 case: a copy that loads as
+                // history on a branch is read-only there, and `murk trust`
+                // records it, until the copy accepted on the branch is this
+                // one (see `PinModel::accepted_copies`).
+                let pre_014 = vault_id_of(&bytes).is_empty() && generation_of(&bytes) == 0;
+                let accepted_copy = || {
+                    let branch = branch_of(&mach)?;
+                    let pin = self.pins.get(&Obs::Machine(m.0))?;
+                    Some(pin.accepted_copies.get(&branch) == Some(&blob_id(&bytes)))
+                };
+                let left_alone = loads && (!pre_014 || accepted_copy().unwrap_or(false));
+                if left_alone {
+                    if !out.status.success() || !said_already {
+                        return Some(Err(format!(
+                            "murk trust of a vault that loads here did not leave it as it is: {}",
+                            stderr(&out)
+                        )));
+                    }
+                    if pin_files(&mach) != pins_before {
+                        return Some(Err(
+                            "murk trust of a vault that loads here changed the pin or sidecar"
+                                .into(),
+                        ));
+                    }
+                    return Some(
+                        unchanged(&bytes, &mach.vault(), "murk trust (already trusted)")
+                            .map(|()| Ran::Accepted),
+                    );
+                }
+                if said_already {
+                    return Some(Err(format!(
+                        "murk trust left alone a pre-0.14 copy it had not accepted on this \
+                         branch: {}",
+                        stderr(&out)
+                    )));
+                }
                 if !out.status.success() {
                     return Some(refused(&bytes, &mach.vault(), "murk trust", &out));
                 }
@@ -3893,6 +3974,54 @@ fn export(mach: &Machine) -> Printed {
     Printed::of(&mach.murk().args(["export", "--json"]).output().unwrap())
 }
 
+/// `murk export` on `mach`'s working vault with `probe` as `HOME`, a fresh
+/// copy of the machine's: what a load here would say, with the machine's own
+/// pin and sidecar left as they are.
+fn probe_load(mach: &Machine, probe: &Path) -> Printed {
+    let _ = fs::remove_dir_all(probe);
+    copy_files(&mach.home, probe);
+    let mut cmd = common::murk_bin(probe);
+    cmd.current_dir(&mach.dir)
+        .env("MURK_KEY_FILE", &mach.key_file)
+        .args(["export", "--json"]);
+    let printed = Printed::of(&cmd.output().unwrap());
+    let _ = fs::remove_dir_all(probe);
+    printed
+}
+
+/// Copy the regular files and directories under `from` to `to`, skipping
+/// anything else (an agent's socket).
+fn copy_files(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_files(&entry.path(), &target);
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// The files of `mach`'s trust pins and their sidecars, by name.
+fn pin_files(mach: &Machine) -> BTreeMap<String, Vec<u8>> {
+    fs::read_dir(mach.home.join(".config/murk/signer-pins"))
+        .map(|dir| {
+            dir.map(|e| e.unwrap())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        fs::read(e.path()).unwrap(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Put `bytes` over `mach`'s working vault for the length of `f`, which loads
 /// or writes there, and put the file as it was back afterwards: a vault
 /// replaced on a checkout with no merge, as a pull of rewritten history or a
@@ -4881,6 +5010,49 @@ fn known_sequences() -> Vec<(&'static str, Vec<Scripted>)> {
                     key: K(0),
                 })
                 .decisive(),
+            ],
+        ),
+        (
+            // alice's machine revokes dave; bob authorizes him again and
+            // alice's machine re-adds him on purpose (`murk trust
+            // --re-add`). It then checks out a fixture revision from before
+            // dave was ever added on a new branch, where it loads as history,
+            // and runs `murk trust` there: murk leaves an already-loading
+            // vault as it is and records no removal of dave. So main, which
+            // lists dave again, loads; a stale fork committed there after a
+            // pull-request removal is still refused. (The minimal input of a
+            // soak failure: its oracle recorded the removal at `murk trust`.)
+            "murk trust of a vault that already loads records no removal",
+            vec![
+                accepts(Op::Authorize {
+                    m: alice,
+                    who: dave,
+                }),
+                accepts(Op::Revoke {
+                    m: alice,
+                    who: Target::Person(dave),
+                }),
+                accepts(Op::Push { m: alice }),
+                accepts(Op::Sync { m: alice }),
+                accepts(Op::AuthorizeAgain {
+                    m: alice,
+                    by: alice,
+                }),
+                accepts(Op::Load {
+                    m: alice,
+                    at: At::NewBranch(3),
+                }),
+                accepts(Op::Trust {
+                    m: alice,
+                    forgery: false,
+                }),
+                accepts(Op::Sync { m: alice }),
+                accepts(load_main.clone()).decisive(),
+                refuses(Op::PrFlow {
+                    m: alice,
+                    n: 0,
+                    merge: PrMerge::FastForward,
+                }),
             ],
         ),
         // R-I10-h:pr-flow: bob revokes carol on a topic branch; it merges
