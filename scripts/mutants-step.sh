@@ -15,6 +15,10 @@ name="${1:?usage: scripts/mutants-step.sh <section name> <output dir> [args...]}
 out="${2:?usage: scripts/mutants-step.sh <section name> <output dir> [args...]}"
 shift 2
 
+# cargo-mutants does not create the parent of --output: on a runner with no
+# restored target/ it stops with "create output parent directory".
+mkdir -p "$(dirname "$out")"
+
 status=0
 cargo mutants --output "$out" "$@" || status=$?
 
